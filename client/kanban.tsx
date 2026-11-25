@@ -1,6 +1,8 @@
 import type { AgentRef } from "@getpaseo/plugin/client";
 import { useAgents, useWorkspace } from "@getpaseo/plugin/client";
 import { useMemo } from "react";
+import { useCoordinatorState } from "./coordinator-state";
+import { CompactRequest, FinishedRequests, RequestRow, isActiveRequest, requestCells } from "./request-rows";
 import { Text, View } from "react-native";
 import { AgentCard } from "./agent-card";
 import { COLUMN_KEYS, type ColumnKey, columnColor, columnRank } from "./agent-state";
@@ -120,17 +122,6 @@ function SectionRow({ title, detail, ctx }: { title: string; detail: string; ctx
   );
 }
 
-// 3단계에서 코디네이터 요청 저장소가 생기면 요청마다 한 행씩 그린다. 그 전에는 자리만 보여 준다.
-function RequestRowsPlaceholder({ ctx }: { ctx: ViewContext }) {
-  return (
-    <View style={{ padding: 12, borderBottomWidth: 1, borderColor: ctx.theme.colors.border }}>
-      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>
-        {ctx.t("board.noRequests")}
-      </Text>
-    </View>
-  );
-}
-
 function BoardRow({
   workspaceId,
   cells,
@@ -202,8 +193,27 @@ function CompactBoard({ board, rows, totals, ctx }: { board: Board; rows: readon
  * 요청 하나는 여러 프로젝트에 걸치므로, 워크스페이스가 아니라 요청을 행으로 써야 "어느 요청이 어디서 막혔나"가 한 줄에 보인다.
  */
 export function KanbanBoard({ ctx }: { ctx: ViewContext }) {
-  const { board, rows, totals } = useBoard(ctx.hostId);
-  if (ctx.compact) return <CompactBoard board={board} rows={rows} totals={totals} ctx={ctx} />;
+  const { board, rows, totals: agentTotals } = useBoard(ctx.hostId);
+  const { state } = useCoordinatorState();
+  const requests = state?.requests ?? [];
+  const active = requests.filter(isActiveRequest).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const finished = requests.filter((request) => !isActiveRequest(request)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  // 헤더 숫자는 요청 카드와 직접 띄운 에이전트 카드를 합쳐 센다.
+  const totals = new Map(agentTotals);
+  for (const request of active) {
+    for (const [column, items] of requestCells(request)) totals.set(column, (totals.get(column) ?? 0) + items.length);
+  }
+  if (ctx.compact) {
+    return (
+      <View style={{ gap: 16 }}>
+        {active.map((request) => (
+          <CompactRequest key={request.id} request={request} ctx={ctx} />
+        ))}
+        <CompactBoard board={board} rows={rows} totals={agentTotals} ctx={ctx} />
+        <FinishedRequests requests={finished} ctx={ctx} />
+      </View>
+    );
+  }
   return (
     <View
       style={{
@@ -215,8 +225,16 @@ export function KanbanBoard({ ctx }: { ctx: ViewContext }) {
       }}
     >
       <HeaderRow totals={totals} ctx={ctx} />
-      <SectionRow title={ctx.t("board.requests")} detail="0" ctx={ctx} />
-      <RequestRowsPlaceholder ctx={ctx} />
+      <SectionRow title={ctx.t("board.requests")} detail={String(active.length)} ctx={ctx} />
+      {active.length === 0 ? (
+        <View style={{ padding: 12, borderBottomWidth: 1, borderColor: ctx.theme.colors.border }}>
+          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{ctx.t("board.noRequests")}</Text>
+        </View>
+      ) : (
+        active.map((request) => (
+          <RequestRow key={request.id} request={request} ctx={ctx} firstColumnWidth={WORKSPACE_COLUMN_WIDTH} />
+        ))
+      )}
       <SectionRow title={ctx.t("board.direct")} detail={ctx.t("board.workspaces", { count: rows.length })} ctx={ctx} />
       {rows.length === 0 ? (
         <View style={{ padding: 12 }}>
@@ -227,6 +245,7 @@ export function KanbanBoard({ ctx }: { ctx: ViewContext }) {
           <BoardRow key={workspaceId} workspaceId={workspaceId} cells={board.get(workspaceId)!} ctx={ctx} />
         ))
       )}
+      <FinishedRequests requests={finished} ctx={ctx} />
     </View>
   );
 }

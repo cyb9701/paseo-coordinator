@@ -6,7 +6,8 @@ import { type ReactNode, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { AgentCard } from "./agent-card";
 import { columnColor, isVisibleAgent } from "./agent-state";
-import { useClassifier, usePending, useSentLog } from "./pending-store";
+import { useSentLog } from "./coordinator-state";
+import { useClassifier, usePending } from "./pending-store";
 import {
   type PermissionAction,
   type PermissionRequest,
@@ -44,7 +45,8 @@ function useAgentActions(agentId: string) {
   const send = useMutation({
     mutationFn: async (text: string) => {
       await paseo.agents.ref(agentId).send(text);
-      record(agentId, text.trim());
+      // 지시는 이미 갔으므로 기록 실패로 전송을 실패 처리하지 않는다.
+      record(agentId, text.trim()).catch((error) => console.error("[coordinator] could not record instruction", error));
     },
   });
   return { respond, send };

@@ -1,6 +1,6 @@
 import type { PluginAgentSnapshot } from "@getpaseo/plugin";
 import { usePaseo } from "@getpaseo/plugin/client";
-import { type ReactNode, createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { type ReactNode, createContext, useContext, useEffect, useMemo, useState } from "react";
 import { type AgentStateKey, type ColumnKey, agentState, columnOf, isVisibleAgent } from "./agent-state";
 import type { PermissionRequest } from "./permissions";
 
@@ -78,43 +78,10 @@ export function usePendingDirectory(): PendingDirectory {
 
 const PendingContext = createContext<PendingDirectory>(EMPTY);
 
-export interface SentInstruction {
-  text: string;
-  at: string;
-}
-
-interface SentLog {
-  sent: ReadonlyMap<string, readonly SentInstruction[]>;
-  record(agentId: string, text: string): void;
-}
-
-const SentContext = createContext<SentLog>({ sent: new Map(), record: () => {} });
-
-/**
- * 화면 하나가 구독 하나를 같이 쓰도록 내려 준다.
- * 사람이 카드에서 보낸 지시도 여기에 남긴다. 에이전트가 실행되는 동안 카드가 사라졌다가 다시 나타나므로
- * 카드 안 state 에 두면 기록이 사라지고, 사람은 지시가 갔는지 몰라 같은 지시를 다시 보내게 된다 (2026-11-25 테스트).
- */
+/** 화면 하나가 구독 하나를 같이 쓰도록 내려 준다. */
 export function PendingProvider({ children }: { children: ReactNode }) {
   const directory = usePendingDirectory();
-  const [sent, setSent] = useState<ReadonlyMap<string, readonly SentInstruction[]>>(new Map());
-  const record = useCallback((agentId: string, text: string) => {
-    setSent((current) => {
-      const next = new Map(current);
-      next.set(agentId, [...(current.get(agentId) ?? []), { text, at: new Date().toISOString() }]);
-      return next;
-    });
-  }, []);
-  const log = useMemo(() => ({ sent, record }), [sent, record]);
-  return (
-    <PendingContext.Provider value={directory}>
-      <SentContext.Provider value={log}>{children}</SentContext.Provider>
-    </PendingContext.Provider>
-  );
-}
-
-export function useSentLog(): SentLog {
-  return useContext(SentContext);
+  return <PendingContext.Provider value={directory}>{children}</PendingContext.Provider>;
 }
 
 export function usePending(): PendingDirectory {

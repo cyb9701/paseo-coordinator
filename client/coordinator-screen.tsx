@@ -4,9 +4,11 @@ import { useAgents } from "@getpaseo/plugin/client";
 import { useState } from "react";
 import { ScrollView, View } from "react-native";
 import { isVisibleAgent } from "./agent-state";
+import { CoordinatorStateProvider } from "./coordinator-state";
 import { useT } from "./i18n";
 import { InboxView } from "./inbox";
 import { KanbanBoard } from "./kanban";
+import { NewRequestPanel } from "./new-request";
 import { PendingProvider, useClassifier } from "./pending-store";
 import { SettingsView } from "./settings-view";
 import { useNow } from "./time";
@@ -17,14 +19,17 @@ type Tab = "inbox" | "progress" | "settings";
 export function CoordinatorScreen(props: PluginScreenProps) {
   return (
     <PendingProvider>
-      <ScreenBody {...props} />
+      <CoordinatorStateProvider>
+        <ScreenBody {...props} />
+      </CoordinatorStateProvider>
     </PendingProvider>
   );
 }
 
 function ScreenBody({ theme, layout, host, navigation }: PluginScreenProps) {
-  const { t } = useT();
+  const { t, locale } = useT();
   const classify = useClassifier();
+  const [composing, setComposing] = useState(false);
   // 병목이 보이는 곳을 먼저 연다.
   const [tab, setTab] = useState<Tab>("inbox");
   const now = useNow();
@@ -49,12 +54,22 @@ function ScreenBody({ theme, layout, host, navigation }: PluginScreenProps) {
         <CtaButton
           label={t("newRequest.label")}
           tone="primary"
-          disabled
-          accessibilityLabel={t("newRequest.pendingHint")}
+          disabled={composing}
           theme={theme}
-          onPress={() => {}}
+          onPress={() => setComposing(true)}
         />
       </View>
+      {composing ? (
+        <NewRequestPanel
+          ctx={ctx}
+          locale={locale}
+          onClose={(sent) => {
+            setComposing(false);
+            // 보낸 요청이 바로 보이도록 진행 현황으로 옮긴다.
+            if (sent) setTab("progress");
+          }}
+        />
+      ) : null}
       {tab === "inbox" ? <InboxView ctx={ctx} /> : null}
       {tab === "progress" ? <KanbanBoard ctx={ctx} /> : null}
       {tab === "settings" ? <SettingsView theme={theme} hostId={host.id} t={t} /> : null}
