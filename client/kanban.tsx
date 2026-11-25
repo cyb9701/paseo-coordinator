@@ -59,17 +59,17 @@ function WorkspaceCell({ workspaceId, ctx }: { workspaceId: string; ctx: ViewCon
   return (
     <View style={{ gap: 4 }}>
       <Chip label={workspace.project} color={ctx.theme.colors.accent} theme={ctx.theme} />
-      <Text numberOfLines={2} style={{ color: ctx.theme.colors.foreground, fontSize: 12 }}>
+      <Text numberOfLines={2} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta }}>
         {workspace.name}
       </Text>
       {workspace.branch ? (
-        <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 11 }}>
+        <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
           {workspace.branch}
           {workspace.diff ? `  +${workspace.diff.additions} −${workspace.diff.deletions}` : ""}
         </Text>
       ) : null}
       {workspace.enteredAt ? (
-        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 11 }}>
+        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
           {formatAgo(workspace.enteredAt, ctx.now, ctx.t)}
         </Text>
       ) : null}
@@ -81,19 +81,19 @@ function HeaderRow({ totals, ctx }: { totals: Map<ColumnKey, number>; ctx: ViewC
   return (
     <View style={{ flexDirection: "row", borderBottomWidth: 1, borderColor: ctx.theme.colors.border }}>
       <View style={{ width: WORKSPACE_COLUMN_WIDTH, padding: 10, justifyContent: "flex-end" }}>
-        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{ctx.t("board.requestOrWorkspace")}</Text>
+        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{ctx.t("board.requestOrWorkspace")}</Text>
       </View>
       {COLUMN_KEYS.map((key) => (
         <View key={key} style={{ flex: 1, padding: 10, gap: 2 }}>
           <View style={{ flexDirection: "row", gap: 8 }}>
-            <Text style={{ color: columnColor(key, ctx.theme), fontSize: 12, fontWeight: "600" }}>
+            <Text style={{ color: columnColor(key, ctx.theme), fontSize: ctx.fonts.meta, fontWeight: "600" }}>
               {ctx.t(`columns.${key}.label`)}
             </Text>
-            <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>
+            <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
               {String(totals.get(key) ?? 0)}
             </Text>
           </View>
-          <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 11 }}>
+          <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
             {ctx.t(`columns.${key}.hint`)}
           </Text>
         </View>
@@ -116,8 +116,8 @@ function SectionRow({ title, detail, ctx }: { title: string; detail: string; ctx
         borderColor: ctx.theme.colors.border,
       }}
     >
-      <Text style={{ color: ctx.theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>{title}</Text>
-      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{detail}</Text>
+      <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta, fontWeight: "600" }}>{title}</Text>
+      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{detail}</Text>
     </View>
   );
 }
@@ -170,10 +170,10 @@ function CompactBoard({ board, rows, totals, ctx }: { board: Board; rows: readon
       {COLUMN_KEYS.map((key) => (
         <View key={key} style={{ gap: 8 }}>
           <View style={{ flexDirection: "row", gap: 8 }}>
-            <Text style={{ color: columnColor(key, ctx.theme), fontSize: 13, fontWeight: "600" }}>
+            <Text style={{ color: columnColor(key, ctx.theme), fontSize: ctx.fonts.body, fontWeight: "600" }}>
               {ctx.t(`columns.${key}.label`)}
             </Text>
-            <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 13 }}>
+            <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.body }}>
               {`${totals.get(key) ?? 0} · ${ctx.t(`columns.${key}.hint`)}`}
             </Text>
           </View>
@@ -228,7 +228,7 @@ export function KanbanBoard({ ctx }: { ctx: ViewContext }) {
       <SectionRow title={ctx.t("board.requests")} detail={String(active.length)} ctx={ctx} />
       {active.length === 0 ? (
         <View style={{ padding: 12, borderBottomWidth: 1, borderColor: ctx.theme.colors.border }}>
-          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{ctx.t("board.noRequests")}</Text>
+          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{ctx.t("board.noRequests")}</Text>
         </View>
       ) : (
         active.map((request) => (
@@ -238,7 +238,7 @@ export function KanbanBoard({ ctx }: { ctx: ViewContext }) {
       <SectionRow title={ctx.t("board.direct")} detail={ctx.t("board.workspaces", { count: rows.length })} ctx={ctx} />
       {rows.length === 0 ? (
         <View style={{ padding: 12 }}>
-          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{ctx.t("board.noAgents")}</Text>
+          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{ctx.t("board.noAgents")}</Text>
         </View>
       ) : (
         rows.map((workspaceId) => (

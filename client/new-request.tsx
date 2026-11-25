@@ -25,8 +25,8 @@ function ProjectToggle({
 function Field({ label, hint, children, ctx }: { label: string; hint?: string; children: ReactNode; ctx: ViewContext }) {
   return (
     <View style={{ gap: 6 }}>
-      <Text style={{ color: ctx.theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>{label}</Text>
-      {hint ? <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{hint}</Text> : null}
+      <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600" }}>{label}</Text>
+      {hint ? <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{hint}</Text> : null}
       {children}
     </View>
   );
@@ -61,7 +61,7 @@ export function NewRequestPanel({ ctx, locale, onClose }: { ctx: ViewContext; lo
     borderColor: ctx.theme.colors.border,
     backgroundColor: ctx.theme.colors.surface0,
     color: ctx.theme.colors.foreground,
-    fontSize: 13,
+    fontSize: ctx.fonts.body,
   } as const;
   return (
     <View
@@ -75,7 +75,7 @@ export function NewRequestPanel({ ctx, locale, onClose }: { ctx: ViewContext; lo
         backgroundColor: ctx.theme.colors.surface1,
       }}
     >
-      <Text style={{ color: ctx.theme.colors.foreground, fontSize: 16, fontWeight: "600" }}>{ctx.t("request.title")}</Text>
+      <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>{ctx.t("request.title")}</Text>
       <Field label={ctx.t("request.what")} ctx={ctx}>
         <TextInput
           value={text}
@@ -89,7 +89,7 @@ export function NewRequestPanel({ ctx, locale, onClose }: { ctx: ViewContext; lo
       </Field>
       <Field label={ctx.t("request.projects")} hint={ctx.t("request.projectsHint")} ctx={ctx}>
         {allowedRefs.length === 0 ? (
-          <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: 12 }}>{ctx.t("request.noAllowedProjects")}</Text>
+          <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>{ctx.t("request.noAllowedProjects")}</Text>
         ) : (
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
             {allowedRefs.map((ref) => (
@@ -129,7 +129,7 @@ export function NewRequestPanel({ ctx, locale, onClose }: { ctx: ViewContext; lo
         <CtaButton label={ctx.t("request.close")} disabled={submit.isPending} theme={ctx.theme} onPress={() => onClose(false)} />
       </View>
       {submit.error ? (
-        <Text style={{ color: ctx.theme.colors.statusDanger, fontSize: 12 }}>
+        <Text style={{ color: ctx.theme.colors.statusDanger, fontSize: ctx.fonts.meta }}>
           {ctx.t("request.failed", { message: submit.error instanceof Error ? submit.error.message : String(submit.error) })}
         </Text>
       ) : null}

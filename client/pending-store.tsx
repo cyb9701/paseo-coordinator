@@ -111,3 +111,11 @@ export function useClassifier(): Classifier {
   const directory = usePending();
   return useMemo(() => classifierFor(directory), [directory]);
 }
+
+/**
+ * 반응 필요 카드 수. 인박스는 대기 중인 권한 요청 하나당 카드 한 장을 그리므로, 에이전트 수가 아니라 요청 수로 센다.
+ * 요청이 없는데 멈춘 에이전트(에러)는 한 장이다. (에이전트 수로 셌더니 카드 2장에 숫자 1이 나왔다. 2026-11-25)
+ */
+export function cardCount(agentIds: readonly string[], directory: PendingDirectory): number {
+  return agentIds.reduce((total, id) => total + Math.max(1, directory.pending.get(id)?.length ?? 0), 0);
+}

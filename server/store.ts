@@ -8,7 +8,7 @@ import { type CoordinatorState, stateSchema } from "../shared/model";
 // 보낸 지시 기록은 화면 표시용이라 오래된 것은 버린다.
 const MAX_SENT = 200;
 
-const EMPTY: CoordinatorState = { requests: [], sent: [] };
+const EMPTY: CoordinatorState = { requests: [], sent: [], coordinator: null };
 
 /**
  * 플러그인 데이터 폴더. Paseo 는 플러그인 전용 저장 경로를 주지 않아서 daemon 홈 아래에 직접 만든다.

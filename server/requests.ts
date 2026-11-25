@@ -43,6 +43,13 @@ export async function createRequest(
       title: null,
       grade: null,
       tasks: [],
+      gradeReasons: [],
+      recommendation: null,
+      risks: [],
+      unknowns: [],
+      feedback: [],
+      notifiedAt: null,
+      plannedAt: null,
     };
     return { state: { ...state, requests: [...state.requests, request] }, result: { id } };
   });
@@ -69,5 +76,43 @@ export async function recordInstruction({ agentId, text }: RpcInput<typeof recor
     state: { ...state, sent: [...state.sent, { agentId, text, at: new Date().toISOString() }] },
     result: undefined,
   }));
+  return {};
+}
+
+/** 계획 승인. 작업은 대기 상태로 두고, 워커는 3e 단계의 배정이 만든다. */
+export async function approvePlan({ id }: { id: string }, store: StateStore) {
+  await store.update((state) => {
+    const request = state.requests.find((item) => item.id === id);
+    if (!request) throw new Error(`Unknown request ${id}`);
+    if (request.status !== "awaiting_approval") throw new Error(`Request ${id} is ${request.status}, not waiting for approval.`);
+    return {
+      state: {
+        ...state,
+        requests: state.requests.map((item) => (item.id === id ? { ...item, status: "running" as const } : item)),
+      },
+      result: undefined,
+    };
+  });
+  return {};
+}
+
+/** 수정 지시. 사람의 지시를 요청에 남기고 다시 계획 단계로 돌린다. 코디네이터에게는 호출한 쪽이 알린다. */
+export async function revisePlan({ id, text }: { id: string; text: string }, store: StateStore) {
+  await store.update((state) => {
+    const request = state.requests.find((item) => item.id === id);
+    if (!request) throw new Error(`Unknown request ${id}`);
+    if (request.status !== "awaiting_approval") throw new Error(`Request ${id} is ${request.status}, not waiting for approval.`);
+    return {
+      state: {
+        ...state,
+        requests: state.requests.map((item) =>
+          item.id === id
+            ? { ...item, status: "planning" as const, feedback: [...item.feedback, { text, at: new Date().toISOString() }] }
+            : item,
+        ),
+      },
+      result: undefined,
+    };
+  });
   return {};
 }

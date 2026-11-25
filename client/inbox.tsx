@@ -6,8 +6,9 @@ import { type ReactNode, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { AgentCard } from "./agent-card";
 import { columnColor, isVisibleAgent } from "./agent-state";
-import { useSentLog } from "./coordinator-state";
-import { useClassifier, usePending } from "./pending-store";
+import { useCoordinatorState, useSentLog } from "./coordinator-state";
+import { PlanApprovalCard } from "./plan-card";
+import { cardCount, useClassifier, usePending } from "./pending-store";
 import {
   type PermissionAction,
   type PermissionRequest,
@@ -83,7 +84,7 @@ function InstructionBox({
           borderColor: ctx.theme.colors.border,
           backgroundColor: ctx.theme.colors.surface0,
           color: ctx.theme.colors.foreground,
-          fontSize: 13,
+          fontSize: ctx.fonts.body,
           textAlignVertical: "top",
         }}
       />
@@ -103,7 +104,7 @@ function InstructionBox({
 function Section({ label, value, ctx }: { label: string; value: ReactNode; ctx: ViewContext }) {
   return (
     <View style={{ flexDirection: ctx.compact ? "column" : "row", gap: ctx.compact ? 4 : 12 }}>
-      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12, width: ctx.compact ? undefined : 72 }}>
+      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, width: ctx.compact ? undefined : 72 }}>
         {label}
       </Text>
       <View style={{ flex: 1, gap: 4 }}>{value}</View>
@@ -113,7 +114,7 @@ function Section({ label, value, ctx }: { label: string; value: ReactNode; ctx: 
 
 function CodeBox({ text, ctx, maxHeight }: { text: string; ctx: ViewContext; maxHeight?: number }) {
   const body = (
-    <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: 12, fontFamily: "monospace", lineHeight: 18 }}>
+    <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta, fontFamily: "monospace", lineHeight: Math.round(ctx.fonts.meta * 1.5) }}>
       {text}
     </Text>
   );
@@ -151,7 +152,7 @@ function QuestionForm({
     <View style={{ gap: 14 }}>
       {items.map((item) => (
         <View key={item.question} style={{ gap: 8 }}>
-          <Text style={{ color: ctx.theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>
+          <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600" }}>
             {item.question}
             {item.multiSelect ? `  ${ctx.t("inbox.multiSelect")}` : ""}
           </Text>
@@ -174,12 +175,12 @@ function QuestionForm({
                     gap: 2,
                   }}
                 >
-                  <Text style={{ color: ctx.theme.colors.foreground, fontSize: 13, fontWeight: active ? "600" : "400" }}>
+                  <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: active ? "600" : "400" }}>
                     {active ? "● " : "○ "}
                     {option.label}
                   </Text>
                   {option.description ? (
-                    <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{option.description}</Text>
+                    <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{option.description}</Text>
                   ) : null}
                 </Pressable>
               );
@@ -199,7 +200,7 @@ function QuestionForm({
                 borderColor: ctx.theme.colors.border,
                 backgroundColor: ctx.theme.colors.surface0,
                 color: ctx.theme.colors.foreground,
-                fontSize: 13,
+                fontSize: ctx.fonts.body,
               }}
             />
           ) : null}
@@ -244,11 +245,11 @@ function CardFrame({
     >
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
         <Chip label={kind} color={columnColor("react", ctx.theme)} theme={ctx.theme} />
-        <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12, flexShrink: 1 }}>
+        <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, flexShrink: 1 }}>
           {`${workspace ?? ""} › ${agent.title}`}
         </Text>
         <View style={{ flex: 1 }} />
-        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{ctx.t("time.waiting", { ago: formatAgo(agent.since, ctx.now, ctx.t) })}</Text>
+        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{ctx.t("time.waiting", { ago: formatAgo(agent.since, ctx.now, ctx.t) })}</Text>
       </View>
       {children}
     </View>
@@ -258,7 +259,7 @@ function CardFrame({
 function ErrorLine({ error, ctx }: { error: unknown; ctx: ViewContext }) {
   if (!error) return null;
   return (
-    <Text style={{ color: ctx.theme.colors.statusDanger, fontSize: 12 }}>
+    <Text style={{ color: ctx.theme.colors.statusDanger, fontSize: ctx.fonts.meta }}>
       {ctx.t("inbox.failed", { message: error instanceof Error ? error.message : String(error) })}
     </Text>
   );
@@ -309,15 +310,6 @@ function DecisionCard({ request, agent, ctx }: { request: PermissionRequest; age
 
   return (
     <CardFrame kind={ctx.t(`kinds.${request.kind}`)} agent={agent} ctx={ctx}>
-      <Section
-        label={ctx.t("inbox.decide")}
-        ctx={ctx}
-        value={
-          <Text style={{ color: ctx.theme.colors.foreground, fontSize: 14, fontWeight: "600" }}>
-            {decisionPrompt(request, ctx.t)}
-          </Text>
-        }
-      />
       {facts ? (
         <Section
           label={ctx.t("inbox.facts")}
@@ -326,18 +318,28 @@ function DecisionCard({ request, agent, ctx }: { request: PermissionRequest; age
             <>
               {facts.command ? <CodeBox text={facts.command} ctx={ctx} /> : null}
               {facts.inputs.map(([key, value]) => (
-                <Text key={key} selectable style={{ color: ctx.theme.colors.foreground, fontSize: 12 }}>
+                <Text key={key} selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta }}>
                   {`${key}: ${value}`}
                 </Text>
               ))}
               {request.description ? (
-                <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{request.description}</Text>
+                <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{request.description}</Text>
               ) : null}
             </>
           }
         />
       ) : null}
       {plan ? <Section label={ctx.t("inbox.plan")} ctx={ctx} value={<CodeBox text={plan} ctx={ctx} maxHeight={320} />} /> : null}
+      {/* 사실과 계획을 먼저 읽고, 결정할 것은 버튼(질문이면 선택지) 바로 위에 둔다. */}
+      <Section
+        label={ctx.t("inbox.decide")}
+        ctx={ctx}
+        value={
+          <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>
+            {decisionPrompt(request, ctx.t)}
+          </Text>
+        }
+      />
       {questions.length > 0 ? (
         <QuestionForm
           items={questions}
@@ -349,7 +351,7 @@ function DecisionCard({ request, agent, ctx }: { request: PermissionRequest; age
         />
       ) : null}
       {request.kind !== "tool" && request.kind !== "plan" && request.kind !== "question" && request.description ? (
-        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{request.description}</Text>
+        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{request.description}</Text>
       ) : null}
 
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
@@ -413,36 +415,36 @@ function ErrorCard({ message, agent, ctx }: { message: string | null; agent: Car
   const failedAgain = last !== undefined && Date.parse(agent.since) > Date.parse(last.at);
   return (
     <CardFrame kind={ctx.t("inbox.error")} agent={agent} ctx={ctx}>
-      <Section
-        label={ctx.t("inbox.decide")}
-        ctx={ctx}
-        value={
-          <>
-            <Text style={{ color: ctx.theme.colors.foreground, fontSize: 14, fontWeight: "600" }}>
-              {failedAgain
-                ? ctx.t("inbox.errorAgain")
-                : ctx.t("inbox.errorDecide")}
-            </Text>
-            {failedAgain ? (
-              <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>
-                {ctx.t("inbox.errorAgainHint")}
-              </Text>
-            ) : null}
-          </>
-        }
-      />
       <Section label={ctx.t("inbox.error")} ctx={ctx} value={<CodeBox text={message ?? ctx.t("inbox.errorNoMessage")} ctx={ctx} maxHeight={200} />} />
       {history.length > 0 ? (
         <Section
           label={ctx.t("inbox.sentInstructions")}
           ctx={ctx}
           value={history.slice(-3).map((item) => (
-            <Text key={item.at} style={{ color: ctx.theme.colors.foreground, fontSize: 12 }}>
+            <Text key={item.at} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta }}>
               {`${formatAgo(item.at, ctx.now, ctx.t)} · ${item.text}`}
             </Text>
           ))}
         />
       ) : null}
+      <Section
+        label={ctx.t("inbox.decide")}
+        ctx={ctx}
+        value={
+          <>
+            <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>
+              {failedAgain
+                ? ctx.t("inbox.errorAgain")
+                : ctx.t("inbox.errorDecide")}
+            </Text>
+            {failedAgain ? (
+              <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
+                {ctx.t("inbox.errorAgainHint")}
+              </Text>
+            ) : null}
+          </>
+        }
+      />
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         <CtaButton
           label={instructing ? ctx.t("inbox.closeInstruct") : ctx.t("inbox.instruct")}
@@ -515,9 +517,9 @@ function AgentDecisions({ agentRef, ctx }: { agentRef: AgentRef; ctx: ViewContex
 function SectionHeader({ title, count, hint, color, ctx }: { title: string; count: number; hint: string; color: string; ctx: ViewContext }) {
   return (
     <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8 }}>
-      <Text style={{ color, fontSize: 14, fontWeight: "600" }}>{title}</Text>
-      <Text style={{ color: ctx.theme.colors.foreground, fontSize: 14 }}>{String(count)}</Text>
-      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{hint}</Text>
+      <Text style={{ color, fontSize: ctx.fonts.heading, fontWeight: "600" }}>{title}</Text>
+      <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading }}>{String(count)}</Text>
+      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{hint}</Text>
     </View>
   );
 }
@@ -525,25 +527,36 @@ function SectionHeader({ title, count, hint, color, ctx }: { title: string; coun
 /** 결정 인박스. 반응 필요는 카드에서 바로 처리하고, 확인 필요는 열어서 본다 (RULES.md §12). */
 export function InboxView({ ctx }: { ctx: ViewContext }) {
   const classify = useClassifier();
+  const directory = usePending();
   const needsReaction = (agent: PluginAgentSnapshot) => isVisibleAgent(agent) && classify.column(agent) === "react";
   const needsReview = (agent: PluginAgentSnapshot) => isVisibleAgent(agent) && classify.column(agent) === "review";
   const reacting = useAgents({ hosts: [ctx.hostId], where: needsReaction, orderBy: oldestFirst });
   const reviewing = useAgents({ hosts: [ctx.hostId], where: needsReview, orderBy: ["lastActivityAt", "desc"] });
+  // 계획 승인은 요청 전체를 막고 있어서 에이전트 카드보다 위에, 오래 기다린 순서로 둔다.
+  const { state } = useCoordinatorState();
+  const plans = (state?.requests ?? [])
+    .filter((request) => request.status === "awaiting_approval")
+    .sort((a, b) => (a.plannedAt ?? a.createdAt).localeCompare(b.plannedAt ?? b.createdAt));
+  const reactCount = plans.length + cardCount(reacting.map((ref) => ref.id), directory);
   return (
     <View style={{ gap: 20, maxWidth: 880 }}>
       <View style={{ gap: 10 }}>
         <SectionHeader
           title={ctx.t("inbox.react")}
-          count={reacting.length}
+          count={reactCount}
           hint={ctx.t("inbox.reactHint")}
           color={columnColor("react", ctx.theme)}
           ctx={ctx}
         />
-        {reacting.length === 0 ? (
-          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 13 }}>{ctx.t("inbox.nothingBlocked")}</Text>
-        ) : (
-          reacting.map((ref) => <AgentDecisions key={ref.key} agentRef={ref} ctx={ctx} />)
-        )}
+        {reactCount === 0 ? (
+          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.body }}>{ctx.t("inbox.nothingBlocked")}</Text>
+        ) : null}
+        {plans.map((request) => (
+          <PlanApprovalCard key={request.id} request={request} ctx={ctx} />
+        ))}
+        {reacting.map((ref) => (
+          <AgentDecisions key={ref.key} agentRef={ref} ctx={ctx} />
+        ))}
       </View>
       <View style={{ gap: 10 }}>
         <SectionHeader
@@ -554,7 +567,7 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
           ctx={ctx}
         />
         {reviewing.length === 0 ? (
-          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 13 }}>{ctx.t("inbox.nothingToReview")}</Text>
+          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.body }}>{ctx.t("inbox.nothingToReview")}</Text>
         ) : (
           reviewing.map((ref) => <AgentCard key={ref.key} agentRef={ref} ctx={ctx} />)
         )}

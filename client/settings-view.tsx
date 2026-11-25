@@ -11,6 +11,7 @@ import {
   coordinatorSettings,
 } from "../shared/settings";
 import type { T } from "./i18n";
+import { DEFAULT_CONTENT_SIZE, DEFAULT_INTERFACE_SIZE, FONT_SIZE_RANGE, displaySettings, useFonts } from "./fonts";
 import { ChoiceBox, CtaButton } from "./ui";
 
 // 검토자는 읽기 전용으로 띄워야 한다 (RULES.md §7). 지금 이 조건을 만족하는 모드는 claude 의 plan 뿐이다.
@@ -74,6 +75,7 @@ function useProviderCatalog(hostId: string) {
 }
 
 function Block({ title, hint, children, theme }: { title: string; hint?: string; children: ReactNode; theme: PluginTheme }) {
+  const fonts = useFonts();
   return (
     <View
       style={{
@@ -86,8 +88,8 @@ function Block({ title, hint, children, theme }: { title: string; hint?: string;
       }}
     >
       <View style={{ gap: 4 }}>
-        <Text style={{ color: theme.colors.foreground, fontSize: 15, fontWeight: "600" }}>{title}</Text>
-        {hint ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{hint}</Text> : null}
+        <Text style={{ color: theme.colors.foreground, fontSize: fonts.heading, fontWeight: "600" }}>{title}</Text>
+        {hint ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: fonts.meta }}>{hint}</Text> : null}
       </View>
       {children}
     </View>
@@ -99,7 +101,8 @@ function Wrap({ children }: { children: ReactNode }) {
 }
 
 function Note({ text, color }: { text: string; color: string }) {
-  return <Text style={{ color, fontSize: 12 }}>{text}</Text>;
+  const fonts = useFonts();
+  return <Text style={{ color, fontSize: fonts.meta }}>{text}</Text>;
 }
 
 function ProjectChoice({
@@ -118,6 +121,80 @@ function ProjectChoice({
   return <ChoiceBox label={project.name} detail={project.path} selected={selected} multiple onPress={onToggle} theme={theme} />;
 }
 
+function Stepper({
+  name,
+  hint,
+  value,
+  onChange,
+  theme,
+  t,
+}: {
+  name: string;
+  hint: string;
+  value: number;
+  onChange(next: number): void;
+  theme: PluginTheme;
+  t: T;
+}) {
+  const fonts = useFonts();
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+      <View style={{ minWidth: 160, gap: 2 }}>
+        <Text style={{ color: theme.colors.foreground, fontSize: fonts.label }}>{name}</Text>
+        <Text style={{ color: theme.colors.foregroundMuted, fontSize: fonts.meta }}>{hint}</Text>
+      </View>
+      <CtaButton
+        label="−"
+        accessibilityLabel={t("settings.decrease", { name })}
+        disabled={value <= FONT_SIZE_RANGE.min}
+        theme={theme}
+        onPress={() => onChange(value - 1)}
+      />
+      <Text style={{ color: theme.colors.foreground, fontSize: fonts.label, minWidth: 28, textAlign: "center" }}>{String(value)}</Text>
+      <CtaButton
+        label="+"
+        accessibilityLabel={t("settings.increase", { name })}
+        disabled={value >= FONT_SIZE_RANGE.max}
+        theme={theme}
+        onPress={() => onChange(value + 1)}
+      />
+    </View>
+  );
+}
+
+/**
+ * 글자 크기. 기기별 설정이라 코디네이터 설정과 따로 저장하고, 바꾸는 즉시 저장해 바로 보이게 한다.
+ */
+function FontSizeBlock({ theme, t }: { theme: PluginTheme; t: T }) {
+  const display = useSettings(displaySettings);
+  const values =
+    display.status === "ready" ? display.values : { interfaceSize: DEFAULT_INTERFACE_SIZE, contentSize: DEFAULT_CONTENT_SIZE };
+  const save = (patch: Partial<typeof values>) => {
+    if (display.status !== "ready") return;
+    void display.save({ ...display.values, ...patch }, display.revision);
+  };
+  return (
+    <Block title={t("settings.fonts")} hint={t("settings.fontsHint")} theme={theme}>
+      <Stepper
+        name={t("settings.interfaceSize")}
+        hint={t("settings.interfaceSizeHint")}
+        value={values.interfaceSize}
+        onChange={(interfaceSize) => save({ interfaceSize })}
+        theme={theme}
+        t={t}
+      />
+      <Stepper
+        name={t("settings.contentSize")}
+        hint={t("settings.contentSizeHint")}
+        value={values.contentSize}
+        onChange={(contentSize) => save({ contentSize })}
+        theme={theme}
+        t={t}
+      />
+    </Block>
+  );
+}
+
 function toggle(list: readonly string[], value: string): string[] {
   return list.includes(value) ? list.filter((item) => item !== value) : [...list, value];
 }
@@ -127,6 +204,7 @@ function toggle(list: readonly string[], value: string): string[] {
  * 고친 값은 저장을 눌러야 반영된다. 저장은 읽어 온 revision 을 기준으로 해서, 다른 곳에서 먼저 바꿨으면 실패한다.
  */
 export function SettingsView({ theme, hostId, t }: { theme: PluginTheme; hostId: string; t: T }) {
+  const fonts = useFonts();
   const settings = useSettings(coordinatorSettings);
   const catalog = useProviderCatalog(hostId);
   const projects = useProjects({ hosts: [hostId], orderBy: "displayName" });
@@ -182,7 +260,7 @@ export function SettingsView({ theme, hostId, t }: { theme: PluginTheme; hostId:
 
   return (
     <View style={{ gap: 16, maxWidth: 880 }}>
-      <Text style={{ color: theme.colors.foreground, fontSize: 18, fontWeight: "600" }}>{t("settings.title")}</Text>
+      <Text style={{ color: theme.colors.foreground, fontSize: fonts.title, fontWeight: "600" }}>{t("settings.title")}</Text>
 
       <Block title={t("settings.coordinator")} hint={t("settings.coordinatorHint")} theme={theme}>
         {catalog.isPending ? <Note text={t("settings.loadingModels")} color={theme.colors.foregroundMuted} /> : null}
@@ -213,7 +291,7 @@ export function SettingsView({ theme, hostId, t }: { theme: PluginTheme; hostId:
         </Wrap>
         {coordinatorModel && coordinatorModel.efforts.length > 0 ? (
           <View style={{ gap: 6 }}>
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{t("settings.effort")}</Text>
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: fonts.meta }}>{t("settings.effort")}</Text>
             <Wrap>
               {coordinatorModel.efforts.map((effort) => (
                 <ChoiceBox
@@ -256,7 +334,7 @@ export function SettingsView({ theme, hostId, t }: { theme: PluginTheme; hostId:
           <Note text={t("settings.oneModelWarning")} color={theme.colors.statusWarning} />
         ) : null}
         <View style={{ gap: 6 }}>
-          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: fonts.meta }}>
             {`${t("settings.reviewerEffort")} · ${t("settings.reviewerEffortHint")}`}
           </Text>
           <Wrap>
@@ -289,6 +367,8 @@ export function SettingsView({ theme, hostId, t }: { theme: PluginTheme; hostId:
           ))}
         </View>
       </Block>
+
+      <FontSizeBlock theme={theme} t={t} />
 
       <Block title={t("settings.language")} hint={t("settings.languageHint")} theme={theme}>
         <Wrap>

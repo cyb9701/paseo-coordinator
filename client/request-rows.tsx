@@ -53,7 +53,7 @@ function PlaceholderCard({ text, column, ctx }: { text: string; column: ColumnKe
         padding: 10,
       }}
     >
-      <Text style={{ color: ctx.theme.colors.foreground, fontSize: 12 }}>{text}</Text>
+      <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta }}>{text}</Text>
     </View>
   );
 }
@@ -61,7 +61,7 @@ function PlaceholderCard({ text, column, ctx }: { text: string; column: ColumnKe
 function ProjectName({ projectRef, ctx }: { projectRef: ProjectRef; ctx: ViewContext }) {
   const name = useProject(projectRef, (project) => project.displayName);
   return (
-    <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 11 }}>
+    <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
       {name ?? projectRef.id}
     </Text>
   );
@@ -83,15 +83,15 @@ function TaskCard({ task, column, ctx }: { task: Task; column: ColumnKey; ctx: V
       }}
     >
       <View style={{ flexDirection: "row", gap: 8 }}>
-        <Text numberOfLines={2} style={{ color: ctx.theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>
+        <Text numberOfLines={2} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600", flex: 1 }}>
           {`${task.number} ${task.name}`}
         </Text>
-        <Text style={{ color: columnColor(column, ctx.theme), fontSize: 11 }}>{ctx.t(`taskStatus.${task.status}`)}</Text>
+        <Text style={{ color: columnColor(column, ctx.theme), fontSize: ctx.fonts.meta }}>{ctx.t(`taskStatus.${task.status}`)}</Text>
       </View>
       {projects[0] ? (
         <ProjectName projectRef={projects[0]} ctx={ctx} />
       ) : (
-        <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 11 }}>
+        <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
           {task.projectId}
         </Text>
       )}
@@ -122,15 +122,15 @@ function RequestCell({ request, ctx }: { request: CoordinatorRequest; ctx: ViewC
   return (
     <View style={{ gap: 4 }}>
       <Chip label={request.grade ?? ctx.t("requestRow.noGrade")} color={ctx.theme.colors.accent} theme={ctx.theme} />
-      <Text numberOfLines={3} style={{ color: ctx.theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>
+      <Text numberOfLines={3} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta, fontWeight: "600" }}>
         {requestTitle(request)}
       </Text>
-      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 11 }}>
+      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
         {request.tasks.length > 0
           ? `${ctx.t(`requestRow.${request.status}`)} · ${ctx.t("requestRow.progress", { done, total: request.tasks.length })}`
           : ctx.t(`requestRow.${request.status}`)}
       </Text>
-      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 11 }}>{formatAgo(request.createdAt, ctx.now, ctx.t)}</Text>
+      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{formatAgo(request.createdAt, ctx.now, ctx.t)}</Text>
       {isActiveRequest(request) ? (
         <View style={{ flexDirection: "row", marginTop: 4 }}>
           <CtaButton
@@ -200,13 +200,13 @@ export function FinishedRequests({ requests, ctx }: { requests: readonly Coordin
         accessibilityLabel={ctx.t("requestRow.finished", { count: requests.length })}
         onPress={() => setOpen((value) => !value)}
       >
-        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>
+        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
           {`${open ? "▾" : "▸"} ${ctx.t("requestRow.finished", { count: requests.length })}`}
         </Text>
       </Pressable>
       {open
         ? requests.map((request) => (
-            <Text key={request.id} numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12, paddingLeft: 14 }}>
+            <Text key={request.id} numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, paddingLeft: 14 }}>
               {`${ctx.t(`requestRow.${request.status}`)} · ${requestTitle(request)}`}
             </Text>
           ))

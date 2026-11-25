@@ -1,6 +1,7 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
 import { Pressable, Text, View } from "react-native";
+import { type Fonts, useFonts } from "./fonts";
 import type { T } from "./i18n";
 
 export interface ViewContext {
@@ -10,6 +11,7 @@ export interface ViewContext {
   now: number;
   navigation: PluginScreenProps["navigation"];
   t: T;
+  fonts: Fonts;
 }
 
 type Tone = "primary" | "neutral";
@@ -35,6 +37,7 @@ export function CtaButton({
   accessibilityLabel?: string;
   size?: "sm" | "md";
 }) {
+  const fonts = useFonts();
   const primary = tone === "primary";
   return (
     <Pressable
@@ -58,7 +61,7 @@ export function CtaButton({
       <Text
         style={{
           color: primary ? theme.colors.accentForeground : theme.colors.foreground,
-          fontSize: size === "sm" ? 12 : 13,
+          fontSize: size === "sm" ? fonts.meta : fonts.label,
           fontWeight: "600",
         }}
       >
@@ -80,6 +83,7 @@ export function TabBar<Key extends string>({
   onChange(key: Key): void;
   theme: PluginTheme;
 }) {
+  const fonts = useFonts();
   return (
     <View accessibilityRole="tablist" style={{ flexDirection: "row", gap: 6 }}>
       {tabs.map((tab) => {
@@ -104,7 +108,7 @@ export function TabBar<Key extends string>({
             <Text
               style={{
                 color: selected ? theme.colors.foreground : theme.colors.foregroundMuted,
-                fontSize: 13,
+                fontSize: fonts.label,
                 fontWeight: selected ? "600" : "400",
               }}
             >
@@ -118,6 +122,7 @@ export function TabBar<Key extends string>({
 }
 
 export function Chip({ label, color, theme }: { label: string; color: string; theme: PluginTheme }) {
+  const fonts = useFonts();
   return (
     <View
       style={{
@@ -134,7 +139,7 @@ export function Chip({ label, color, theme }: { label: string; color: string; th
       }}
     >
       <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: color }} />
-      <Text numberOfLines={1} style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600" }}>
+      <Text numberOfLines={1} style={{ color: theme.colors.foreground, fontSize: fonts.meta, fontWeight: "600" }}>
         {label}
       </Text>
     </View>
@@ -159,6 +164,7 @@ export function ChoiceBox({
   onPress(): void;
   theme: PluginTheme;
 }) {
+  const fonts = useFonts();
   const mark = multiple ? (selected ? "☑" : "☐") : selected ? "●" : "○";
   return (
     <Pressable
@@ -180,11 +186,11 @@ export function ChoiceBox({
         opacity: disabled ? 0.45 : 1,
       })}
     >
-      <Text style={{ color: selected ? theme.colors.accent : theme.colors.foregroundMuted, fontSize: 13 }}>{mark}</Text>
+      <Text style={{ color: selected ? theme.colors.accent : theme.colors.foregroundMuted, fontSize: fonts.label }}>{mark}</Text>
       <View style={{ flexShrink: 1, gap: 2 }}>
-        <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: selected ? "600" : "400" }}>{label}</Text>
+        <Text style={{ color: theme.colors.foreground, fontSize: fonts.label, fontWeight: selected ? "600" : "400" }}>{label}</Text>
         {detail ? (
-          <Text numberOfLines={2} style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+          <Text numberOfLines={2} style={{ color: theme.colors.foregroundMuted, fontSize: fonts.meta }}>
             {detail}
           </Text>
         ) : null}

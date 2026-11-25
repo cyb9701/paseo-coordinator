@@ -70,8 +70,8 @@ function SubSessions({ parentId, ctx }: { parentId: string; ctx: ViewContext }) 
         onPress={() => setOpen((value) => !value)}
         style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 2 }}
       >
-        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{open ? "▾" : "▸"}</Text>
-        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{summary}</Text>
+        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{open ? "▾" : "▸"}</Text>
+        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{summary}</Text>
       </Pressable>
       {open ? children.map((ref) => <SubSessionRow key={ref.key} agentRef={ref} ctx={ctx} />) : null}
     </View>
@@ -93,10 +93,10 @@ function SubSessionRow({ agentRef, ctx }: { agentRef: AgentRef; ctx: ViewContext
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingLeft: 16 }}>
       <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: stateColor(state, ctx.theme) }} />
-      <Text numberOfLines={1} style={{ color: ctx.theme.colors.foreground, fontSize: 12, flex: 1 }}>
+      <Text numberOfLines={1} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta, flex: 1 }}>
         {agent.title ?? ctx.t("card.untitledSubSession")}
       </Text>
-      <Text style={{ color: stateColor(state, ctx.theme), fontSize: 11 }}>{ctx.t(`states.${state}`)}</Text>
+      <Text style={{ color: stateColor(state, ctx.theme), fontSize: ctx.fonts.meta }}>{ctx.t(`states.${state}`)}</Text>
       {ctx.navigation ? (
         <CtaButton
           size="sm"
@@ -158,26 +158,26 @@ export function AgentCard({
       }}
     >
       {workspaceLabel ? (
-        <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 11 }}>
+        <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
           {workspaceLabel}
         </Text>
       ) : null}
       <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
-        <Text numberOfLines={2} style={{ color: ctx.theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>
+        <Text numberOfLines={2} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600", flex: 1 }}>
           {agent.parentAgentId ? `↳ ${title}` : title}
         </Text>
-        <Text style={{ color, fontSize: 11 }}>{ctx.t(`states.${state}`)}</Text>
-        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 11 }}>
+        <Text style={{ color, fontSize: ctx.fonts.meta }}>{ctx.t(`states.${state}`)}</Text>
+        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
           {formatAgo(agent.lastActivityAt, ctx.now, ctx.t)}
         </Text>
       </View>
       {preview.data ? (
-        <Text numberOfLines={2} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12, lineHeight: 17 }}>
+        <Text numberOfLines={2} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, lineHeight: Math.round(ctx.fonts.meta * 1.45) }}>
           {preview.data}
         </Text>
       ) : null}
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 11, flex: 1 }}>
+        <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, flex: 1 }}>
           {agent.model ? `${agent.provider} / ${agent.model}` : agent.provider}
         </Text>
         {ctx.navigation ? (
