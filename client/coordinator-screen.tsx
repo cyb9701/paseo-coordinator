@@ -1,16 +1,18 @@
 import type { PluginAgentSnapshot } from "@getpaseo/plugin";
-import type { PluginScreenProps } from "@getpaseo/plugin/client";
+import type { PluginScreenProps, PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useAgents } from "@getpaseo/plugin/client";
 import { useState } from "react";
 import { ScrollView, View } from "react-native";
 import { isVisibleAgent } from "./agent-state";
+import { useT } from "./i18n";
 import { InboxView } from "./inbox";
 import { KanbanBoard } from "./kanban";
 import { PendingProvider, useClassifier } from "./pending-store";
+import { SettingsView } from "./settings-view";
 import { useNow } from "./time";
 import { CtaButton, TabBar, type ViewContext } from "./ui";
 
-type Tab = "inbox" | "progress";
+type Tab = "inbox" | "progress" | "settings";
 
 export function CoordinatorScreen(props: PluginScreenProps) {
   return (
@@ -21,18 +23,20 @@ export function CoordinatorScreen(props: PluginScreenProps) {
 }
 
 function ScreenBody({ theme, layout, host, navigation }: PluginScreenProps) {
+  const { t } = useT();
   const classify = useClassifier();
   // 병목이 보이는 곳을 먼저 연다.
   const [tab, setTab] = useState<Tab>("inbox");
   const now = useNow();
-  const ctx: ViewContext = { theme, compact: layout.compact, hostId: host.id, now, navigation };
+  const ctx: ViewContext = { theme, compact: layout.compact, hostId: host.id, now, navigation, t };
   const waiting = useAgents({
     hosts: [host.id],
     where: (agent: PluginAgentSnapshot) => isVisibleAgent(agent) && classify.column(agent) === "react",
   });
   const tabs: readonly { key: Tab; label: string }[] = [
-    { key: "inbox", label: waiting.length > 0 ? `결정 인박스 ${waiting.length}` : "결정 인박스" },
-    { key: "progress", label: "진행 현황" },
+    { key: "inbox", label: waiting.length > 0 ? t("tabs.inboxCount", { count: waiting.length }) : t("tabs.inbox") },
+    { key: "progress", label: t("tabs.progress") },
+    { key: "settings", label: t("tabs.settings") },
   ];
   return (
     <ScrollView
@@ -43,15 +47,30 @@ function ScreenBody({ theme, layout, host, navigation }: PluginScreenProps) {
         <TabBar<Tab> tabs={tabs} active={tab} onChange={setTab} theme={theme} />
         <View style={{ width: 1, height: 24, backgroundColor: theme.colors.border, marginHorizontal: 4 }} />
         <CtaButton
-          label="+ 새 요청"
+          label={t("newRequest.label")}
           tone="primary"
           disabled
-          accessibilityLabel="새 요청. 3단계에서 사용할 수 있어요"
+          accessibilityLabel={t("newRequest.pendingHint")}
           theme={theme}
           onPress={() => {}}
         />
       </View>
-      {tab === "inbox" ? <InboxView ctx={ctx} /> : <KanbanBoard ctx={ctx} />}
+      {tab === "inbox" ? <InboxView ctx={ctx} /> : null}
+      {tab === "progress" ? <KanbanBoard ctx={ctx} /> : null}
+      {tab === "settings" ? <SettingsView theme={theme} hostId={host.id} t={t} /> : null}
+    </ScrollView>
+  );
+}
+
+/** Paseo 설정 → 플러그인 화면. Coordinator 화면의 설정 탭과 같은 내용이다. */
+export function CoordinatorSettingsScreen({ theme, layout, host }: PluginSurfaceProps) {
+  const { t } = useT();
+  return (
+    <ScrollView
+      style={{ flex: 1, backgroundColor: theme.colors.surface0 }}
+      contentContainerStyle={{ padding: layout.compact ? 12 : 24 }}
+    >
+      <SettingsView theme={theme} hostId={host.id} t={t} />
     </ScrollView>
   );
 }

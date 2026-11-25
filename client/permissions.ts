@@ -1,4 +1,5 @@
 import type { usePaseo } from "@getpaseo/plugin/client";
+import type { T } from "./i18n";
 
 // SDK 가 권한 요청 타입을 따로 내보내지 않아서, 플러그인이 받는 Paseo API 의 타입에서 끌어온다.
 // 이렇게 하면 SDK 버전이 바뀌어도 타입이 그 버전의 실제 모양을 따른다.
@@ -21,27 +22,19 @@ export interface QuestionItem {
   allowOther: boolean;
 }
 
-export const KIND_LABELS: Record<PermissionRequest["kind"], string> = {
-  tool: "권한 요청",
-  plan: "계획 승인",
-  question: "질문",
-  mode: "모드 변경",
-  other: "요청",
-};
-
 /** 카드 맨 위 '결정할 것' 한 문장. 무엇에 답해야 하는지 바로 보이게 한다. */
-export function decisionPrompt(request: PermissionRequest): string {
+export function decisionPrompt(request: PermissionRequest, t: T): string {
   switch (request.kind) {
     case "tool":
-      return `${request.title ?? request.name} 실행을 허용할까요?`;
+      return t("prompts.tool", { name: request.title ?? request.name });
     case "plan":
-      return "이 계획대로 구현을 시작할까요?";
+      return t("prompts.plan");
     case "question":
-      return "에이전트가 답을 기다려요.";
+      return t("prompts.question");
     case "mode":
-      return request.title ?? "모드를 바꿀까요?";
+      return request.title ?? t("prompts.mode");
     default:
-      return request.title ?? `${request.name} 요청을 처리해 주세요.`;
+      return request.title ?? t("prompts.other", { name: request.name });
   }
 }
 
@@ -118,14 +111,21 @@ export function isQuestionAnswered(item: QuestionItem, selected: Record<string, 
   return (selected[item.question]?.length ?? 0) > 0 || Boolean(typed[item.question]?.trim());
 }
 
-/** 요청이 직접 내놓은 동작(계획 승인의 implement/reject 등). 없으면 허용/거절 기본 동작을 쓴다. */
+/**
+ * 요청이 직접 내놓은 동작(계획 승인의 implement/reject 등). 없으면 허용/거절 기본 동작을 쓴다.
+ * 기본 동작의 label 은 화면에서 번역하므로 여기서는 비워 둔다.
+ */
 export function requestActions(request: PermissionRequest): PermissionAction[] {
   if (request.actions && request.actions.length > 0) return request.actions;
   return [
-    { id: "allow", label: "허용", behavior: "allow", variant: "primary" },
-    { id: "deny", label: "거절", behavior: "deny", variant: "secondary" },
+    { id: "allow", label: "", behavior: "allow", variant: "primary" },
+    { id: "deny", label: "", behavior: "deny", variant: "secondary" },
   ];
 }
+
+// 에이전트에게 전달되는 문장은 화면 언어와 관계없이 영어로 둔다. 모델이 가장 안정적으로 읽는다.
+export const DENIED_BY_USER = "The user denied this request.";
+export const QUESTION_SKIPPED = "The user skipped this question without answering.";
 
 export function actionResponse(request: PermissionRequest, action: PermissionAction, message?: string): PermissionResponse {
   const explicit = Boolean(request.actions && request.actions.length > 0);
@@ -135,7 +135,7 @@ export function actionResponse(request: PermissionRequest, action: PermissionAct
   return {
     behavior: "deny",
     ...(explicit ? { selectedActionId: action.id } : {}),
-    message: message?.trim() || "사용자가 거절했습니다.",
+    message: message?.trim() || DENIED_BY_USER,
   };
 }
 

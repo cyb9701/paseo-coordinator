@@ -69,7 +69,7 @@ export function usePendingDirectory(): PendingDirectory {
         return undefined;
       })
       .catch((error) => {
-        if (!lifetime.signal.aborted) console.error("[coordinator] 에이전트 목록 구독 실패", error);
+        if (!lifetime.signal.aborted) console.error("[coordinator] agent list subscription failed", error);
       });
     return () => lifetime.abort();
   }, [paseo]);

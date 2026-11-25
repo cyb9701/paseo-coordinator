@@ -4,6 +4,8 @@ import { z } from "zod";
 // 검토자는 근거 확인과 자기 답 도출을 건너뛰지 않도록 high 이상만 쓴다 (RULES.md §7, 2026-11-25 사용자 결정).
 export const REVIEWER_EFFORTS = ["high", "xhigh", "max"] as const;
 
+export const OUTPUT_LANGUAGES = ["auto", "en", "ko"] as const;
+
 export const DEFAULT_COORDINATOR_MODEL = "claude/claude-opus-5-5";
 export const DEFAULT_REVIEWER_MODELS = ["claude/claude-opus-5-5", "claude/claude-sonnet-5-5"];
 
@@ -23,6 +25,11 @@ export const settingsSchema = z.object({
   reviewers: reviewersSchema.default({ models: DEFAULT_REVIEWER_MODELS, effort: "high" }),
   /** 코디네이터가 워커를 만들 수 있는 프로젝트. 비어 있으면 어디에도 만들지 않는다. */
   allowedProjectIds: z.array(z.string()).default([]),
+  /**
+   * 코디네이터가 쓰는 워크스페이스 이름과 결정 카드의 언어.
+   * auto 는 요청을 보낸 사람의 앱 언어를 따른다. server 는 앱 언어를 모르므로 요청을 만들 때 클라이언트가 함께 보낸다.
+   */
+  outputLanguage: z.enum(OUTPUT_LANGUAGES).default("auto"),
 });
 
 export type CoordinatorSettings = z.output<typeof settingsSchema>;

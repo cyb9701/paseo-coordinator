@@ -3,7 +3,7 @@ import { useAgents, useWorkspace } from "@getpaseo/plugin/client";
 import { useMemo } from "react";
 import { Text, View } from "react-native";
 import { AgentCard } from "./agent-card";
-import { COLUMNS, type ColumnKey, columnColor, columnRank } from "./agent-state";
+import { COLUMN_KEYS, type ColumnKey, columnColor, columnRank } from "./agent-state";
 import { useClassifier } from "./pending-store";
 import { formatAgo } from "./time";
 import { Chip, type ViewContext } from "./ui";
@@ -42,7 +42,7 @@ function useBoard(hostId: string): { board: Board; rows: readonly string[]; tota
 }
 
 function mostUrgent(cells: Map<ColumnKey, readonly AgentRef[]>): ColumnKey {
-  return COLUMNS.find((column) => (cells.get(column.key)?.length ?? 0) > 0)?.key ?? "waiting";
+  return COLUMN_KEYS.find((key) => (cells.get(key)?.length ?? 0) > 0) ?? "waiting";
 }
 
 function WorkspaceCell({ workspaceId, ctx }: { workspaceId: string; ctx: ViewContext }) {
@@ -68,7 +68,7 @@ function WorkspaceCell({ workspaceId, ctx }: { workspaceId: string; ctx: ViewCon
       ) : null}
       {workspace.enteredAt ? (
         <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 11 }}>
-          {formatAgo(workspace.enteredAt, ctx.now)}
+          {formatAgo(workspace.enteredAt, ctx.now, ctx.t)}
         </Text>
       ) : null}
     </View>
@@ -79,20 +79,20 @@ function HeaderRow({ totals, ctx }: { totals: Map<ColumnKey, number>; ctx: ViewC
   return (
     <View style={{ flexDirection: "row", borderBottomWidth: 1, borderColor: ctx.theme.colors.border }}>
       <View style={{ width: WORKSPACE_COLUMN_WIDTH, padding: 10, justifyContent: "flex-end" }}>
-        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>요청 · 워크스페이스</Text>
+        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{ctx.t("board.requestOrWorkspace")}</Text>
       </View>
-      {COLUMNS.map((column) => (
-        <View key={column.key} style={{ flex: 1, padding: 10, gap: 2 }}>
+      {COLUMN_KEYS.map((key) => (
+        <View key={key} style={{ flex: 1, padding: 10, gap: 2 }}>
           <View style={{ flexDirection: "row", gap: 8 }}>
-            <Text style={{ color: columnColor(column.key, ctx.theme), fontSize: 12, fontWeight: "600" }}>
-              {column.label}
+            <Text style={{ color: columnColor(key, ctx.theme), fontSize: 12, fontWeight: "600" }}>
+              {ctx.t(`columns.${key}.label`)}
             </Text>
             <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>
-              {String(totals.get(column.key) ?? 0)}
+              {String(totals.get(key) ?? 0)}
             </Text>
           </View>
           <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 11 }}>
-            {column.hint}
+            {ctx.t(`columns.${key}.hint`)}
           </Text>
         </View>
       ))}
@@ -125,7 +125,7 @@ function RequestRowsPlaceholder({ ctx }: { ctx: ViewContext }) {
   return (
     <View style={{ padding: 12, borderBottomWidth: 1, borderColor: ctx.theme.colors.border }}>
       <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>
-        코디네이터에게 보낸 요청이 아직 없어요. 요청을 보내면 요청마다 한 줄씩, 작업 카드가 상태 칸에 놓여요.
+        {ctx.t("board.noRequests")}
       </Text>
     </View>
   );
@@ -153,12 +153,12 @@ function BoardRow({
       <View style={{ width: WORKSPACE_COLUMN_WIDTH - 3, padding: 10 }}>
         <WorkspaceCell workspaceId={workspaceId} ctx={ctx} />
       </View>
-      {COLUMNS.map((column) => (
+      {COLUMN_KEYS.map((key) => (
         <View
-          key={column.key}
+          key={key}
           style={{ flex: 1, minWidth: 0, padding: 8, gap: 8, borderLeftWidth: 1, borderColor: ctx.theme.colors.border }}
         >
-          {(cells.get(column.key) ?? []).map((ref) => (
+          {(cells.get(key) ?? []).map((ref) => (
             <AgentCard key={ref.key} agentRef={ref} ctx={ctx} />
           ))}
         </View>
@@ -176,18 +176,18 @@ function CompactCard({ agentRef, workspaceId, ctx }: { agentRef: AgentRef; works
 function CompactBoard({ board, rows, totals, ctx }: { board: Board; rows: readonly string[]; totals: Map<ColumnKey, number>; ctx: ViewContext }) {
   return (
     <View style={{ gap: 16 }}>
-      {COLUMNS.map((column) => (
-        <View key={column.key} style={{ gap: 8 }}>
+      {COLUMN_KEYS.map((key) => (
+        <View key={key} style={{ gap: 8 }}>
           <View style={{ flexDirection: "row", gap: 8 }}>
-            <Text style={{ color: columnColor(column.key, ctx.theme), fontSize: 13, fontWeight: "600" }}>
-              {column.label}
+            <Text style={{ color: columnColor(key, ctx.theme), fontSize: 13, fontWeight: "600" }}>
+              {ctx.t(`columns.${key}.label`)}
             </Text>
             <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 13 }}>
-              {`${totals.get(column.key) ?? 0} · ${column.hint}`}
+              {`${totals.get(key) ?? 0} · ${ctx.t(`columns.${key}.hint`)}`}
             </Text>
           </View>
           {rows.flatMap((workspaceId) =>
-            (board.get(workspaceId)?.get(column.key) ?? []).map((ref) => (
+            (board.get(workspaceId)?.get(key) ?? []).map((ref) => (
               <CompactCard key={ref.key} agentRef={ref} workspaceId={workspaceId} ctx={ctx} />
             )),
           )}
@@ -215,12 +215,12 @@ export function KanbanBoard({ ctx }: { ctx: ViewContext }) {
       }}
     >
       <HeaderRow totals={totals} ctx={ctx} />
-      <SectionRow title="요청" detail="0" ctx={ctx} />
+      <SectionRow title={ctx.t("board.requests")} detail="0" ctx={ctx} />
       <RequestRowsPlaceholder ctx={ctx} />
-      <SectionRow title="직접 띄운 에이전트" detail={`워크스페이스 ${rows.length}`} ctx={ctx} />
+      <SectionRow title={ctx.t("board.direct")} detail={ctx.t("board.workspaces", { count: rows.length })} ctx={ctx} />
       {rows.length === 0 ? (
         <View style={{ padding: 12 }}>
-          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>이 host에 에이전트가 없어요.</Text>
+          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{ctx.t("board.noAgents")}</Text>
         </View>
       ) : (
         rows.map((workspaceId) => (

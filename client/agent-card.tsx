@@ -3,7 +3,7 @@ import { useAgent, useAgents, usePaseo } from "@getpaseo/plugin/client";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { type ColumnKey, columnOf, isVisibleAgent, stateColor, stateLabel } from "./agent-state";
+import { type ColumnKey, columnOf, isVisibleAgent, stateColor } from "./agent-state";
 import { useClassifier } from "./pending-store";
 import { formatAgo } from "./time";
 import { CtaButton, type ViewContext } from "./ui";
@@ -34,14 +34,14 @@ function useLastAssistantText(agentId: string, hostId: string, bucket: string) {
   });
 }
 
-function ctaFor(column: ColumnKey): { label: string; primary: boolean } {
+function ctaFor(column: ColumnKey, t: ViewContext["t"]): { label: string; primary: boolean } {
   switch (column) {
     case "react":
-      return { label: "열어서 처리", primary: true };
+      return { label: t("card.openToHandle"), primary: true };
     case "review":
-      return { label: "✓ 열어서 확인", primary: true };
+      return { label: t("card.openToReview"), primary: true };
     default:
-      return { label: "열기", primary: false };
+      return { label: t("card.open"), primary: false };
   }
 }
 
@@ -58,12 +58,15 @@ function SubSessions({ parentId, ctx }: { parentId: string; ctx: ViewContext }) 
     where: (a) => isVisibleAgent(a) && a.parentAgentId === parentId && classify.column(a) === "review",
   });
   if (children.length === 0) return null;
-  const summary = `하위 세션 ${children.length}개${unread.length > 0 ? ` · 결과 미확인 ${unread.length}개` : ""}`;
+  const summary =
+    unread.length > 0
+      ? ctx.t("card.subSessionsUnread", { count: children.length, unread: unread.length })
+      : ctx.t("card.subSessions", { count: children.length });
   return (
     <View style={{ borderTopWidth: 1, borderColor: ctx.theme.colors.border, paddingTop: 6, gap: 4 }}>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={`${summary} ${open ? "접기" : "펼치기"}`}
+        accessibilityLabel={`${summary} ${open ? ctx.t("card.collapse") : ctx.t("card.expand")}`}
         onPress={() => setOpen((value) => !value)}
         style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 2 }}
       >
@@ -91,14 +94,14 @@ function SubSessionRow({ agentRef, ctx }: { agentRef: AgentRef; ctx: ViewContext
     <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingLeft: 16 }}>
       <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: stateColor(state, ctx.theme) }} />
       <Text numberOfLines={1} style={{ color: ctx.theme.colors.foreground, fontSize: 12, flex: 1 }}>
-        {agent.title ?? "제목 없는 하위 세션"}
+        {agent.title ?? ctx.t("card.untitledSubSession")}
       </Text>
-      <Text style={{ color: stateColor(state, ctx.theme), fontSize: 11 }}>{stateLabel(state)}</Text>
+      <Text style={{ color: stateColor(state, ctx.theme), fontSize: 11 }}>{ctx.t(`states.${state}`)}</Text>
       {ctx.navigation ? (
         <CtaButton
           size="sm"
-          label="열기"
-          accessibilityLabel={`${agent.title ?? "하위 세션"} 열기`}
+          label={ctx.t("card.open")}
+          accessibilityLabel={ctx.t("card.openNamed", { name: agent.title ?? ctx.t("card.untitledSubSession") })}
           theme={ctx.theme}
           onPress={() => ctx.navigation?.openAgent({ agentId: agentRef.id, serverId: agent.hostId })}
         />
@@ -139,8 +142,8 @@ export function AgentCard({
   if (!agent) return null;
   const state = classify.state(agent);
   const color = stateColor(state, ctx.theme);
-  const cta = ctaFor(columnOf(state));
-  const title = agent.title ?? "제목 없는 에이전트";
+  const cta = ctaFor(columnOf(state), ctx.t);
+  const title = agent.title ?? ctx.t("card.untitledAgent");
   return (
     <View
       style={{
@@ -163,9 +166,9 @@ export function AgentCard({
         <Text numberOfLines={2} style={{ color: ctx.theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>
           {agent.parentAgentId ? `↳ ${title}` : title}
         </Text>
-        <Text style={{ color, fontSize: 11 }}>{stateLabel(state)}</Text>
+        <Text style={{ color, fontSize: 11 }}>{ctx.t(`states.${state}`)}</Text>
         <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 11 }}>
-          {formatAgo(agent.lastActivityAt, ctx.now)}
+          {formatAgo(agent.lastActivityAt, ctx.now, ctx.t)}
         </Text>
       </View>
       {preview.data ? (

@@ -23,28 +23,18 @@ export type AgentStateKey =
  */
 export type ColumnKey = "react" | "review" | "auto" | "running" | "waiting";
 
-interface StateInfo {
-  label: string;
-  column: ColumnKey;
-}
-
-const STATES: Record<AgentStateKey, StateInfo> = {
-  permission: { label: "결정 필요", column: "react" },
-  error: { label: "에러", column: "react" },
-  finished: { label: "결과 미확인", column: "review" },
-  running: { label: "실행 중", column: "running" },
-  initializing: { label: "시작 중", column: "running" },
-  idle: { label: "대기", column: "waiting" },
-  closed: { label: "세션 닫힘", column: "waiting" },
+// 이름은 화면 언어에 따라 i18n.ts 의 states.* / columns.* 에서 꺼낸다.
+const STATE_COLUMNS: Record<AgentStateKey, ColumnKey> = {
+  permission: "react",
+  error: "react",
+  finished: "review",
+  running: "running",
+  initializing: "running",
+  idle: "waiting",
+  closed: "waiting",
 };
 
-export const COLUMNS: readonly { key: ColumnKey; label: string; hint: string }[] = [
-  { key: "react", label: "내 결정 필요", hint: "작업이 나를 기다림" },
-  { key: "review", label: "확인 필요", hint: "진행 중, 나중에 봐도 됨" },
-  { key: "auto", label: "코디네이터 처리 중", hint: "검토자가 대신 판단 중" },
-  { key: "running", label: "작업 중", hint: "워커 실행 중" },
-  { key: "waiting", label: "대기", hint: "시작 전·쉬는 중" },
-];
+export const COLUMN_KEYS: readonly ColumnKey[] = ["react", "review", "auto", "running", "waiting"];
 
 type StateInput = Pick<PluginAgentSnapshot, "status" | "attentionReason" | "requiresAttention">;
 
@@ -62,16 +52,12 @@ export function agentState(agent: StateInput, hasPending = false): AgentStateKey
   return "idle";
 }
 
-export function stateLabel(key: AgentStateKey): string {
-  return STATES[key].label;
-}
-
 export function columnOf(key: AgentStateKey): ColumnKey {
-  return STATES[key].column;
+  return STATE_COLUMNS[key];
 }
 
 export function columnRank(key: ColumnKey): number {
-  return COLUMNS.findIndex((column) => column.key === key);
+  return COLUMN_KEYS.indexOf(key);
 }
 
 // 컬럼마다 다른 색을 쓴다. accent 가 초록인 테마가 있어서 확인 필요를 statusSuccess 로 두면
@@ -92,7 +78,7 @@ export function columnColor(key: ColumnKey, theme: PluginTheme): string {
 }
 
 export function stateColor(key: AgentStateKey, theme: PluginTheme): string {
-  return columnColor(STATES[key].column, theme);
+  return columnColor(STATE_COLUMNS[key], theme);
 }
 
 /** 검토자처럼 플러그인이 만드는 background 에이전트는 사람이 볼 대상이 아니라서 뺀다. */

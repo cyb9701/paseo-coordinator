@@ -8,7 +8,7 @@ import { AgentCard } from "./agent-card";
 import { columnColor, isVisibleAgent } from "./agent-state";
 import { useClassifier, usePending, useSentLog } from "./pending-store";
 import {
-  KIND_LABELS,
+  type PermissionAction,
   type PermissionRequest,
   type PermissionResponse,
   type QuestionItem,
@@ -18,6 +18,7 @@ import {
   isQuestionAnswered,
   planText,
   questionItems,
+  QUESTION_SKIPPED,
   questionResponse,
   requestActions,
   toolFacts,
@@ -150,7 +151,7 @@ function QuestionForm({
         <View key={item.question} style={{ gap: 8 }}>
           <Text style={{ color: ctx.theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>
             {item.question}
-            {item.multiSelect ? "  (여러 개 선택)" : ""}
+            {item.multiSelect ? `  ${ctx.t("inbox.multiSelect")}` : ""}
           </Text>
           <View style={{ gap: 6 }}>
             {item.options.map((option) => {
@@ -186,9 +187,9 @@ function QuestionForm({
             <TextInput
               value={typed[item.question] ?? ""}
               onChangeText={(text) => onType(item.question, text)}
-              placeholder="직접 답하기"
+              placeholder={ctx.t("inbox.answerYourself")}
               placeholderTextColor={ctx.theme.colors.foregroundMuted}
-              accessibilityLabel={`${item.question} 직접 답하기`}
+              accessibilityLabel={ctx.t("inbox.answerYourselfFor", { question: item.question })}
               style={{
                 padding: 10,
                 borderRadius: 8,
@@ -245,7 +246,7 @@ function CardFrame({
           {`${workspace ?? ""} › ${agent.title}`}
         </Text>
         <View style={{ flex: 1 }} />
-        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{`${formatAgo(agent.since, ctx.now)} 대기`}</Text>
+        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{ctx.t("time.waiting", { ago: formatAgo(agent.since, ctx.now, ctx.t) })}</Text>
       </View>
       {children}
     </View>
@@ -256,7 +257,7 @@ function ErrorLine({ error, ctx }: { error: unknown; ctx: ViewContext }) {
   if (!error) return null;
   return (
     <Text style={{ color: ctx.theme.colors.statusDanger, fontSize: 12 }}>
-      {`처리하지 못했어요: ${error instanceof Error ? error.message : String(error)}`}
+      {ctx.t("inbox.failed", { message: error instanceof Error ? error.message : String(error) })}
     </Text>
   );
 }
@@ -265,12 +266,18 @@ function OpenAgentButton({ agent, ctx, primary = false }: { agent: CardAgent; ct
   if (!ctx.navigation) return null;
   return (
     <CtaButton
-      label="에이전트 열기 ↗"
+      label={ctx.t("inbox.openAgent")}
       tone={primary ? "primary" : "neutral"}
       theme={ctx.theme}
       onPress={() => ctx.navigation?.openAgent({ agentId: agent.agentId, serverId: agent.hostId })}
     />
   );
+}
+
+// Paseo 가 준 동작(계획 승인의 Implement 등)은 그 label 을 쓰고, 기본 허용/거절은 화면 언어로 보인다.
+function actionLabel(action: PermissionAction, ctx: ViewContext): string {
+  if (action.label) return action.label;
+  return action.behavior === "allow" ? ctx.t("inbox.allow") : ctx.t("inbox.deny");
 }
 
 function DecisionCard({ request, agent, ctx }: { request: PermissionRequest; agent: CardAgent; ctx: ViewContext }) {
@@ -299,19 +306,19 @@ function DecisionCard({ request, agent, ctx }: { request: PermissionRequest; age
     });
 
   return (
-    <CardFrame kind={KIND_LABELS[request.kind]} agent={agent} ctx={ctx}>
+    <CardFrame kind={ctx.t(`kinds.${request.kind}`)} agent={agent} ctx={ctx}>
       <Section
-        label="결정할 것"
+        label={ctx.t("inbox.decide")}
         ctx={ctx}
         value={
           <Text style={{ color: ctx.theme.colors.foreground, fontSize: 14, fontWeight: "600" }}>
-            {decisionPrompt(request)}
+            {decisionPrompt(request, ctx.t)}
           </Text>
         }
       />
       {facts ? (
         <Section
-          label="사실"
+          label={ctx.t("inbox.facts")}
           ctx={ctx}
           value={
             <>
@@ -328,7 +335,7 @@ function DecisionCard({ request, agent, ctx }: { request: PermissionRequest; age
           }
         />
       ) : null}
-      {plan ? <Section label="계획" ctx={ctx} value={<CodeBox text={plan} ctx={ctx} maxHeight={320} />} /> : null}
+      {plan ? <Section label={ctx.t("inbox.plan")} ctx={ctx} value={<CodeBox text={plan} ctx={ctx} maxHeight={320} />} /> : null}
       {questions.length > 0 ? (
         <QuestionForm
           items={questions}
@@ -347,24 +354,24 @@ function DecisionCard({ request, agent, ctx }: { request: PermissionRequest; age
         {request.kind === "question" ? (
           <>
             <CtaButton
-              label="답변 보내기"
+              label={ctx.t("inbox.sendAnswer")}
               tone="primary"
               disabled={busy || !allAnswered}
               theme={ctx.theme}
               onPress={() => submit(questionResponse(questions, selected, typed))}
             />
             <CtaButton
-              label="질문 거절"
+              label={ctx.t("inbox.skipQuestion")}
               disabled={busy}
               theme={ctx.theme}
-              onPress={() => submit({ behavior: "deny", message: "사용자가 질문에 답하지 않고 넘겼습니다." })}
+              onPress={() => submit({ behavior: "deny", message: QUESTION_SKIPPED })}
             />
           </>
         ) : (
           actions.map((action) => (
             <CtaButton
               key={action.id}
-              label={action.label}
+              label={actionLabel(action, ctx)}
               tone={action.behavior === "allow" && action.variant !== "secondary" ? "primary" : "neutral"}
               disabled={busy}
               theme={ctx.theme}
@@ -373,7 +380,7 @@ function DecisionCard({ request, agent, ctx }: { request: PermissionRequest; age
           ))
         )}
         <CtaButton
-          label={instructing ? "직접 지시 닫기" : "✎ 직접 지시"}
+          label={instructing ? ctx.t("inbox.closeInstruct") : ctx.t("inbox.instruct")}
           disabled={busy}
           theme={ctx.theme}
           onPress={() => setInstructing((value) => !value)}
@@ -382,8 +389,8 @@ function DecisionCard({ request, agent, ctx }: { request: PermissionRequest; age
       </View>
       {instructing ? (
         <InstructionBox
-          placeholder="에이전트에게 보낼 지시. 이 요청은 거절되고 지시가 함께 전달돼요."
-          submitLabel="거절하고 지시 보내기"
+          placeholder={ctx.t("inbox.instructionPlaceholder")}
+          submitLabel={ctx.t("inbox.denyWithInstruction")}
           busy={busy}
           ctx={ctx}
           onSubmit={(text) => submit(instructionResponse(request, text))}
@@ -403,40 +410,40 @@ function ErrorCard({ message, agent, ctx }: { message: string | null; agent: Car
   // 지시를 보낸 뒤 에이전트가 다시 움직였다가 또 에러로 멈춘 경우. 같은 지시를 반복해도 풀리지 않을 가능성이 크다.
   const failedAgain = last !== undefined && Date.parse(agent.since) > Date.parse(last.at);
   return (
-    <CardFrame kind="에러" agent={agent} ctx={ctx}>
+    <CardFrame kind={ctx.t("inbox.error")} agent={agent} ctx={ctx}>
       <Section
-        label="결정할 것"
+        label={ctx.t("inbox.decide")}
         ctx={ctx}
         value={
           <>
             <Text style={{ color: ctx.theme.colors.foreground, fontSize: 14, fontWeight: "600" }}>
               {failedAgain
-                ? "지시를 보낸 뒤에도 다시 에러로 멈췄어요."
-                : "에러로 멈췄어요. 어떻게 이어갈지 지시해 주세요."}
+                ? ctx.t("inbox.errorAgain")
+                : ctx.t("inbox.errorDecide")}
             </Text>
             {failedAgain ? (
               <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>
-                같은 지시로는 풀리지 않을 수 있어요. 에이전트를 열어 모델이나 설정을 확인해 주세요.
+                {ctx.t("inbox.errorAgainHint")}
               </Text>
             ) : null}
           </>
         }
       />
-      <Section label="에러" ctx={ctx} value={<CodeBox text={message ?? "에러 내용을 받지 못했어요."} ctx={ctx} maxHeight={200} />} />
+      <Section label={ctx.t("inbox.error")} ctx={ctx} value={<CodeBox text={message ?? ctx.t("inbox.errorNoMessage")} ctx={ctx} maxHeight={200} />} />
       {history.length > 0 ? (
         <Section
-          label="보낸 지시"
+          label={ctx.t("inbox.sentInstructions")}
           ctx={ctx}
           value={history.slice(-3).map((item) => (
             <Text key={item.at} style={{ color: ctx.theme.colors.foreground, fontSize: 12 }}>
-              {`${formatAgo(item.at, ctx.now)} · ${item.text}`}
+              {`${formatAgo(item.at, ctx.now, ctx.t)} · ${item.text}`}
             </Text>
           ))}
         />
       ) : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         <CtaButton
-          label={instructing ? "직접 지시 닫기" : "✎ 직접 지시"}
+          label={instructing ? ctx.t("inbox.closeInstruct") : ctx.t("inbox.instruct")}
           tone={failedAgain ? "neutral" : "primary"}
           disabled={send.isPending}
           theme={ctx.theme}
@@ -446,8 +453,8 @@ function ErrorCard({ message, agent, ctx }: { message: string | null; agent: Car
       </View>
       {instructing ? (
         <InstructionBox
-          placeholder="에이전트에게 보낼 다음 지시"
-          submitLabel={send.isPending ? "보내는 중…" : "지시 보내기"}
+          placeholder={ctx.t("inbox.nextInstructionPlaceholder")}
+          submitLabel={send.isPending ? ctx.t("inbox.sending") : ctx.t("inbox.send")}
           busy={send.isPending}
           ctx={ctx}
           onSubmit={(text) => send.mutate(text, { onSuccess: () => setInstructing(false) })}
@@ -473,7 +480,7 @@ function AgentDecisions({ agentRef, ctx }: { agentRef: AgentRef; ctx: ViewContex
   const cardAgent: CardAgent = {
     agentId: agentRef.id,
     hostId: agent.hostId,
-    title: agent.title ?? "제목 없는 에이전트",
+    title: agent.title ?? ctx.t("card.untitledAgent"),
     workspaceId: agent.workspaceId,
     since: agent.lastActivityAt,
   };
@@ -492,9 +499,9 @@ function AgentDecisions({ agentRef, ctx }: { agentRef: AgentRef; ctx: ViewContex
   }
   // attentionReason 은 권한 대기인데 목록 구독이 아직 요청을 받지 못한 짧은 순간.
   return (
-    <CardFrame kind="요청" agent={cardAgent} ctx={ctx}>
+    <CardFrame kind={ctx.t("kinds.other")} agent={cardAgent} ctx={ctx}>
       <Text style={{ color: ctx.theme.colors.foreground }}>
-        {directory.ready ? "대기 중인 요청을 읽지 못했어요. 에이전트를 열어서 확인해 주세요." : "대기 중인 요청을 읽는 중…"}
+        {directory.ready ? ctx.t("inbox.requestNotFound") : ctx.t("inbox.loadingRequest")}
       </Text>
       <View style={{ flexDirection: "row" }}>
         <OpenAgentButton agent={cardAgent} ctx={ctx} />
@@ -524,28 +531,28 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
     <View style={{ gap: 20, maxWidth: 880 }}>
       <View style={{ gap: 10 }}>
         <SectionHeader
-          title="반응 필요"
+          title={ctx.t("inbox.react")}
           count={reacting.length}
-          hint="작업이 멈춰서 나를 기다려요"
+          hint={ctx.t("inbox.reactHint")}
           color={columnColor("react", ctx.theme)}
           ctx={ctx}
         />
         {reacting.length === 0 ? (
-          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 13 }}>지금 멈춰 있는 작업이 없어요.</Text>
+          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 13 }}>{ctx.t("inbox.nothingBlocked")}</Text>
         ) : (
           reacting.map((ref) => <AgentDecisions key={ref.key} agentRef={ref} ctx={ctx} />)
         )}
       </View>
       <View style={{ gap: 10 }}>
         <SectionHeader
-          title="확인 필요"
+          title={ctx.t("inbox.review")}
           count={reviewing.length}
-          hint="작업은 끝났거나 계속되고, 나중에 봐도 돼요"
+          hint={ctx.t("inbox.reviewHint")}
           color={columnColor("review", ctx.theme)}
           ctx={ctx}
         />
         {reviewing.length === 0 ? (
-          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 13 }}>확인할 결과가 없어요.</Text>
+          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 13 }}>{ctx.t("inbox.nothingToReview")}</Text>
         ) : (
           reviewing.map((ref) => <AgentCard key={ref.key} agentRef={ref} ctx={ctx} />)
         )}

@@ -5,6 +5,7 @@ import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { Text, View } from "react-native";
 import { useMemo } from "react";
 import { isVisibleAgent } from "./agent-state";
+import { useT } from "./i18n";
 import { classifierFor, usePendingDirectory } from "./pending-store";
 
 export const SCREEN_ID = "main";
@@ -14,6 +15,7 @@ export const SCREEN_ID = "main";
 // 사이드바는 화면과 다른 트리에 그려져서 구독을 따로 갖는다.
 
 export function CoordinatorSidebarItem({ theme, host, currentScreen, openScreen }: PluginSidebarItemProps) {
+  const { t } = useT();
   const directory = usePendingDirectory();
   const classify = useMemo(() => classifierFor(directory), [directory]);
   const blocked = useAgents({
@@ -28,7 +30,7 @@ export function CoordinatorSidebarItem({ theme, host, currentScreen, openScreen 
       trailing={
         blocked.length > 0 ? (
           <View
-            accessibilityLabel={`결정 필요 ${blocked.length}건`}
+            accessibilityLabel={t("states.permission") + ` ${blocked.length}`}
             style={{
               minWidth: 18,
               paddingHorizontal: 5,

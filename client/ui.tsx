@@ -1,6 +1,7 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
 import { Pressable, Text, View } from "react-native";
+import type { T } from "./i18n";
 
 export interface ViewContext {
   theme: PluginTheme;
@@ -8,6 +9,7 @@ export interface ViewContext {
   hostId: string;
   now: number;
   navigation: PluginScreenProps["navigation"];
+  t: T;
 }
 
 type Tone = "primary" | "neutral";
@@ -136,5 +138,57 @@ export function Chip({ label, color, theme }: { label: string; color: string; th
         {label}
       </Text>
     </View>
+  );
+}
+
+/** 선택 박스. 단일 선택(radio)과 여러 개 선택(checkbox)에 같이 쓴다. 선택되면 테두리와 표시로 구분한다. */
+export function ChoiceBox({
+  label,
+  detail,
+  selected,
+  multiple = false,
+  disabled = false,
+  onPress,
+  theme,
+}: {
+  label: string;
+  detail?: string | null;
+  selected: boolean;
+  multiple?: boolean;
+  disabled?: boolean;
+  onPress(): void;
+  theme: PluginTheme;
+}) {
+  const mark = multiple ? (selected ? "☑" : "☐") : selected ? "●" : "○";
+  return (
+    <Pressable
+      accessibilityRole={multiple ? "checkbox" : "radio"}
+      accessibilityState={{ checked: selected, disabled }}
+      accessibilityLabel={detail ? `${label}, ${detail}` : label}
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => ({
+        flexDirection: "row",
+        alignItems: "flex-start",
+        gap: 8,
+        paddingVertical: 8,
+        paddingHorizontal: 10,
+        borderRadius: 8,
+        borderWidth: 1,
+        borderColor: selected ? theme.colors.accent : theme.colors.border,
+        backgroundColor: selected || pressed ? theme.colors.surface2 : theme.colors.surface0,
+        opacity: disabled ? 0.45 : 1,
+      })}
+    >
+      <Text style={{ color: selected ? theme.colors.accent : theme.colors.foregroundMuted, fontSize: 13 }}>{mark}</Text>
+      <View style={{ flexShrink: 1, gap: 2 }}>
+        <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: selected ? "600" : "400" }}>{label}</Text>
+        {detail ? (
+          <Text numberOfLines={2} style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+            {detail}
+          </Text>
+        ) : null}
+      </View>
+    </Pressable>
   );
 }
