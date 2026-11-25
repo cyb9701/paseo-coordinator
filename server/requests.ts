@@ -54,6 +54,7 @@ export async function createRequest(
       answer: null,
       question: null,
       reviewedAt: null,
+      coordinatorAgentId: null,
     };
     return { state: { ...state, requests: [...state.requests, request] }, result: { id } };
   });
@@ -95,12 +96,18 @@ export async function revisePlan({ id, text }: { id: string; text: string }, sto
     if (request.status === "done" || request.status === "canceled") {
       throw new Error(`Request ${id} is ${request.status}; it does not take instructions now.`);
     }
-    // 이미 워커가 일하는 요청을 다시 계획하면 같은 작업이 또 배정된다. 워커에게 바뀐 내용을 전하는 길(4단계)이
-    // 생기기 전까지는 막고, 워커를 직접 열어 지시하게 한다.
-    if (request.status === "running" && request.tasks.some((task) => task.agentId)) {
-      throw new Error("Workers have already started on this request. Open a worker and instruct it directly for now.");
-    }
     const entry = { text, at: new Date().toISOString(), kind: "instruction" as const };
+    // 이미 워커가 일하는 요청은 다시 계획하지 않는다(같은 작업이 또 배정된다). 요청은 진행 중인 채로 지시만 남기고,
+    // 코디네이터가 읽어서 관련 워커에게 전한다 (coordinator_message_worker).
+    if (request.status === "running" && request.tasks.some((task) => task.agentId)) {
+      return {
+        state: {
+          ...state,
+          requests: state.requests.map((item) => (item.id === id ? { ...item, feedback: [...item.feedback, entry] } : item)),
+        },
+        result: undefined,
+      };
+    }
     return {
       state: {
         ...state,
@@ -149,6 +156,76 @@ export async function acknowledge({ id }: { id: string }, store: StateStore) {
         ...state,
         requests: state.requests.map((item) =>
           item.id === id ? { ...item, reviewedAt, status: item.status === "answered" ? ("done" as const) : item.status } : item,
+        ),
+      },
+      result: undefined,
+    };
+  });
+  return {};
+}
+
+/**
+ * 워커 질문 카드에서 사람이 결정했다. 고른 선택지(또는 직접 쓴 지시)를 워커에게 보낼 문장으로 돌려주고,
+ * 카드를 닫고 결정을 기록한다. 보내는 일은 호출한 쪽이 워커 통로로 한다.
+ */
+export async function resolveBlocker(
+  input: { requestId: string; taskNumber: number; choice: string | null; instruction: string | null },
+  store: StateStore,
+): Promise<string> {
+  return store.update((state) => {
+    const request = state.requests.find((item) => item.id === input.requestId);
+    const task = request?.tasks.find((item) => item.number === input.taskNumber);
+    const blocker = task?.blocker;
+    if (!request || !task || !blocker) throw new Error("This decision card is no longer open.");
+    const option = input.choice ? blocker.coordinator?.options.find((item) => item.label === input.choice) : undefined;
+    if (input.choice && !option) throw new Error(`Unknown option ${input.choice}.`);
+    const instruction = input.instruction?.trim();
+    if (!option && !instruction) throw new Error("Choose an option or write an instruction.");
+    const message = option
+      ? `[Decision from the human on what you reported: "${blocker.summary}"]\nChosen: ${option.label}\n${option.instruction}${instruction ? `\nAlso: ${instruction}` : ""}\nContinue your task with this decision.`
+      : `[Instruction from the human on what you reported: "${blocker.summary}"]\n${instruction}\nContinue your task with this instruction.`;
+    const at = new Date().toISOString();
+    const summary = `${blocker.summary} → ${option ? option.label : instruction}`;
+    return {
+      state: {
+        ...state,
+        requests: state.requests.map((item) =>
+          item.id !== request.id
+            ? item
+            : {
+                ...item,
+                tasks: item.tasks.map((t) =>
+                  t.number !== task.number
+                    ? t
+                    : { ...t, status: "running" as const, note: null, blocker: null, decisions: [...t.decisions, { summary, by: "human" as const, at }] },
+                ),
+              },
+        ),
+      },
+      result: message,
+    };
+  });
+}
+
+/** 카드에서 코디네이터에게 묻는다. 답은 코디네이터가 coordinator_answer_question 으로 단다. */
+export async function askCoordinator(input: { requestId: string; taskNumber: number; question: string }, store: StateStore) {
+  await store.update((state) => {
+    const request = state.requests.find((item) => item.id === input.requestId);
+    const task = request?.tasks.find((item) => item.number === input.taskNumber);
+    if (!task?.blocker) throw new Error("This decision card is no longer open.");
+    const entry = { question: input.question, answer: null, at: new Date().toISOString(), answeredAt: null, notifiedAt: null };
+    return {
+      state: {
+        ...state,
+        requests: state.requests.map((item) =>
+          item.id !== input.requestId
+            ? item
+            : {
+                ...item,
+                tasks: item.tasks.map((t) =>
+                  t.number === input.taskNumber && t.blocker ? { ...t, blocker: { ...t.blocker, qa: [...t.blocker.qa, entry] } } : t,
+                ),
+              },
         ),
       },
       result: undefined,

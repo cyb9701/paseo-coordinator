@@ -1,7 +1,7 @@
 import type { PluginAgentSnapshot } from "@getpaseo/plugin";
 import { usePaseo } from "@getpaseo/plugin/client";
 import { type ReactNode, createContext, useContext, useEffect, useMemo, useState } from "react";
-import { type AgentStateKey, type ColumnKey, agentState, columnOf, isVisibleAgent } from "./agent-state";
+import { type AgentStateKey, type ColumnKey, agentState, columnOf, isDirectAgent, isVisibleAgent } from "./agent-state";
 import type { PermissionRequest } from "./permissions";
 
 /**
@@ -103,7 +103,8 @@ export function classifierFor(directory: PendingDirectory): Classifier {
   return {
     state,
     column,
-    isCard: (agent) => isVisibleAgent(agent) && (agent.parentAgentId === null || column(agent) === "react"),
+    // 진행 현황의 '직접 띄운 에이전트' 구역. 워커는 요청 행에 있으므로 뺀다.
+    isCard: (agent) => isDirectAgent(agent) && (agent.parentAgentId === null || column(agent) === "react"),
   };
 }
 

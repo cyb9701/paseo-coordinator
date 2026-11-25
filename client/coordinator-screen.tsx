@@ -4,7 +4,7 @@ import { useAgents } from "@getpaseo/plugin/client";
 import { useState } from "react";
 import { ScrollView, View } from "react-native";
 import { isVisibleAgent } from "./agent-state";
-import { CoordinatorStateProvider, requestNeedsReaction, useCoordinatorState } from "./coordinator-state";
+import { CoordinatorStateProvider, blockerCards, requestNeedsReaction, useCoordinatorState } from "./coordinator-state";
 import { FontProvider, useFonts } from "./fonts";
 import { useT } from "./i18n";
 import { InboxView } from "./inbox";
@@ -46,7 +46,8 @@ function ScreenBody({ theme, layout, host, navigation }: PluginScreenProps) {
   const { state } = useCoordinatorState();
   const blocked =
     cardCount(waiting.map((ref) => ref.id), pending) +
-    (state?.requests ?? []).filter(requestNeedsReaction).length;
+    (state?.requests ?? []).filter(requestNeedsReaction).length +
+    blockerCards(state?.requests ?? []).length;
   const tabs: readonly { key: Tab; label: string }[] = [
     { key: "inbox", label: blocked > 0 ? t("tabs.inboxCount", { count: blocked }) : t("tabs.inbox") },
     { key: "progress", label: t("tabs.progress") },

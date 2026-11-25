@@ -30,6 +30,46 @@ export const questionSchema = z.object({
 export const REQUEST_KINDS = ["read", "change"] as const;
 export const TASK_STATUSES = ["waiting", "running", "blocked", "review", "done"] as const;
 
+const qaSchema = z.object({
+  question: z.string(),
+  answer: z.string().nullable(),
+  at: z.string(),
+  answeredAt: z.string().nullable().default(null),
+  /** 코디네이터에게 알린 시각. */
+  notifiedAt: z.string().nullable().default(null),
+});
+
+/**
+ * 워커가 막혀서 보고한 것과, 그에 대한 코디네이터의 판단. 사람이 이것을 보고 결정한다 (4단계).
+ * 6단계 전까지는 코디네이터가 직접 답하지 않고 항상 사람 카드로 올린다 (검토자 규칙, RULES.md §5).
+ */
+export const blockerSchema = z.object({
+  kind: z.enum(["question", "change", "stuck"]),
+  summary: z.string(),
+  facts: z.array(z.string()),
+  options: z.array(z.object({ label: z.string(), consequence: z.string() })),
+  workerRecommendation: z.string().nullable(),
+  at: z.string(),
+  /** 코디네이터에게 알린 시각. */
+  notifiedAt: z.string().nullable().default(null),
+  coordinator: z
+    .object({
+      context: z.string(),
+      options: z.array(
+        z.object({ label: z.string(), result: z.string(), risk: z.string(), undo: z.string(), instruction: z.string() }),
+      ),
+      recommended: z.string().nullable(),
+      reasons: z.array(z.string()),
+      /** 해당하는 RULES.md 규칙 id (H1, H4, W5 …). */
+      rules: z.array(z.string()),
+      at: z.string(),
+    })
+    .nullable()
+    .default(null),
+  /** 사람이 카드에서 코디네이터에게 물은 것과 그 답. */
+  qa: z.array(qaSchema).default([]),
+});
+
 export const taskSchema = z.object({
   number: z.number().int().positive(),
   /** 작업 이름. 워크스페이스 제목 '<요청 이름> · <번호> <작업 이름>'에 그대로 쓴다 (DESIGN.md 이름 규칙). */
@@ -48,6 +88,11 @@ export const taskSchema = z.object({
   branch: z.string().nullable().default(null),
   /** 막힌 이유나 배정 실패 이유. 사람이 카드에서 읽는다. */
   note: z.string().nullable().default(null),
+  blocker: blockerSchema.nullable().default(null),
+  /** 워커가 일하는 중이라 아직 보내지 못한 메시지. 워커의 턴이 끝나면 보낸다 (send 는 진행 중인 턴을 끊는다). */
+  outbox: z.array(z.object({ text: z.string(), at: z.string() })).default([]),
+  /** 이 작업에서 내려진 결정 기록. 관련 결정과 자동 정지(RULES.md §5)에 쓴다. */
+  decisions: z.array(z.object({ summary: z.string(), by: z.enum(["human", "coordinator"]), at: z.string() })).default([]),
 });
 
 export const requestSchema = z.object({
@@ -99,6 +144,11 @@ export const requestSchema = z.object({
     })
     .nullable()
     .default(null),
+  /**
+   * 이 요청을 맡은 코디네이터 에이전트. 요청마다 새 에이전트를 만들어 context 가 요청 하나에서 끝나게 한다
+   * (2026-11-25 사용자 결정: 코디네이터 하나가 계속 쌓이면 context 가 커져 느려지고 판단이 흐려질 수 있다).
+   */
+  coordinatorAgentId: z.string().nullable().default(null),
   /** 사람이 시작 카드나 답변 카드를 확인한 시각. 그 뒤에 새 계획이나 답이 오면 다시 확인 필요가 된다. */
   reviewedAt: z.string().nullable().default(null),
   /** 읽기 요청에 코디네이터가 직접 쓴 답. */
@@ -125,12 +175,16 @@ export const stateSchema = z.object({
   requests: z.array(requestSchema),
   /** 사람이 결정 카드에서 에이전트에게 보낸 지시. 화면을 닫아도 남도록 server 에 둔다. */
   sent: z.array(sentInstructionSchema),
-  /** 이 host 의 코디네이터 에이전트. 처음 요청이 들어올 때 만든다. */
-  coordinator: z.object({ agentId: z.string(), workspaceId: z.string() }).nullable().default(null),
+  /**
+   * 코디네이터 워크스페이스. 하나를 두고, 요청마다 그 안에 코디네이터 에이전트를 만든다.
+   * agentId 는 요청마다 에이전트를 만들기 전(v3)의 단일 코디네이터다. 읽기만 하고 더는 쓰지 않는다.
+   */
+  coordinator: z.object({ agentId: z.string().optional(), workspaceId: z.string() }).nullable().default(null),
 });
 
 export type Task = z.infer<typeof taskSchema>;
 export type Question = z.infer<typeof questionSchema>;
+export type Blocker = z.infer<typeof blockerSchema>;
 export type CoordinatorRequest = z.infer<typeof requestSchema>;
 export type SentInstruction = z.infer<typeof sentInstructionSchema>;
 export type CoordinatorState = z.infer<typeof stateSchema>;
@@ -172,6 +226,25 @@ export const answerQuestionsRpc = defineRpc({
 export const acknowledgeRpc = defineRpc({
   name: "requests.acknowledge",
   input: z.object({ id: z.string() }),
+  output: z.object({}),
+});
+
+/** 워커 질문 카드에서 사람이 결정했다. choice 는 코디네이터 선택지 label, 아니면 instruction 에 직접 쓴 지시. */
+export const resolveBlockerRpc = defineRpc({
+  name: "blockers.resolve",
+  input: z.object({
+    requestId: z.string(),
+    taskNumber: z.number().int().positive(),
+    choice: z.string().nullable(),
+    instruction: z.string().trim().nullable(),
+  }),
+  output: z.object({}),
+});
+
+/** 카드에서 코디네이터에게 묻는다. 답은 카드의 문답에 쌓인다. 워커는 건드리지 않는다. */
+export const askCoordinatorRpc = defineRpc({
+  name: "blockers.ask",
+  input: z.object({ requestId: z.string(), taskNumber: z.number().int().positive(), question: z.string().trim().min(1) }),
   output: z.object({}),
 });
 

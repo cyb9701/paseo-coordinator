@@ -81,7 +81,21 @@ export function stateColor(key: AgentStateKey, theme: PluginTheme): string {
   return columnColor(STATE_COLUMNS[key], theme);
 }
 
-/** 검토자처럼 플러그인이 만드는 background 에이전트는 사람이 볼 대상이 아니라서 뺀다. */
-export function isVisibleAgent(agent: Pick<PluginAgentSnapshot, "background">): boolean {
-  return !agent.background;
+const ROLE_LABEL = "paseo-coordinator.role";
+
+/**
+ * 사람이 볼 에이전트. 검토자처럼 플러그인이 만드는 background 에이전트와 코디네이터는 뺀다.
+ * 코디네이터는 플러그인이 요청마다 만들고 정리하며, 할 일은 질문·답변·시작 카드로 대신 보인다.
+ * 워커는 남긴다. 워커의 권한 요청과 에러는 사람이 직접 처리해야 하기 때문이다.
+ */
+export function isVisibleAgent(agent: Pick<PluginAgentSnapshot, "background" | "labels">): boolean {
+  return !agent.background && agent.labels[ROLE_LABEL] !== "coordinator";
+}
+
+/**
+ * 직접 띄운 에이전트. 진행 현황의 '직접 띄운 에이전트' 구역과 확인 필요의 에이전트 카드에 쓴다.
+ * 플러그인이 만든 워커는 요청 행의 작업 카드로 이미 보이므로 뺀다.
+ */
+export function isDirectAgent(agent: Pick<PluginAgentSnapshot, "background" | "labels">): boolean {
+  return isVisibleAgent(agent) && agent.labels[ROLE_LABEL] !== "worker";
 }

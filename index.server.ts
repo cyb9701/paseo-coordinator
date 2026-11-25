@@ -2,11 +2,24 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { COORDINATOR_TOOL_PREFIX, CoordinatorRuntime, isCoordinatorSession } from "./server/coordinator";
 import { Dispatcher } from "./server/dispatcher";
 import { COORDINATOR_PROMPT } from "./server/prompt";
-import { acknowledge, answerQuestions, cancelRequest, createRequest, recordInstruction, revisePlan } from "./server/requests";
+import {
+  acknowledge,
+  answerQuestions,
+  askCoordinator,
+  cancelRequest,
+  createRequest,
+  recordInstruction,
+  resolveBlocker,
+  revisePlan,
+} from "./server/requests";
+import { WorkerChannel } from "./server/worker-channel";
+import { isWorkerSession, reportBlockerTool } from "./server/worker-tools";
 import { StateStore } from "./server/store";
 import {
   acknowledgeRpc,
   answerQuestionsRpc,
+  askCoordinatorRpc,
+  resolveBlockerRpc,
   cancelRequestRpc,
   createRequestRpc,
   recordInstructionRpc,
@@ -20,10 +33,20 @@ export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(coordinatorSettings);
   const store = new StateStore();
   const logFailure = (what: string) => (error: unknown) => console.error(`[coordinator] ${what} failed`, error);
-  const dispatcher = new Dispatcher(store, settings);
-  const coordinator = new CoordinatorRuntime(store, settings, (paseo) => {
-    dispatcher.run(paseo).catch(logFailure("dispatch"));
-  });
+  const channel = new WorkerChannel(store);
+  const dispatcher = new Dispatcher(store, settings, channel);
+  const coordinator = new CoordinatorRuntime(
+    store,
+    settings,
+    (paseo) => {
+      dispatcher.run(paseo).catch(logFailure("dispatch"));
+    },
+    channel,
+  );
+  const tellCoordinator = (paseo: Parameters<typeof coordinator.notify>[0]) => {
+    coordinator.notify(paseo).catch(logFailure("notify"));
+  };
+  const blockerTool = reportBlockerTool(store, tellCoordinator);
 
   server.handle(createRequestRpc, async (input, { paseo }) => {
     const result = await createRequest(input, store, settings);
@@ -31,19 +54,39 @@ export default function contribute(server: PluginServerContext) {
     coordinator.notify(paseo).catch(logFailure("notify"));
     return result;
   });
-  server.handle(cancelRequestRpc, (input) => cancelRequest(input, store));
+  server.handle(cancelRequestRpc, async (input, { paseo }) => {
+    const result = await cancelRequest(input, store);
+    coordinator.retire(paseo, input.id).catch(logFailure("retire coordinator"));
+    return result;
+  });
   server.handle(revisePlanRpc, async (input, { paseo }) => {
     const result = await revisePlan(input, store);
     coordinator.notify(paseo).catch(logFailure("notify"));
     return result;
   });
-  server.handle(acknowledgeRpc, (input) => acknowledge(input, store));
+  server.handle(acknowledgeRpc, async (input, { paseo }) => {
+    const result = await acknowledge(input, store);
+    // 답변을 확인하면 읽기 요청이 끝난다. 그 요청의 코디네이터도 정리한다.
+    const request = (await store.read()).requests.find((item) => item.id === input.id);
+    if (request?.status === "done") coordinator.retire(paseo, input.id).catch(logFailure("retire coordinator"));
+    return result;
+  });
   server.handle(answerQuestionsRpc, async (input, { paseo }) => {
     const result = await answerQuestions(input, store);
     coordinator.notify(paseo).catch(logFailure("notify"));
     return result;
   });
   server.handle(recordInstructionRpc, (input) => recordInstruction(input, store));
+  server.handle(resolveBlockerRpc, async (input, { paseo }) => {
+    const message = await resolveBlocker(input, store);
+    await channel.deliver(paseo, input.requestId, input.taskNumber, message);
+    return {};
+  });
+  server.handle(askCoordinatorRpc, async (input, { paseo }) => {
+    const result = await askCoordinator(input, store);
+    tellCoordinator(paseo);
+    return result;
+  });
 
   // promise 를 반환하면 그 promise 가 끝날 때 구독이 닫힌다 (SDK 계약). 처음 상태만 보내고 닫혀서
   // 이후 변경이 화면에 안 갔던 버그가 있었다 (2026-11-25). 그래서 일반 함수로 두고 signal 로만 닫는다.
@@ -63,17 +106,23 @@ export default function contribute(server: PluginServerContext) {
 
   // 코디네이터 세션에만 전용 도구와 지침을 붙인다. 지침은 세션마다 붙고 에이전트에 저장되지 않는다.
   server.addHook("agent.open.before", async ({ request }) => {
+    // 워커에게는 막혔을 때 보고하는 도구 하나만 붙인다.
+    if (isWorkerSession(request.labels)) return { ...request, tools: [...request.tools, blockerTool] };
     if (!isCoordinatorSession(request.labels)) return request;
     return {
       ...request,
       tools: [...request.tools, ...coordinator.tools()],
-      appendSystemPrompt: [...(request.appendSystemPrompt ?? []), COORDINATOR_PROMPT],
+      appendSystemPrompt: [
+        ...(request.appendSystemPrompt ?? []),
+        COORDINATOR_PROMPT,
+        `You coordinate request ${request.labels["paseo-coordinator.request"] ?? "(unknown)"} only. Its state lives in the plugin: always re-read it with coordinator_get_request instead of relying on earlier turns.`,
+      ],
     };
   });
 
   // 코디네이터가 일을 마치면 그동안 쌓인 요청을 알린다. 워커가 일을 마치면 작업 상태를 바꾸고 다음 작업을 배정한다.
   server.addHook("agent.turn.after", async ({ agent, outcome }, { paseo }) => {
-    if (agent.id === (await coordinator.agentId())) {
+    if (await coordinator.requestOf(agent.id)) {
       await coordinator.notify(paseo).catch(logFailure("notify after turn"));
       return;
     }
@@ -83,7 +132,15 @@ export default function contribute(server: PluginServerContext) {
   // 코디네이터가 자기 전용 도구를 부를 때 권한 확인이 뜨면 기계적으로 허용한다. 이 도구는 요청을 읽고
   // 계획을 저장할 뿐이다. 그 밖의 권한 요청은 손대지 않아서 사람의 인박스로 간다.
   server.addHook("agent.permission.before", async ({ agent, request }, { paseo }) => {
-    if (agent.id !== (await coordinator.agentId())) return;
+    // 워커가 report_blocker 를 부를 때 권한 확인이 뜨면 허용한다. 막힘을 보고하는 일 자체가 사람을 기다리면 안 된다.
+    if (request.kind === "tool" && request.name.includes("report_blocker") && (await dispatcher.findWorker(agent.id))) {
+      await paseo.agents
+        .ref(agent.id)
+        .respondToPermission({ requestId: request.id, response: { behavior: "allow" } })
+        .catch(logFailure("allow report_blocker"));
+      return;
+    }
+    if (!(await coordinator.requestOf(agent.id))) return;
     console.log(`[coordinator] coordinator permission request: kind=${request.kind} name=${request.name}`);
     if (request.kind !== "tool" || !request.name.includes(COORDINATOR_TOOL_PREFIX)) return;
     await paseo.agents

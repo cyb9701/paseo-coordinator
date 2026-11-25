@@ -10,6 +10,15 @@ import { CtaButton, GradeBadge, type ViewContext } from "./ui";
 
 export type RequestItem = { kind: "planning" } | { kind: "question" } | { kind: "answer" } | { kind: "task"; task: Task };
 
+/**
+ * 작업이 놓일 컬럼. 워커가 막힘을 보고했으면, 코디네이터가 판단하는 동안은 '코디네이터 처리 중',
+ * 결정 카드가 나오면 '내 결정 필요'다.
+ */
+function taskColumn(task: Task): ColumnKey | null {
+  if (task.blocker) return task.blocker.coordinator ? "react" : "auto";
+  return TASK_COLUMNS[task.status];
+}
+
 // 작업 상태를 보드 컬럼에 놓는다. 막힌 작업은 사람을 기다리므로 가장 왼쪽(내 결정 필요)이다.
 const TASK_COLUMNS: Record<Task["status"], ColumnKey | null> = {
   blocked: "react",
@@ -27,7 +36,7 @@ export function requestCells(request: CoordinatorRequest): Map<ColumnKey, Reques
   if (request.status === "needs_input") add("react", { kind: "question" });
   if (request.status === "answered") add("review", { kind: "answer" });
   for (const task of request.tasks) {
-    const column = TASK_COLUMNS[task.status];
+    const column = taskColumn(task);
     if (column) add(column, { kind: "task", task });
   }
   return cells;

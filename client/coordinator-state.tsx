@@ -2,6 +2,7 @@ import { useRpc, useSubscription } from "@getpaseo/plugin/client";
 import { type ReactNode, createContext, useCallback, useContext, useMemo, useState } from "react";
 import {
   type CoordinatorRequest,
+  type Task,
   type CoordinatorState,
   type SentInstruction,
   recordInstructionRpc,
@@ -74,4 +75,12 @@ export function requestNeedsReview(request: CoordinatorRequest): boolean {
   if (request.status === "answered") return request.answer !== null;
   if (request.status !== "running" || !request.plannedAt) return false;
   return !request.reviewedAt || request.reviewedAt < request.plannedAt;
+}
+
+/** 반응 필요: 워커가 보고했고 코디네이터가 결정 카드를 다 쓴 것. 오래 기다린 순서. */
+export function blockerCards(requests: readonly CoordinatorRequest[]): { request: CoordinatorRequest; task: Task }[] {
+  return requests
+    .filter((request) => request.status === "running")
+    .flatMap((request) => request.tasks.filter((task) => task.blocker?.coordinator).map((task) => ({ request, task })))
+    .sort((a, b) => a.task.blocker!.at.localeCompare(b.task.blocker!.at));
 }

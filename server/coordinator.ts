@@ -4,11 +4,12 @@ import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/pro
 import { basename, join, relative, resolve, sep } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginSettings } from "@getpaseo/plugin/server";
-import { defineAgentTool } from "@getpaseo/plugin/server";
+import { type AgentToolDefinition, defineAgentTool } from "@getpaseo/plugin/server";
 import { z } from "zod";
-import { type CoordinatorRequest, GRADES, type Task } from "../shared/model";
+import { type CoordinatorRequest, type CoordinatorState, GRADES, type Task } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
 import { type StateStore, dataDirectory } from "./store";
+import type { WorkerChannel } from "./worker-channel";
 
 type Settings = PluginSettings<typeof settingsSchema>;
 
@@ -69,18 +70,77 @@ async function allowedProjects(paseo: PaseoApi, settings: Settings) {
 const RENOTIFY_AFTER_MS = 60_000;
 const MAX_RENOTIFY = 3;
 
+type Freshness = "new" | "reminder" | null;
+
 /**
- * 코디네이터에게 (다시) 알려야 하는 요청인가.
+ * 코디네이터에게 (다시) 알려야 하는가. 처음이거나 새 계기(사람의 지시)가 알린 뒤에 왔으면 new,
+ * 알린 지 RENOTIFY_AFTER_MS 가 지나도 처리되지 않았으면 reminder 다.
  * 알림 메시지는 코디네이터 세션이 다시 열리거나 턴이 끊기면 사라질 수 있다 (2026-11-25: 알림을 기록한 직후 세션을
- * 다시 열어 메시지가 사라졌고, 이미 알린 것으로 기록돼 요청이 planning 에 멈췄다). 그래서 쉬는 코디네이터가 처리하지
- * 않은 요청은 다시 알린다.
+ * 다시 열어 메시지가 사라졌고, 이미 알린 것으로 기록돼 요청이 planning 에 멈췄다).
  */
-function needsPlanning(request: CoordinatorRequest, coordinatorIdle: boolean, now: number): boolean {
-  if (request.status !== "planning") return false;
-  if (!request.notifiedAt) return true;
-  const lastFeedback = request.feedback.at(-1)?.at;
-  if (lastFeedback && lastFeedback > request.notifiedAt) return true;
-  return coordinatorIdle && now - Date.parse(request.notifiedAt) > RENOTIFY_AFTER_MS;
+function freshness(notifiedAt: string | null, triggerAt: string | null | undefined, now: number): Freshness {
+  if (!notifiedAt) return "new";
+  if (triggerAt && triggerAt > notifiedAt) return "new";
+  return now - Date.parse(notifiedAt) > RENOTIFY_AFTER_MS ? "reminder" : null;
+}
+
+interface DueItem {
+  key: string;
+  kind: "request" | "feedback" | "blocker" | "qa";
+  requestId: string;
+  taskNumber?: number;
+  qaIndex?: number;
+  freshness: Exclude<Freshness, null>;
+}
+
+/** 코디네이터가 처리해야 할 일. 코디네이터가 쉬고 있을 때만 부른다. */
+function collectDue(state: CoordinatorState, now: number): DueItem[] {
+  const items: DueItem[] = [];
+  for (const request of state.requests) {
+    const lastInstruction = request.feedback.at(-1)?.at;
+    if (request.status === "planning") {
+      const fresh = freshness(request.notifiedAt, lastInstruction, now);
+      if (fresh) items.push({ key: `req:${request.id}`, kind: "request", requestId: request.id, freshness: fresh });
+    }
+    // 실행 중인 요청에 사람이 새 지시를 보냈다. 처리 여부를 알 수 없으니 새 지시가 왔을 때만 알린다.
+    if (request.status === "running" && lastInstruction && (!request.notifiedAt || lastInstruction > request.notifiedAt)) {
+      items.push({ key: `fb:${request.id}`, kind: "feedback", requestId: request.id, freshness: "new" });
+    }
+    if (request.status !== "running") continue;
+    for (const task of request.tasks) {
+      const blocker = task.blocker;
+      if (!blocker) continue;
+      if (!blocker.coordinator) {
+        const fresh = freshness(blocker.notifiedAt, null, now);
+        if (fresh) {
+          items.push({ key: `blk:${request.id}:${task.number}:${blocker.at}`, kind: "blocker", requestId: request.id, taskNumber: task.number, freshness: fresh });
+        }
+      }
+      blocker.qa.forEach((qa, index) => {
+        if (qa.answer !== null) return;
+        const fresh = freshness(qa.notifiedAt, null, now);
+        if (fresh) {
+          items.push({ key: `qa:${request.id}:${task.number}:${qa.at}`, kind: "qa", requestId: request.id, taskNumber: task.number, qaIndex: index, freshness: fresh });
+        }
+      });
+    }
+  }
+  return items;
+}
+
+function describe(items: readonly DueItem[]): string {
+  const ref = (item: DueItem) => (item.taskNumber ? `${item.requestId} task ${item.taskNumber}` : item.requestId);
+  const of = (kind: DueItem["kind"]) => items.filter((item) => item.kind === kind).map(ref);
+  const lines = ["[paseo-coordinator] Work waiting for you:"];
+  const requests = of("request");
+  if (requests.length) lines.push(`- Requests: ${requests.join(", ")}. Call coordinator_get_request, classify, then answer (coordinator_submit_answer), plan (coordinator_submit_plan), or ask the human (coordinator_ask_human).`);
+  const blockers = of("blocker");
+  if (blockers.length) lines.push(`- Worker blockers: ${blockers.join(", ")}. Read them with coordinator_get_request (and coordinator_read_worker if needed), then write the decision card with coordinator_prepare_decision.`);
+  const questions = of("qa");
+  if (questions.length) lines.push(`- Human questions on decision cards: ${questions.join(", ")}. Answer with coordinator_answer_question.`);
+  const feedback = of("feedback");
+  if (feedback.length) lines.push(`- New instructions on running requests: ${feedback.join(", ")}. Read them with coordinator_get_request and pass what each affected worker must change with coordinator_message_worker, or ask the human if unclear.`);
+  return lines.join("\n");
 }
 
 /**
@@ -88,113 +148,187 @@ function needsPlanning(request: CoordinatorRequest, coordinatorIdle: boolean, no
  * 만드는 작업을 promise 하나로 묶는다.
  */
 export class CoordinatorRuntime {
-  private creating: Promise<string> | null = null;
+  private workspaceCreating: Promise<string> | null = null;
+  /** 요청마다 에이전트를 만드는 중인 promise. 같은 요청에 두 에이전트가 생기지 않게 한다. */
+  private readonly agentCreating = new Map<string, Promise<string>>();
   private notifying = false;
-  /** 요청마다 다시 알린 횟수. 플러그인 프로세스 동안만 센다. */
+  private again = false;
+  /** 할 일마다 다시 알린 횟수. 플러그인 프로세스 동안만 센다. */
   private readonly renotified = new Map<string, number>();
 
   constructor(
     private readonly store: StateStore,
     private readonly settings: Settings,
     /** 계획이 저장되어 시작된 직후 부른다. 배정기가 워커를 만든다. */
-    private readonly onPlanStarted: (paseo: PaseoApi) => void = () => {},
+    private readonly onPlanStarted: (paseo: PaseoApi) => void,
+    /** 코디네이터가 워커에게 지시를 보내는 길. */
+    private readonly channel: WorkerChannel,
   ) {}
 
-  async agentId(): Promise<string | null> {
-    return (await this.store.read()).coordinator?.agentId ?? null;
+  /** 이 에이전트가 맡은 요청 id. 코디네이터가 아니면 null. */
+  async requestOf(agentId: string): Promise<string | null> {
+    return (await this.store.read()).requests.find((request) => request.coordinatorAgentId === agentId)?.id ?? null;
   }
 
-  private async ensure(paseo: PaseoApi, language: "en" | "ko"): Promise<string> {
-    const existing = (await this.store.read()).coordinator;
-    if (existing) {
-      const snapshot = await paseo.agents.ref(existing.agentId).refresh().catch(() => null);
-      if (snapshot && !snapshot.agent.archivedAt) return existing.agentId;
-    }
-    this.creating ??= this.create(paseo, language).finally(() => {
-      this.creating = null;
+  /** 코디네이터 워크스페이스. 하나만 만들고 계속 쓴다. */
+  private async ensureWorkspace(paseo: PaseoApi, language: "en" | "ko"): Promise<string> {
+    const existing = (await this.store.read()).coordinator?.workspaceId;
+    if (existing) return existing;
+    this.workspaceCreating ??= (async () => {
+      const home = join(dataDirectory(), "coordinator");
+      await mkdir(home, { recursive: true });
+      await writeFile(
+        join(home, "README.md"),
+        "# Coordinator\n\nWorking folder of the paseo-coordinator plugin's coordinator agents. They plan requests and do not edit code here.\n",
+        "utf8",
+      );
+      const workspace = await paseo.workspaces.create({
+        source: { kind: "directory", path: home },
+        title: language === "ko" ? "코디네이터" : "Coordinator",
+      });
+      await this.store.update((state) => ({ state: { ...state, coordinator: { workspaceId: workspace.id } }, result: undefined }));
+      return workspace.id;
+    })().finally(() => {
+      this.workspaceCreating = null;
     });
-    return this.creating;
+    return this.workspaceCreating;
   }
 
-  private async create(paseo: PaseoApi, language: "en" | "ko"): Promise<string> {
+  /** 요청을 맡을 코디네이터 에이전트. 없거나 archive 됐으면 새로 만든다. */
+  private async agentFor(paseo: PaseoApi, request: CoordinatorRequest): Promise<string> {
+    if (request.coordinatorAgentId) {
+      const snapshot = await paseo.agents.ref(request.coordinatorAgentId).refresh().catch(() => null);
+      if (snapshot && !snapshot.agent.archivedAt) return request.coordinatorAgentId;
+    }
+    const pending = this.agentCreating.get(request.id);
+    if (pending) return pending;
+    const creating = this.createAgent(paseo, request).finally(() => this.agentCreating.delete(request.id));
+    this.agentCreating.set(request.id, creating);
+    return creating;
+  }
+
+  private async createAgent(paseo: PaseoApi, request: CoordinatorRequest): Promise<string> {
     const values = await readSettings(this.settings);
-    // Paseo 는 폴더 이름을 프로젝트 이름으로 쓴다. 사이드바에서 알아보기 쉽게 'coordinator' 로 둔다.
-    const home = join(dataDirectory(), "coordinator");
-    await mkdir(home, { recursive: true });
-    await writeFile(
-      join(home, "README.md"),
-      "# Coordinator\n\nWorking folder of the paseo-coordinator plugin's coordinator agent. It plans requests and does not edit code here.\n",
-      "utf8",
-    );
-    const title = language === "ko" ? "코디네이터" : "Coordinator";
-    const workspace = await paseo.workspaces.create({ source: { kind: "directory", path: home }, title });
     const provider = values.coordinator.model.split("/")[0]!;
     const modes = await paseo.providers.listModes(provider).catch(() => null);
     // 권한을 묻는 기본 모드로 띄운다. 코디네이터가 자기 도구 밖의 일을 하려 하면 사람에게 올라가야 한다.
     const modeId = modes?.modes?.some((mode) => mode.id === "default") ? "default" : undefined;
-    const agent = await workspace.agents.create({
-      config: { provider: values.coordinator.model, modeId, thinkingOptionId: values.coordinator.effort },
-      title,
-      labels: { [COORDINATOR_LABEL]: "coordinator" },
+    const label = request.title ?? request.text.split("\n")[0]!.slice(0, 30);
+    const create = async () => {
+      const workspaceId = await this.ensureWorkspace(paseo, request.language);
+      return paseo.workspaces.ref(workspaceId).agents.create({
+        config: { provider: values.coordinator.model, modeId, thinkingOptionId: values.coordinator.effort },
+        title: `${request.id} · ${label}`,
+        labels: { [COORDINATOR_LABEL]: "coordinator", "paseo-coordinator.request": request.id },
+      });
+    };
+    const agent = await create().catch(async (error) => {
+      // 사람이 코디네이터 워크스페이스를 archive 했으면 새로 만들고 한 번 더 시도한다.
+      console.error("[coordinator] could not create the coordinator agent; recreating the workspace", error);
+      await this.store.update((state) => ({ state: { ...state, coordinator: null }, result: undefined }));
+      return create();
     });
     await this.store.update((state) => ({
-      state: { ...state, coordinator: { agentId: agent.id, workspaceId: workspace.id } },
+      state: {
+        ...state,
+        requests: state.requests.map((item) => (item.id === request.id ? { ...item, coordinatorAgentId: agent.id } : item)),
+      },
       result: undefined,
     }));
-    console.log(`[coordinator] created coordinator agent ${agent.id} in workspace ${workspace.id}`);
+    console.log(`[coordinator] created coordinator agent ${agent.id} for ${request.id}`);
     return agent.id;
   }
 
+  /** 끝나거나 취소된 요청의 코디네이터를 정리한다. 사이드바에 코디네이터가 쌓이지 않게 한다. */
+  async retire(paseo: PaseoApi, requestId: string): Promise<void> {
+    const request = (await this.store.read()).requests.find((item) => item.id === requestId);
+    if (!request?.coordinatorAgentId) return;
+    await paseo.agents.ref(request.coordinatorAgentId).archive().catch(() => undefined);
+  }
+
   /**
-   * 계획이 필요한 요청을 코디네이터에게 알린다. 코디네이터가 일하는 중이거나 권한을 기다리면 보내지 않는다.
-   * (보내면 진행 중인 턴이 끊기고 대기 중인 권한 요청이 거절된다. RULES.md §13.) 그 경우 턴이 끝날 때 다시 부른다.
+   * 코디네이터에게 할 일을 알린다. 할 일을 요청별로 묶어 그 요청의 코디네이터에게 보낸다.
+   * 코디네이터가 일하는 중이거나 권한을 기다리면 보내지 않는다 (보내면 진행 중인 턴이 끊기고 대기 중인 권한 요청이
+   * 거절된다. RULES.md §13). 그 경우 그 코디네이터의 턴이 끝날 때 다시 부른다.
    */
   async notify(paseo: PaseoApi): Promise<void> {
-    if (this.notifying) return;
+    if (this.notifying) {
+      this.again = true;
+      return;
+    }
     this.notifying = true;
     try {
-      const state = await this.store.read();
-      if (!state.requests.some((request) => needsPlanning(request, true, Date.now()))) return;
-      const language = state.requests.find((request) => request.status === "planning")?.language ?? "en";
-      const agentId = await this.ensure(paseo, language);
-      const snapshot = await paseo.agents.ref(agentId).refresh();
-      if (!snapshot) return;
-      if (snapshot.agent.status === "running" || (snapshot.agent.pendingPermissions?.length ?? 0) > 0) return;
-      // 여기까지 왔으면 코디네이터는 쉬고 있다.
-      const waiting = state.requests.filter((request) => {
-        if (!needsPlanning(request, true, Date.now())) return false;
-        // 처음 알리거나 새 지시가 온 경우는 세지 않는다. 유실을 의심해 다시 알리는 경우만 센다.
-        const lastFeedback = request.feedback.at(-1)?.at;
-        if (!request.notifiedAt || (lastFeedback && lastFeedback > request.notifiedAt)) {
-          this.renotified.delete(request.id);
-          return true;
-        }
-        const count = this.renotified.get(request.id) ?? 0;
-        if (count >= MAX_RENOTIFY) {
-          console.error(`[coordinator] ${request.id} is still planning after ${count} reminders; not reminding again`);
-          return false;
-        }
-        this.renotified.set(request.id, count + 1);
-        return true;
-      });
-      if (waiting.length === 0) return;
-      const now = new Date().toISOString();
-      const ids = waiting.map((request) => request.id);
-      await this.store.update((current) => ({
-        state: {
-          ...current,
-          requests: current.requests.map((request) => (ids.includes(request.id) ? { ...request, notifiedAt: now } : request)),
-        },
-        result: undefined,
-      }));
-      await paseo.agents
-        .ref(agentId)
-        .send(
-          `[paseo-coordinator] Requests waiting for you: ${ids.join(", ")}. For each one, call coordinator_get_request, classify it, then answer it (coordinator_submit_answer) or plan it (coordinator_submit_plan).`,
-        );
+      do {
+        this.again = false;
+        await this.notifyOnce(paseo);
+      } while (this.again);
     } finally {
       this.notifying = false;
     }
+  }
+
+  private async notifyOnce(paseo: PaseoApi): Promise<void> {
+    const due = collectDue(await this.store.read(), Date.now());
+    const requestIds = [...new Set(due.map((item) => item.requestId))];
+    for (const requestId of requestIds) {
+      const request = (await this.store.read()).requests.find((item) => item.id === requestId);
+      if (!request) continue;
+      const agentId = await this.agentFor(paseo, request);
+      const snapshot = await paseo.agents.ref(agentId).refresh();
+      if (!snapshot) continue;
+      if (snapshot.agent.status === "running" || (snapshot.agent.pendingPermissions?.length ?? 0) > 0) continue;
+      // 여기까지 왔으면 이 요청의 코디네이터는 쉬고 있다. 유실을 의심해 다시 알리는 것만 세고, 3번을 넘으면 멈춘다.
+      const items = collectDue(await this.store.read(), Date.now()).filter((item) => {
+        if (item.requestId !== requestId) return false;
+        if (item.freshness === "new") {
+          this.renotified.delete(item.key);
+          return true;
+        }
+        const count = this.renotified.get(item.key) ?? 0;
+        if (count >= MAX_RENOTIFY) {
+          console.error(`[coordinator] ${item.key} is still unhandled after ${count} reminders; not reminding again`);
+          return false;
+        }
+        this.renotified.set(item.key, count + 1);
+        return true;
+      });
+      if (items.length === 0) continue;
+      await this.markNotified(items);
+      await paseo.agents.ref(agentId).send(describe(items));
+    }
+  }
+
+  private async markNotified(items: readonly DueItem[]): Promise<void> {
+    const now = new Date().toISOString();
+    await this.store.update((current) => ({
+      state: {
+        ...current,
+        requests: current.requests.map((request) => {
+          const mine = items.filter((item) => item.requestId === request.id);
+          if (mine.length === 0) return request;
+          const touchesRequest = mine.some((item) => item.kind === "request" || item.kind === "feedback");
+          return {
+            ...request,
+            notifiedAt: touchesRequest ? now : request.notifiedAt,
+            tasks: request.tasks.map((task) => {
+              const forTask = mine.filter((item) => item.taskNumber === task.number);
+              if (forTask.length === 0 || !task.blocker) return task;
+              return {
+                ...task,
+                blocker: {
+                  ...task.blocker,
+                  notifiedAt: forTask.some((item) => item.kind === "blocker") ? now : task.blocker.notifiedAt,
+                  qa: task.blocker.qa.map((qa, index) =>
+                    forTask.some((item) => item.kind === "qa" && item.qaIndex === index) ? { ...qa, notifiedAt: now } : qa,
+                  ),
+                },
+              };
+            }),
+          };
+        }),
+      },
+      result: undefined,
+    }));
   }
 
   /** 코디네이터가 남긴 프로젝트 id 중 허용된 것만 남긴다. 카드에 보일 이름용이라 틀린 id 로 실패시키지 않는다. */
@@ -202,6 +336,26 @@ export class CoordinatorRuntime {
     if (ids.length === 0) return [];
     const allowed = new Set((await allowedProjects(paseo, this.settings)).map((project) => project.id));
     return ids.filter((id) => allowed.has(id));
+  }
+
+  /**
+   * 요청마다 코디네이터가 따로 있으므로, 도구는 자기 요청에만 쓸 수 있게 막는다. 다른 요청을 건드리면 거부한다.
+   * 프로젝트를 읽는 도구처럼 requestId 가 없는 도구는 그대로 둔다.
+   */
+  private owned(tool: AgentToolDefinition): AgentToolDefinition {
+    return {
+      ...tool,
+      execute: async (input, context) => {
+        const requestId = (input as { requestId?: unknown } | null)?.requestId;
+        if (typeof requestId === "string") {
+          const owner = (await this.store.read()).requests.find((request) => request.id === requestId)?.coordinatorAgentId;
+          if (owner && owner !== context.agent.id) {
+            return { text: `Request ${requestId} belongs to another coordinator. Work only on your own request.`, isError: true };
+          }
+        }
+        return tool.execute(input, context);
+      },
+    };
   }
 
   tools() {
@@ -213,7 +367,165 @@ export class CoordinatorRuntime {
       this.askHumanTool(),
       this.submitAnswerTool(),
       this.submitPlanTool(),
-    ];
+      this.readWorkerTool(),
+      this.prepareDecisionTool(),
+      this.answerQuestionTool(),
+      this.messageWorkerTool(),
+    ].map((tool) => this.owned(tool));
+  }
+
+  private async findTask(requestId: string, taskNumber: number) {
+    const request = (await this.store.read()).requests.find((item) => item.id === requestId);
+    const task = request?.tasks.find((item) => item.number === taskNumber);
+    return request && task ? { request, task } : null;
+  }
+
+  private patchTask(requestId: string, taskNumber: number, change: (task: Task) => Task): Promise<void> {
+    return this.store.update((state) => ({
+      state: {
+        ...state,
+        requests: state.requests.map((request) =>
+          request.id === requestId
+            ? { ...request, tasks: request.tasks.map((task) => (task.number === taskNumber ? change(task) : task)) }
+            : request,
+        ),
+      },
+      result: undefined,
+    }));
+  }
+
+  /** 워커의 최근 보고를 읽는다. 결정 카드에 쓸 맥락이 워커의 말에만 있을 때 쓴다. */
+  private readWorkerTool() {
+    return defineAgentTool({
+      name: "coordinator_read_worker",
+      title: "Read worker messages",
+      description: "Read the latest assistant messages of a task's worker.",
+      input: z.object({ requestId: z.string(), taskNumber: z.number().int().positive(), limit: z.number().int().min(1).max(10).default(3) }),
+      execute: async ({ requestId, taskNumber, limit }, { paseo }) => {
+        const found = await this.findTask(requestId, taskNumber);
+        if (!found?.task.agentId) return { text: `Task ${requestId}/${taskNumber} has no worker.`, isError: true };
+        const page = await paseo.agents.ref(found.task.agentId).timeline.refetch({ direction: "tail", limit: 60 }).catch(() => null);
+        const entries = (page as { entries?: readonly { item?: { type?: string; text?: string } }[] } | null)?.entries ?? [];
+        const messages = entries
+          .map((entry) => entry.item)
+          .filter((item) => item?.type === "assistant_message" && item.text?.trim())
+          .slice(-limit)
+          .map((item) => item!.text!.trim());
+        return { text: messages.length ? messages.join("\n\n---\n\n") : "(no messages yet)" };
+      },
+    });
+  }
+
+  /**
+   * 워커의 보고로 결정 카드를 쓴다. 사람은 이 카드를 보고 고른다.
+   * 6단계(독립 검토) 전에는 코디네이터가 워커에게 직접 답하지 않는다. 검토자 규칙(RULES.md §5)을 지키기 위해서다.
+   */
+  private prepareDecisionTool() {
+    return defineAgentTool({
+      name: "coordinator_prepare_decision",
+      title: "Prepare decision card",
+      description:
+        "Write the decision card for a worker's blocker. Give the context the human needs, 2+ options each with its result, risk, how to undo it, and the exact instruction the worker will receive if chosen, your recommended option, your reasons, and the RULES ids that apply (for example H1, H4, W5). The human decides; you do not answer the worker yourself.",
+      input: z.object({
+        requestId: z.string(),
+        taskNumber: z.number().int().positive(),
+        context: z.string().trim().min(1),
+        options: z
+          .array(
+            z.object({
+              label: z.string().trim().min(1),
+              result: z.string().trim().min(1),
+              risk: z.string().trim().min(1),
+              undo: z.string().trim().min(1),
+              instruction: z.string().trim().min(1),
+            }),
+          )
+          .min(1)
+          .max(4),
+        recommended: z.string().nullable().default(null),
+        reasons: z.array(z.string().trim().min(1)).min(1),
+        rules: z.array(z.string()).default([]),
+      }),
+      execute: async (input) => {
+        const found = await this.findTask(input.requestId, input.taskNumber);
+        if (!found?.task.blocker) return { text: `Task ${input.requestId}/${input.taskNumber} has no open blocker.`, isError: true };
+        if (input.recommended && !input.options.some((option) => option.label === input.recommended)) {
+          return { text: `recommended "${input.recommended}" is not one of the option labels.`, isError: true };
+        }
+        const at = new Date().toISOString();
+        await this.patchTask(input.requestId, input.taskNumber, (task) => ({
+          ...task,
+          blocker: task.blocker
+            ? {
+                ...task.blocker,
+                coordinator: {
+                  context: input.context,
+                  options: input.options,
+                  recommended: input.recommended,
+                  reasons: input.reasons,
+                  rules: input.rules,
+                  at,
+                },
+              }
+            : task.blocker,
+        }));
+        return { text: "Decision card stored. The human decides in the inbox; the plugin sends the choice to the worker." };
+      },
+    });
+  }
+
+  /** 사람이 결정 카드에서 물은 것에 답한다. 답은 카드의 문답에 쌓인다. */
+  private answerQuestionTool() {
+    return defineAgentTool({
+      name: "coordinator_answer_question",
+      title: "Answer the human's question",
+      description: "Answer the oldest unanswered question the human asked on a task's decision card. Base it on facts you can cite.",
+      input: z.object({ requestId: z.string(), taskNumber: z.number().int().positive(), answer: z.string().trim().min(1) }),
+      execute: async (input) => {
+        const found = await this.findTask(input.requestId, input.taskNumber);
+        const index = found?.task.blocker?.qa.findIndex((qa) => qa.answer === null) ?? -1;
+        if (!found?.task.blocker || index < 0) return { text: "There is no unanswered question on this card.", isError: true };
+        const at = new Date().toISOString();
+        await this.patchTask(input.requestId, input.taskNumber, (task) => ({
+          ...task,
+          blocker: task.blocker
+            ? { ...task.blocker, qa: task.blocker.qa.map((qa, i) => (i === index ? { ...qa, answer: input.answer, answeredAt: at } : qa)) }
+            : task.blocker,
+        }));
+        return { text: "Answer added to the card." };
+      },
+    });
+  }
+
+  /**
+   * 워커에게 지시를 보낸다. 실행 중인 요청에 사람이 새 지시를 보냈을 때 쓴다. 워커가 일하는 중이면 턴이 끝난 뒤에 간다.
+   * 원래 요청을 벗어나는 지시는 보내지 않고 사람에게 묻는다 (RULES.md H1).
+   */
+  private messageWorkerTool() {
+    return defineAgentTool({
+      name: "coordinator_message_worker",
+      title: "Message a worker",
+      description:
+        "Send an instruction to a task's worker, for example to pass on a new instruction the human gave on a running request. It is delivered now if the worker is idle, or after its current turn.",
+      input: z.object({ requestId: z.string(), taskNumber: z.number().int().positive(), message: z.string().trim().min(1) }),
+      execute: async (input, { paseo }) => {
+        const found = await this.findTask(input.requestId, input.taskNumber);
+        if (!found?.task.agentId) return { text: `Task ${input.requestId}/${input.taskNumber} has no worker yet.`, isError: true };
+        const result = await this.channel.deliver(
+          paseo,
+          input.requestId,
+          input.taskNumber,
+          `[From the coordinator] ${input.message}`,
+        );
+        const at = new Date().toISOString();
+        await this.patchTask(input.requestId, input.taskNumber, (task) => ({
+          ...task,
+          status: task.status === "review" || task.status === "done" ? ("running" as const) : task.status,
+          decisions: [...task.decisions, { summary: `Coordinator → worker: ${input.message}`, by: "coordinator" as const, at }],
+        }));
+        return { text: result === "sent" ? "Delivered to the worker." : "The worker is busy; it will receive this after its current turn." };
+      },
+    });
   }
 
   /**
@@ -527,6 +839,9 @@ export class CoordinatorRuntime {
                       agentId: null,
                       branch: null,
                       note: null,
+                      blocker: null,
+                      outbox: [],
+                      decisions: [],
                     })),
                   }
                 : item,

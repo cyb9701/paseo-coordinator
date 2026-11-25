@@ -5,9 +5,10 @@ import { useMutation } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { AgentCard } from "./agent-card";
-import { columnColor, isVisibleAgent } from "./agent-state";
+import { columnColor, isDirectAgent, isVisibleAgent } from "./agent-state";
 import { AnswerCard } from "./answer-card";
-import { requestNeedsReaction, requestNeedsReview, useCoordinatorState, useSentLog } from "./coordinator-state";
+import { BlockerCard } from "./blocker-card";
+import { blockerCards, requestNeedsReaction, requestNeedsReview, useCoordinatorState, useSentLog } from "./coordinator-state";
 import { StartedCard } from "./plan-card";
 import { QuestionCard } from "./question-card";
 import { cardCount, useClassifier, usePending } from "./pending-store";
@@ -533,7 +534,8 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
   const classify = useClassifier();
   const directory = usePending();
   const needsReaction = (agent: PluginAgentSnapshot) => isVisibleAgent(agent) && classify.column(agent) === "react";
-  const needsReview = (agent: PluginAgentSnapshot) => isVisibleAgent(agent) && classify.column(agent) === "review";
+  // 확인 필요의 에이전트 카드는 직접 띄운 에이전트만. 워커의 결과는 시작 카드와 진행 현황의 작업 카드로 본다.
+  const needsReview = (agent: PluginAgentSnapshot) => isDirectAgent(agent) && classify.column(agent) === "review";
   const reacting = useAgents({ hosts: [ctx.hostId], where: needsReaction, orderBy: oldestFirst });
   const reviewing = useAgents({ hosts: [ctx.hostId], where: needsReview, orderBy: ["lastActivityAt", "desc"] });
   // 질문 카드는 요청 전체를 막고 있어서 에이전트 카드보다 위에, 오래 기다린 순서로 둔다.
@@ -546,7 +548,9 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
   const reviews = requests
     .filter(requestNeedsReview)
     .sort((a, b) => (b.answer?.at ?? b.plannedAt ?? b.createdAt).localeCompare(a.answer?.at ?? a.plannedAt ?? a.createdAt));
-  const reactCount = questions.length + cardCount(reacting.map((ref) => ref.id), directory);
+  // 워커 질문: 워커가 보고했고 코디네이터가 결정 카드를 다 쓴 것. 워커 에이전트 자체는 쉬는 중이라 에이전트 카드로는 안 잡힌다.
+  const blockers = blockerCards(requests);
+  const reactCount = questions.length + blockers.length + cardCount(reacting.map((ref) => ref.id), directory);
   const reviewCount = reviews.length + reviewing.length;
   return (
     <View style={{ gap: 20, maxWidth: 880 }}>
@@ -563,6 +567,9 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
         ) : null}
         {questions.map((request) => (
           <QuestionCard key={request.id} request={request} ctx={ctx} />
+        ))}
+        {blockers.map(({ request, task }) => (
+          <BlockerCard key={`${request.id}:${task.number}`} request={request} task={task} ctx={ctx} />
         ))}
         {reacting.map((ref) => (
           <AgentDecisions key={ref.key} agentRef={ref} ctx={ctx} />

@@ -6,6 +6,7 @@ import type { CoordinatorRequest, Task } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
 import { workspaceTitle } from "./coordinator";
 import type { StateStore } from "./store";
+import type { WorkerChannel } from "./worker-channel";
 
 type Settings = PluginSettings<typeof settingsSchema>;
 type TaskPatch = Partial<Pick<Task, "status" | "workspaceId" | "agentId" | "branch" | "note">>;
@@ -64,7 +65,7 @@ function kickoff(request: CoordinatorRequest, task: Task, branch: string, contin
       ? "- This is a read-only investigation. Do not change, create or delete any file. Investigate and report."
       : "- You may edit files here, run local builds, tests and linters, commit, push this branch, and open a pull request from it.",
     "- Never merge pull requests, push to any other branch, force push, write to any database (any environment), deploy, send messages to people, or read or write secret files (.env, keys, credentials).",
-    "- If you need a decision the request and scope do not settle, or work outside your scope, stop and explain in your final message: what you need, the options, and your recommendation.",
+    "- If you need a decision the request and scope do not settle, a change to your scope or approach, or you are stuck, call the report_blocker tool with the facts, the options and your recommendation, then end your turn and wait. Do not ask in plain text: only report_blocker reaches the human as a decision card.",
     `- Finish with a short report in ${language}: what you did, how you verified it, and what is left.`,
   ].join("\n");
 }
@@ -80,6 +81,7 @@ export class Dispatcher {
   constructor(
     private readonly store: StateStore,
     private readonly settings: Settings,
+    private readonly channel: WorkerChannel,
   ) {}
 
   async run(paseo: PaseoApi): Promise<void> {
@@ -116,10 +118,16 @@ export class Dispatcher {
     paseo: PaseoApi,
     agentId: string,
     outcome: { kind: "completed" } | { kind: "failed"; error: { message: string } } | { kind: "canceled"; reason: string },
+    /** 보정 검사에서 부를 때는 false. 배정은 이미 돌고 있는 흐름이 이어서 한다. */
+    dispatchNext = true,
   ): Promise<void> {
     const found = await this.findWorker(agentId);
     if (!found || found.request.status !== "running") return;
     const { request, task } = found;
+    // 턴 사이에 쌓인 메시지(코디네이터 지시, 사람의 결정)가 있으면 먼저 보낸다. 워커가 이어서 일하므로 상태는 그대로다.
+    if (await this.channel.flush(paseo, request.id, task.number)) return;
+    // report_blocker 로 보고하고 멈춘 워커는 결정을 기다리는 중이다. 끝난 것으로 보지 않는다.
+    if (task.blocker) return;
     if (outcome.kind === "failed") {
       await this.patchTask(request.id, task.number, { status: "blocked", note: outcome.error.message });
     } else if (outcome.kind === "completed") {
@@ -128,10 +136,35 @@ export class Dispatcher {
       return;
     }
     if (request.kind === "read") await this.compileAnswer(paseo, request.id);
-    await this.run(paseo);
+    if (dispatchNext) await this.run(paseo);
+  }
+
+  /**
+   * hook 이 유실돼도 상태가 맞게, 실행 중으로 표시된 작업의 워커를 직접 확인한다. 알림형 hook 은 best-effort 라
+   * 다시 오지 않는다 (2026-11-25: 사람의 결정을 받고 일을 마친 워커의 턴 종료가 오지 않아 작업이 running 에 멈췄다).
+   * 워커가 쉬고 있으면 턴이 끝난 것으로, 에러면 막힌 것으로 처리한다.
+   */
+  private async reconcile(paseo: PaseoApi): Promise<void> {
+    const state = await this.store.read();
+    for (const request of state.requests) {
+      if (request.status !== "running") continue;
+      for (const task of request.tasks) {
+        if (task.status !== "running" || !task.agentId || task.blocker || task.outbox.length > 0) continue;
+        const snapshot = await paseo.agents.ref(task.agentId).refresh().catch(() => null);
+        if (!snapshot) continue;
+        const agent = snapshot.agent;
+        if ((agent.pendingPermissions?.length ?? 0) > 0) continue;
+        if (agent.status === "idle") {
+          await this.onWorkerTurn(paseo, task.agentId, { kind: "completed" }, false);
+        } else if (agent.status === "error") {
+          await this.onWorkerTurn(paseo, task.agentId, { kind: "failed", error: { message: agent.lastError ?? "Worker stopped with an error." } }, false);
+        }
+      }
+    }
   }
 
   private async pass(paseo: PaseoApi): Promise<void> {
+    await this.reconcile(paseo);
     const state = await this.store.read();
     const ready: { request: CoordinatorRequest; task: Task }[] = [];
     for (const request of state.requests) {
