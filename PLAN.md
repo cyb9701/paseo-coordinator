@@ -19,3 +19,15 @@
 - daemon을 재시작하지 않는다. 소스를 바꾸면 `paseo plugin reload`만 쓴다.
 - 테스트용 워커는 이 저장소 밖의 임시 프로젝트에서 돌린다. 실제 프로젝트에는 6단계까지 쓰지 않는다.
 - UI는 React Native 기본 요소와 `theme.colors`만 쓴다.
+
+## 배포 (2026-11-25 사용자 결정)
+
+- 저장소: `github.com/cyb9701/paseo-coordinator` (public, MIT). 플러그인 id `paseo-coordinator`. 단계마다 커밋하고 push 한다.
+- 설치: `paseo plugin install github:cyb9701/paseo-coordinator`. 2026-11-25 실제 설치로 `running` 확인 (빌드 단계 없이 동작).
+- 짧은 형식 `paseo plugin install <owner>/<slug>`는 Paseo 레지스트리 등록이 필요하다. 7단계 뒤 getpaseo/plugins 제출 폼으로 신청한다.
+- 다른 사람 환경에서도 동작하게 지킬 것:
+  - UI는 영어와 한국어 (`defineTranslations`, 영어 필수). 코디네이터 출력 언어(워크스페이스 이름, 카드)는 설정에서 고르고 기본값은 UI 언어.
+  - 경로를 하드코딩하지 않는다. 데이터 폴더는 `PASEO_HOME` 또는 `~/.paseo` 아래 `plugin-data/paseo-coordinator/`.
+  - `/poteto-mode`는 pstack 이 설치된 경우에만 쓴다. 워커 세션의 `commands()`로 확인하고 설정에서 켜고 끈다.
+  - Paseo 가 제공하는 모듈(react, react-native, zod, react-query, @getpaseo/plugin)만 쓴다. 다른 런타임 의존성이 생기면 `build`와 lockfile 이 필요하다.
+- 공개 전 점검: `npm run typecheck`, GitHub 설치 후 `paseo plugin ls`로 running 확인, `OVERVIEW.md` 작성(데이터가 어디로 가는지 포함, 설치 명령 금지), `requirements.paseo` 확인.
