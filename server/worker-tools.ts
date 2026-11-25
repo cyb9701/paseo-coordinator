@@ -48,6 +48,9 @@ export function reportBlockerTool(store: StateStore, onReported: (paseo: PaseoAp
                 notifiedAt: null,
                 coordinator: null,
                 qa: [],
+                proposal: null,
+                review: null,
+                objections: [],
               },
             };
           }),

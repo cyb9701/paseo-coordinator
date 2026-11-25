@@ -84,3 +84,14 @@ export function blockerCards(requests: readonly CoordinatorRequest[]): { request
     .flatMap((request) => request.tasks.filter((task) => task.blocker?.coordinator).map((task) => ({ request, task })))
     .sort((a, b) => a.task.blocker!.at.localeCompare(b.task.blocker!.at));
 }
+
+/** 확인 필요: 검토를 통과해 자동으로 처리했고 아직 사람이 보지 않은 결정. 최근 순서. */
+export function autoDecisionCards(requests: readonly CoordinatorRequest[]) {
+  return requests
+    .flatMap((request) =>
+      request.tasks.flatMap((task) =>
+        task.autoDecisions.filter((decision) => !decision.reviewedAt).map((decision) => ({ request, task, decision })),
+      ),
+    )
+    .sort((a, b) => b.decision.at.localeCompare(a.decision.at));
+}

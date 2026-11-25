@@ -1,6 +1,6 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { ProjectRef } from "@getpaseo/plugin/client";
-import { useProject, useProjects, usePaseo, useSettings } from "@getpaseo/plugin/client";
+import { useProject, useProjects, usePaseo, useRpc, useSettings } from "@getpaseo/plugin/client";
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { Text, View } from "react-native";
@@ -10,6 +10,8 @@ import {
   REVIEWER_EFFORTS,
   coordinatorSettings,
 } from "../shared/settings";
+import { enableRuleRpc } from "../shared/model";
+import { useCoordinatorState } from "./coordinator-state";
 import type { T } from "./i18n";
 import { DEFAULT_CONTENT_SIZE, DEFAULT_INTERFACE_SIZE, FONT_SIZE_RANGE, displaySettings, useFonts } from "./fonts";
 import { ChoiceBox, CtaButton } from "./ui";
@@ -159,6 +161,23 @@ function Stepper({
         onPress={() => onChange(value + 1)}
       />
     </View>
+  );
+}
+
+/** 자동 정지로 꺼진 규칙. 다시 켜는 것은 사람이 한다 (RULES.md §5). 꺼진 규칙이 없으면 보이지 않는다. */
+function DisabledRulesBlock({ theme, t }: { theme: PluginTheme; t: T }) {
+  const { state } = useCoordinatorState();
+  const enable = useRpc(enableRuleRpc);
+  const rules = state?.disabledRules ?? [];
+  if (rules.length === 0) return null;
+  return (
+    <Block title={t("settings.disabledRules")} hint={t("settings.disabledRulesHint")} theme={theme}>
+      <Wrap>
+        {rules.map((rule) => (
+          <CtaButton key={rule} label={t("settings.enableRule", { rule })} theme={theme} onPress={() => void enable({ rule })} />
+        ))}
+      </Wrap>
+    </Block>
   );
 }
 
@@ -414,6 +433,8 @@ export function SettingsView({ theme, hostId, t }: { theme: PluginTheme; hostId:
           ))}
         </View>
       </Block>
+
+      <DisabledRulesBlock theme={theme} t={t} />
 
       <FontSizeBlock theme={theme} t={t} />
 

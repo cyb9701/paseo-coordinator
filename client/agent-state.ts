@@ -89,7 +89,8 @@ const ROLE_LABEL = "paseo-coordinator.role";
  * 워커는 남긴다. 워커의 권한 요청과 에러는 사람이 직접 처리해야 하기 때문이다.
  */
 export function isVisibleAgent(agent: Pick<PluginAgentSnapshot, "background" | "labels">): boolean {
-  return !agent.background && agent.labels[ROLE_LABEL] !== "coordinator";
+  const role = agent.labels[ROLE_LABEL];
+  return !agent.background && role !== "coordinator" && role !== "reviewer";
 }
 
 /**

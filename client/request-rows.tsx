@@ -101,6 +101,14 @@ function TaskCard({ task, column, ctx }: { task: Task; column: ColumnKey; ctx: V
         </Text>
         <Text style={{ color: columnColor(column, ctx.theme), fontSize: ctx.fonts.meta }}>{ctx.t(`taskStatus.${task.status}`)}</Text>
       </View>
+      {task.blocker?.review?.status === "running" ? (
+        <Text style={{ color: ctx.theme.colors.accent, fontSize: ctx.fonts.meta }}>
+          {ctx.t("reviewing", {
+            done: task.blocker.review.reviewers.filter((item) => item.verdict).length,
+            total: task.blocker.review.required,
+          })}
+        </Text>
+      ) : null}
       {task.note ? (
         <Text numberOfLines={3} style={{ color: ctx.theme.colors.statusDanger, fontSize: ctx.fonts.meta }}>
           {task.note}

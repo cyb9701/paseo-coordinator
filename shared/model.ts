@@ -39,6 +39,37 @@ const qaSchema = z.object({
   notifiedAt: z.string().nullable().default(null),
 });
 
+export const AUTO_RULES = ["W1", "W5", "W7"] as const;
+
+export const proposalSchema = z.object({
+  rule: z.enum(AUTO_RULES),
+  /** 워커에게 그대로 보낼 지시. */
+  answer: z.string(),
+  evidence: z.array(z.object({ fact: z.string(), source: z.string() })),
+  undo: z.string(),
+  /** H1~H6 마다 해당하지 않는 이유. */
+  selfCheck: z.array(z.string()),
+  at: z.string(),
+});
+
+export const verdictSchema = z.object({
+  agentId: z.string(),
+  model: z.string(),
+  ownAnswer: z.string().nullable(),
+  verdict: z.enum(["PASS", "FAIL", "UNSURE"]).nullable(),
+  checks: z.array(z.object({ name: z.string(), pass: z.boolean(), reason: z.string() })).default([]),
+  objections: z.array(z.string()).default([]),
+  at: z.string().nullable(),
+});
+
+export const reviewSchema = z.object({
+  status: z.enum(["running", "passed", "failed"]),
+  required: z.number().int().positive(),
+  startedAt: z.string(),
+  deadline: z.string(),
+  reviewers: z.array(verdictSchema),
+});
+
 /**
  * 워커가 막혀서 보고한 것과, 그에 대한 코디네이터의 판단. 사람이 이것을 보고 결정한다 (4단계).
  * 6단계 전까지는 코디네이터가 직접 답하지 않고 항상 사람 카드로 올린다 (검토자 규칙, RULES.md §5).
@@ -68,6 +99,11 @@ export const blockerSchema = z.object({
     .default(null),
   /** 사람이 카드에서 코디네이터에게 물은 것과 그 답. */
   qa: z.array(qaSchema).default([]),
+  /** 코디네이터가 W 규칙으로 자동으로 답하려는 제안. 검토자 전원이 통과시켜야 워커에게 간다 (6단계). */
+  proposal: proposalSchema.nullable().default(null),
+  review: reviewSchema.nullable().default(null),
+  /** 검토를 통과하지 못했을 때 검토자들이 남긴 우려. 카드의 '확인할 것'에 그대로 보인다. */
+  objections: z.array(z.string()).default([]),
 });
 
 export const taskSchema = z.object({
@@ -93,6 +129,23 @@ export const taskSchema = z.object({
   outbox: z.array(z.object({ text: z.string(), at: z.string() })).default([]),
   /** 이 작업에서 내려진 결정 기록. 관련 결정과 자동 정지(RULES.md §5)에 쓴다. */
   decisions: z.array(z.object({ summary: z.string(), by: z.enum(["human", "coordinator"]), at: z.string() })).default([]),
+  /** 검토를 통과해 자동으로 워커에게 간 결정. 사람은 확인 필요의 자동 결정 카드로 본다. */
+  autoDecisions: z
+    .array(
+      z.object({
+        id: z.string(),
+        rule: z.enum(AUTO_RULES),
+        question: z.string(),
+        answer: z.string(),
+        evidence: z.array(z.object({ fact: z.string(), source: z.string() })),
+        undo: z.string(),
+        verdicts: z.array(z.object({ model: z.string(), verdict: z.string() })),
+        at: z.string(),
+        reviewedAt: z.string().nullable(),
+        reverted: z.boolean(),
+      }),
+    )
+    .default([]),
 });
 
 export const requestSchema = z.object({
@@ -180,6 +233,8 @@ export const stateSchema = z.object({
    * agentId 는 요청마다 에이전트를 만들기 전(v3)의 단일 코디네이터다. 읽기만 하고 더는 쓰지 않는다.
    */
   coordinator: z.object({ agentId: z.string().optional(), workspaceId: z.string() }).nullable().default(null),
+  /** 자동 정지로 꺼진 W 규칙 (RULES.md §5). 다시 켜는 것은 사람이 한다. */
+  disabledRules: z.array(z.enum(AUTO_RULES)).default([]),
 });
 
 export type Task = z.infer<typeof taskSchema>;
@@ -245,6 +300,25 @@ export const resolveBlockerRpc = defineRpc({
 export const askCoordinatorRpc = defineRpc({
   name: "blockers.ask",
   input: z.object({ requestId: z.string(), taskNumber: z.number().int().positive(), question: z.string().trim().min(1) }),
+  output: z.object({}),
+});
+
+/** 자동 결정 카드에서 확인(revertText 없음) 또는 되돌리고 지시(revertText 있음). */
+export const reviewAutoDecisionRpc = defineRpc({
+  name: "decisions.review",
+  input: z.object({
+    requestId: z.string(),
+    taskNumber: z.number().int().positive(),
+    id: z.string(),
+    revertText: z.string().trim().nullable(),
+  }),
+  output: z.object({}),
+});
+
+/** 자동 정지로 꺼진 규칙을 사람이 다시 켠다 (RULES.md §5). */
+export const enableRuleRpc = defineRpc({
+  name: "rules.enable",
+  input: z.object({ rule: z.enum(AUTO_RULES) }),
   output: z.object({}),
 });
 

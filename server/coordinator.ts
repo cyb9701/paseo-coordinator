@@ -6,9 +6,10 @@ import type { PaseoApi } from "@getpaseo/client";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import { type AgentToolDefinition, defineAgentTool } from "@getpaseo/plugin/server";
 import { z } from "zod";
-import { type CoordinatorRequest, type CoordinatorState, GRADES, type Task } from "../shared/model";
+import { AUTO_RULES, type CoordinatorRequest, type CoordinatorState, GRADES, type Task } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
 import { type StateStore, dataDirectory } from "./store";
+import type { ReviewRunner } from "./review";
 import type { WorkerChannel } from "./worker-channel";
 
 type Settings = PluginSettings<typeof settingsSchema>;
@@ -110,7 +111,8 @@ function collectDue(state: CoordinatorState, now: number): DueItem[] {
     for (const task of request.tasks) {
       const blocker = task.blocker;
       if (!blocker) continue;
-      if (!blocker.coordinator) {
+      // 결정 카드도 검토 중인 제안도 없는 보고만 코디네이터의 일이다.
+      if (!blocker.coordinator && !blocker.proposal) {
         const fresh = freshness(blocker.notifiedAt, null, now);
         if (fresh) {
           items.push({ key: `blk:${request.id}:${task.number}:${blocker.at}`, kind: "blocker", requestId: request.id, taskNumber: task.number, freshness: fresh });
@@ -135,7 +137,7 @@ function describe(items: readonly DueItem[]): string {
   const requests = of("request");
   if (requests.length) lines.push(`- Requests: ${requests.join(", ")}. Call coordinator_get_request, classify, then answer (coordinator_submit_answer), plan (coordinator_submit_plan), or ask the human (coordinator_ask_human).`);
   const blockers = of("blocker");
-  if (blockers.length) lines.push(`- Worker blockers: ${blockers.join(", ")}. Read them with coordinator_get_request (and coordinator_read_worker if needed), then write the decision card with coordinator_prepare_decision.`);
+  if (blockers.length) lines.push(`- Worker blockers: ${blockers.join(", ")}. Read them with coordinator_get_request (and coordinator_read_worker if needed). If you can answer under W1, W5 or W7 with none of H1-H6, propose it with coordinator_propose_answer; otherwise write the decision card with coordinator_prepare_decision.`);
   const questions = of("qa");
   if (questions.length) lines.push(`- Human questions on decision cards: ${questions.join(", ")}. Answer with coordinator_answer_question.`);
   const feedback = of("feedback");
@@ -155,6 +157,12 @@ export class CoordinatorRuntime {
   private again = false;
   /** 할 일마다 다시 알린 횟수. 플러그인 프로세스 동안만 센다. */
   private readonly renotified = new Map<string, number>();
+  private reviews: ReviewRunner | null = null;
+
+  /** 독립 검토를 붙인다. 검토자가 없으면 자동 답은 받지 않는다. */
+  setReviewRunner(reviews: ReviewRunner): void {
+    this.reviews = reviews;
+  }
 
   constructor(
     private readonly store: StateStore,
@@ -368,6 +376,7 @@ export class CoordinatorRuntime {
       this.submitAnswerTool(),
       this.submitPlanTool(),
       this.readWorkerTool(),
+      this.proposeAnswerTool(),
       this.prepareDecisionTool(),
       this.answerQuestionTool(),
       this.messageWorkerTool(),
@@ -412,6 +421,54 @@ export class CoordinatorRuntime {
           .slice(-limit)
           .map((item) => item!.text!.trim());
         return { text: messages.length ? messages.join("\n\n---\n\n") : "(no messages yet)" };
+      },
+    });
+  }
+
+  /**
+   * 워커 질문에 코디네이터가 W 규칙으로 답하려는 제안. 기계 사전 검사를 통과하면 독립 검토로 보내고,
+   * 검토자 전원이 통과시키면 플러그인이 워커에게 보낸다. 아니면 사람 카드가 된다 (RULES.md §5, §7).
+   */
+  private proposeAnswerTool() {
+    return defineAgentTool({
+      name: "coordinator_propose_answer",
+      title: "Propose an automatic answer",
+      description:
+        "Answer a worker's blocker yourself when it fits W1 (the answer is written in the request, plan or an earlier human decision: quote it), W5 (an implementation detail inside the task's scope that follows the repository's conventions: cite them) or W7 (a change of scope or approach that stays inside the original request), and none of H1-H6 apply. Independent reviewers check it before it reaches the worker; if any does not pass, it becomes the human's decision card. Use coordinator_prepare_decision instead when it does not fit.",
+      input: z.object({
+        requestId: z.string(),
+        taskNumber: z.number().int().positive(),
+        rule: z.enum(AUTO_RULES),
+        answer: z.string().trim().min(1),
+        evidence: z.array(z.object({ fact: z.string().trim().min(1), source: z.string().trim().min(1) })).min(1),
+        undo: z.string().trim().min(1),
+        selfCheck: z.array(z.string().trim().min(1)).min(6),
+      }),
+      execute: async (input, { paseo }) => {
+        if (!this.reviews) return { text: "Automatic answers are not available; use coordinator_prepare_decision.", isError: true };
+        const state = await this.store.read();
+        const request = state.requests.find((item) => item.id === input.requestId);
+        const task = request?.tasks.find((item) => item.number === input.taskNumber);
+        const blocker = task?.blocker;
+        if (!request || !task || !blocker) return { text: `Task ${input.requestId}/${input.taskNumber} has no open blocker.`, isError: true };
+        if (blocker.coordinator || blocker.proposal) {
+          return { text: "This blocker already has a decision card or a proposal under review.", isError: true };
+        }
+        const reason = this.reviews.precheck(state, request, task, input.rule);
+        if (reason) {
+          return { text: `Not eligible for an automatic answer: ${reason} Write the decision card with coordinator_prepare_decision.`, isError: true };
+        }
+        await this.reviews.start(paseo, input.requestId, input.taskNumber, {
+          rule: input.rule,
+          answer: input.answer,
+          evidence: input.evidence,
+          undo: input.undo,
+          selfCheck: input.selfCheck,
+          at: new Date().toISOString(),
+        });
+        return {
+          text: "Sent to independent reviewers. If all pass, the plugin sends your answer to the worker; otherwise it becomes the human's decision card. Nothing more to do for this blocker.",
+        };
       },
     });
   }
@@ -842,6 +899,7 @@ export class CoordinatorRuntime {
                       blocker: null,
                       outbox: [],
                       decisions: [],
+                      autoDecisions: [],
                     })),
                   }
                 : item,

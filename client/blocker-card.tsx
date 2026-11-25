@@ -98,6 +98,12 @@ export function BlockerCard({ request, task, ctx }: { request: CoordinatorReques
         <Lines items={analysis.reasons} ctx={ctx} />
         {analysis.rules.length > 0 ? <Text style={muted}>{`${ctx.t("blockerCard.rules")}: ${analysis.rules.join(", ")}`}</Text> : null}
       </Row>
+      {blocker.objections.length > 0 ? (
+        <Row label={ctx.t("objections")} ctx={ctx}>
+          <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>{ctx.t("reviewFailed")}</Text>
+          <Lines items={blocker.objections} ctx={ctx} />
+        </Row>
+      ) : null}
       <Row label={ctx.t("blockerCard.options")} ctx={ctx}>
         {analysis.options.map((option) => (
           <ChoiceBox

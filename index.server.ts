@@ -12,10 +12,13 @@ import {
   resolveBlocker,
   revisePlan,
 } from "./server/requests";
+import { ReviewRunner, isReviewerSession } from "./server/review";
 import { WorkerChannel } from "./server/worker-channel";
 import { isWorkerSession, reportBlockerTool } from "./server/worker-tools";
 import { StateStore } from "./server/store";
 import {
+  enableRuleRpc,
+  reviewAutoDecisionRpc,
   acknowledgeRpc,
   answerQuestionsRpc,
   askCoordinatorRpc,
@@ -47,6 +50,11 @@ export default function contribute(server: PluginServerContext) {
     coordinator.notify(paseo).catch(logFailure("notify"));
   };
   const blockerTool = reportBlockerTool(store, tellCoordinator);
+  const reviews = new ReviewRunner(store, settings, channel);
+  coordinator.setReviewRunner(reviews);
+  const reviewerTools = reviews.tools((paseo, requestId, taskNumber) => {
+    reviews.finalize(paseo, requestId, taskNumber, "complete").catch(logFailure("finalize review"));
+  });
 
   server.handle(createRequestRpc, async (input, { paseo }) => {
     const result = await createRequest(input, store, settings);
@@ -77,6 +85,17 @@ export default function contribute(server: PluginServerContext) {
     return result;
   });
   server.handle(recordInstructionRpc, (input) => recordInstruction(input, store));
+  server.handle(enableRuleRpc, async ({ rule }) => {
+    await store.update((state) => ({
+      state: { ...state, disabledRules: state.disabledRules.filter((item) => item !== rule) },
+      result: undefined,
+    }));
+    return {};
+  });
+  server.handle(reviewAutoDecisionRpc, async (input, { paseo }) => {
+    await reviews.reviewAutoDecision(paseo, input);
+    return {};
+  });
   server.handle(resolveBlockerRpc, async (input, { paseo }) => {
     const message = await resolveBlocker(input, store);
     await channel.deliver(paseo, input.requestId, input.taskNumber, message);
@@ -94,6 +113,7 @@ export default function contribute(server: PluginServerContext) {
     // 화면이 열릴 때마다 계획이 필요한 요청이 남아 있는지 보고 코디네이터에게 알린다.
     // 플러그인 재시작이나 실패로 알림을 놓쳐도 사람이 화면을 열면 다시 이어진다.
     coordinator.notify(paseo).catch(logFailure("notify on subscribe"));
+    reviews.reconcile(paseo).catch(logFailure("reconcile reviews"));
     dispatcher.run(paseo).catch(logFailure("dispatch on subscribe"));
     // 구독이 막 끊긴 순간에 보내면 실패할 수 있다. 다음 구독이 처음에 전체 상태를 받으므로 버려도 된다.
     const send = (state: Parameters<typeof push>[0]) => {
@@ -106,8 +126,9 @@ export default function contribute(server: PluginServerContext) {
 
   // 코디네이터 세션에만 전용 도구와 지침을 붙인다. 지침은 세션마다 붙고 에이전트에 저장되지 않는다.
   server.addHook("agent.open.before", async ({ request }) => {
-    // 워커에게는 막혔을 때 보고하는 도구 하나만 붙인다.
+    // 워커에게는 막혔을 때 보고하는 도구 하나만, 검토자에게는 검토 도구 두 개만 붙인다.
     if (isWorkerSession(request.labels)) return { ...request, tools: [...request.tools, blockerTool] };
+    if (isReviewerSession(request.labels)) return { ...request, tools: [...request.tools, ...reviewerTools] };
     if (!isCoordinatorSession(request.labels)) return request;
     return {
       ...request,
@@ -132,6 +153,20 @@ export default function contribute(server: PluginServerContext) {
   // 코디네이터가 자기 전용 도구를 부를 때 권한 확인이 뜨면 기계적으로 허용한다. 이 도구는 요청을 읽고
   // 계획을 저장할 뿐이다. 그 밖의 권한 요청은 손대지 않아서 사람의 인박스로 간다.
   server.addHook("agent.permission.before", async ({ agent, request }, { paseo }) => {
+    // 검토자는 읽기 전용이다. 검토 도구는 허용하고, 그 밖의 권한 요청은 모두 거절한다 (RULES.md §7).
+    if (await reviews.findReview(agent.id)) {
+      const allowed = request.kind === "tool" && request.name.includes("reviewer_");
+      await paseo.agents
+        .ref(agent.id)
+        .respondToPermission({
+          requestId: request.id,
+          response: allowed
+            ? { behavior: "allow" }
+            : { behavior: "deny", message: "Reviewers are read-only. Continue the review without this." },
+        })
+        .catch(logFailure("answer reviewer permission"));
+      return;
+    }
     // 워커가 report_blocker 를 부를 때 권한 확인이 뜨면 허용한다. 막힘을 보고하는 일 자체가 사람을 기다리면 안 된다.
     if (request.kind === "tool" && request.name.includes("report_blocker") && (await dispatcher.findWorker(agent.id))) {
       await paseo.agents
