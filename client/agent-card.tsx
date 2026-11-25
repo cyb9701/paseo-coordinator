@@ -1,0 +1,194 @@
+import type { AgentRef } from "@getpaseo/plugin/client";
+import { useAgent, useAgents, usePaseo } from "@getpaseo/plugin/client";
+import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { Pressable, Text, View } from "react-native";
+import { type ColumnKey, columnOf, isVisibleAgent, stateColor, stateLabel } from "./agent-state";
+import { useClassifier } from "./pending-store";
+import { formatAgo } from "./time";
+import { CtaButton, type ViewContext } from "./ui";
+
+// 실행 중인 에이전트는 lastActivityAt 이 계속 바뀐다. 바뀔 때마다 timeline 을 다시 읽지 않도록 30초 단위로 묶는다.
+function previewBucket(lastActivityAt: string, running: boolean): string {
+  if (!running) return lastActivityAt;
+  return String(Math.floor(Date.parse(lastActivityAt) / 30_000));
+}
+
+/** 카드 본문에 보일 마지막 어시스턴트 응답. 사람이 카드만 보고 무슨 일이 있었는지 알 수 있게 한다. */
+function useLastAssistantText(agentId: string, hostId: string, bucket: string) {
+  const paseo = usePaseo();
+  return useQuery({
+    queryKey: ["coordinator", "last-assistant-text", hostId, agentId, bucket],
+    staleTime: Infinity,
+    queryFn: async () => {
+      const page = await paseo.agents.ref(agentId).timeline.refetch({ direction: "tail", limit: 20 });
+      const entries = (page as { entries?: readonly { item?: { type?: string; text?: string } }[] }).entries ?? [];
+      for (let index = entries.length - 1; index >= 0; index -= 1) {
+        const item = entries[index]?.item;
+        if (item?.type === "assistant_message" && item.text?.trim()) {
+          return item.text.replace(/\s+/g, " ").trim();
+        }
+      }
+      return null;
+    },
+  });
+}
+
+function ctaFor(column: ColumnKey): { label: string; primary: boolean } {
+  switch (column) {
+    case "react":
+      return { label: "열어서 처리", primary: true };
+    case "review":
+      return { label: "✓ 열어서 확인", primary: true };
+    default:
+      return { label: "열기", primary: false };
+  }
+}
+
+function SubSessions({ parentId, ctx }: { parentId: string; ctx: ViewContext }) {
+  const [open, setOpen] = useState(false);
+  const classify = useClassifier();
+  const children = useAgents({
+    hosts: [ctx.hostId],
+    where: (a) => isVisibleAgent(a) && a.parentAgentId === parentId,
+    orderBy: ["lastActivityAt", "desc"],
+  });
+  const unread = useAgents({
+    hosts: [ctx.hostId],
+    where: (a) => isVisibleAgent(a) && a.parentAgentId === parentId && classify.column(a) === "review",
+  });
+  if (children.length === 0) return null;
+  const summary = `하위 세션 ${children.length}개${unread.length > 0 ? ` · 결과 미확인 ${unread.length}개` : ""}`;
+  return (
+    <View style={{ borderTopWidth: 1, borderColor: ctx.theme.colors.border, paddingTop: 6, gap: 4 }}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`${summary} ${open ? "접기" : "펼치기"}`}
+        onPress={() => setOpen((value) => !value)}
+        style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 2 }}
+      >
+        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{open ? "▾" : "▸"}</Text>
+        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12 }}>{summary}</Text>
+      </Pressable>
+      {open ? children.map((ref) => <SubSessionRow key={ref.key} agentRef={ref} ctx={ctx} />) : null}
+    </View>
+  );
+}
+
+function SubSessionRow({ agentRef, ctx }: { agentRef: AgentRef; ctx: ViewContext }) {
+  const classify = useClassifier();
+  const agent = useAgent(agentRef, (a) => ({
+    id: a.id,
+    title: a.title,
+    status: a.status,
+    attentionReason: a.attentionReason,
+    requiresAttention: a.requiresAttention,
+    hostId: a.hostId,
+  }));
+  if (!agent) return null;
+  const state = classify.state(agent);
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingLeft: 16 }}>
+      <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: stateColor(state, ctx.theme) }} />
+      <Text numberOfLines={1} style={{ color: ctx.theme.colors.foreground, fontSize: 12, flex: 1 }}>
+        {agent.title ?? "제목 없는 하위 세션"}
+      </Text>
+      <Text style={{ color: stateColor(state, ctx.theme), fontSize: 11 }}>{stateLabel(state)}</Text>
+      {ctx.navigation ? (
+        <CtaButton
+          size="sm"
+          label="열기"
+          accessibilityLabel={`${agent.title ?? "하위 세션"} 열기`}
+          theme={ctx.theme}
+          onPress={() => ctx.navigation?.openAgent({ agentId: agentRef.id, serverId: agent.hostId })}
+        />
+      ) : null}
+    </View>
+  );
+}
+
+export function AgentCard({
+  agentRef,
+  ctx,
+  workspaceLabel,
+}: {
+  agentRef: AgentRef;
+  ctx: ViewContext;
+  /** 컬럼만 보이는 좁은 화면에서는 카드가 어느 워크스페이스 것인지 카드에 적는다. */
+  workspaceLabel?: string | null;
+}) {
+  const classify = useClassifier();
+  const agent = useAgent(agentRef, (a) => ({
+    id: a.id,
+    title: a.title,
+    provider: a.provider,
+    model: a.model,
+    status: a.status,
+    attentionReason: a.attentionReason,
+    requiresAttention: a.requiresAttention,
+    lastActivityAt: a.lastActivityAt,
+    hostId: a.hostId,
+    parentAgentId: a.parentAgentId,
+  }));
+  const running = agent?.status === "running";
+  const preview = useLastAssistantText(
+    agentRef.id,
+    ctx.hostId,
+    agent ? previewBucket(agent.lastActivityAt, running) : "",
+  );
+  if (!agent) return null;
+  const state = classify.state(agent);
+  const color = stateColor(state, ctx.theme);
+  const cta = ctaFor(columnOf(state));
+  const title = agent.title ?? "제목 없는 에이전트";
+  return (
+    <View
+      style={{
+        borderWidth: 1,
+        borderColor: ctx.theme.colors.border,
+        borderLeftWidth: 3,
+        borderLeftColor: color,
+        borderRadius: 8,
+        backgroundColor: ctx.theme.colors.surface1,
+        padding: 10,
+        gap: 6,
+      }}
+    >
+      {workspaceLabel ? (
+        <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 11 }}>
+          {workspaceLabel}
+        </Text>
+      ) : null}
+      <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
+        <Text numberOfLines={2} style={{ color: ctx.theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>
+          {agent.parentAgentId ? `↳ ${title}` : title}
+        </Text>
+        <Text style={{ color, fontSize: 11 }}>{stateLabel(state)}</Text>
+        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 11 }}>
+          {formatAgo(agent.lastActivityAt, ctx.now)}
+        </Text>
+      </View>
+      {preview.data ? (
+        <Text numberOfLines={2} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 12, lineHeight: 17 }}>
+          {preview.data}
+        </Text>
+      ) : null}
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: 11, flex: 1 }}>
+          {agent.model ? `${agent.provider} / ${agent.model}` : agent.provider}
+        </Text>
+        {ctx.navigation ? (
+          <CtaButton
+            size="sm"
+            label={cta.label}
+            tone={cta.primary ? "primary" : "neutral"}
+            accessibilityLabel={`${title} ${cta.label}`}
+            theme={ctx.theme}
+            onPress={() => ctx.navigation?.openAgent({ agentId: agentRef.id, serverId: agent.hostId })}
+          />
+        ) : null}
+      </View>
+      {agent.parentAgentId ? null : <SubSessions parentId={agentRef.id} ctx={ctx} />}
+    </View>
+  );
+}

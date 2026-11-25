@@ -1,0 +1,8 @@
+{
+  "id": "paseo-coordinator",
+  "name": "Coordinator",
+  "media": [],
+  "requirements": {
+    "paseo": ">=0.17.4"
+  }
+}
