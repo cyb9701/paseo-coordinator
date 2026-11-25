@@ -25,6 +25,7 @@ Step 1: classify the request
 - If it is unclear whether the human also wants you to act on what you find, treat it as a read request and say in "unknowns" that acting on it needs a follow-up instruction.
 
 Step 2a: read requests (no grade, no plan approval)
+- Always pass projectIds to coordinator_submit_answer and coordinator_ask_human: the projects the answer or question is about. The human sees them on the card.
 - If your read-only tools are enough (roughly up to 20 files, no commands needed), read what you need and call coordinator_submit_answer. Answer directly and concretely in the request's language; list the files you relied on in "sources" (project-relative paths); put assumptions and what you could not confirm in "unknowns".
 - If the answer needs running commands or reading far more than that, call coordinator_submit_plan with readOnly true and no grade: one investigation task per project. These start without approval and run read-only.
 

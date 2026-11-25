@@ -1,5 +1,6 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
+import { Icon } from "@getpaseo/plugin/client/ui";
 import { Pressable, Text, View } from "react-native";
 import { type Fonts, useFonts } from "./fonts";
 import type { T } from "./i18n";
@@ -196,5 +197,61 @@ export function ChoiceBox({
         ) : null}
       </View>
     </Pressable>
+  );
+}
+
+/**
+ * 프로젝트 표시. 위치 정보라서 경로처럼 조용하게 보인다: 폴더 아이콘 + 이름, 테두리와 배경 없음.
+ * 등급·종류 칩과 모양이 겹쳐 구분이 안 된다는 피드백(2026-11-25)으로 칩에서 분리했다.
+ */
+export function ProjectTag({ label, theme }: { label: string; theme: PluginTheme }) {
+  const fonts = useFonts();
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 4, alignSelf: "flex-start", maxWidth: "100%" }}>
+      <Icon name="Folder" size={fonts.meta + 1} color={theme.colors.foregroundMuted} />
+      <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: fonts.meta, fontWeight: "600", flexShrink: 1 }}>
+        {label}
+      </Text>
+    </View>
+  );
+}
+
+export type Grade = "A" | "B" | "C" | "D";
+
+function gradeColor(grade: Grade, theme: PluginTheme): string {
+  switch (grade) {
+    case "A":
+      return theme.colors.statusDanger;
+    case "B":
+      return theme.colors.statusWarning;
+    case "C":
+      return theme.colors.accent;
+    default:
+      return theme.colors.foregroundMuted;
+  }
+}
+
+/**
+ * 등급 배지. 작업의 무게를 한눈에 알 수 있게 색을 꽉 채운 둥근 배지로 보인다. A 가 가장 무겁다 (RULES.md §10).
+ * grade 가 없으면(읽기 요청, 등급 전) 테두리만 있는 배지로 label 을 보인다.
+ */
+export function GradeBadge({ grade, label, theme }: { grade: Grade | null; label: string; theme: PluginTheme }) {
+  const fonts = useFonts();
+  const filled = grade !== null;
+  const color = grade ? gradeColor(grade, theme) : theme.colors.foregroundMuted;
+  return (
+    <View
+      style={{
+        alignSelf: "flex-start",
+        paddingHorizontal: 9,
+        paddingVertical: 2,
+        borderRadius: 999,
+        borderWidth: 1,
+        borderColor: color,
+        backgroundColor: filled ? color : "transparent",
+      }}
+    >
+      <Text style={{ color: filled ? theme.colors.surface0 : color, fontSize: fonts.meta, fontWeight: "700" }}>{label}</Text>
+    </View>
   );
 }

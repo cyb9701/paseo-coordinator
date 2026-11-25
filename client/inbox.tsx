@@ -27,6 +27,7 @@ import {
   requestActions,
   toolFacts,
 } from "./permissions";
+import { WorkspaceProjectChip } from "./project-chip";
 import { formatAgo } from "./time";
 import { Chip, CtaButton, type ViewContext } from "./ui";
 
@@ -231,7 +232,7 @@ function CardFrame({
   ctx: ViewContext;
   children: ReactNode;
 }) {
-  const workspace = useWorkspace(agent.workspaceId, (w) => `${w.projectDisplayName} · ${w.title ?? w.name}`);
+  const workspace = useWorkspace(agent.workspaceId, (w) => w.title ?? w.name);
   return (
     <View
       style={{
@@ -247,6 +248,7 @@ function CardFrame({
     >
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
         <Chip label={kind} color={columnColor("react", ctx.theme)} theme={ctx.theme} />
+        <WorkspaceProjectChip workspaceId={agent.workspaceId} ctx={ctx} />
         <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, flexShrink: 1 }}>
           {`${workspace ?? ""} › ${agent.title}`}
         </Text>

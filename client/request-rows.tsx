@@ -1,12 +1,12 @@
-import type { ProjectRef } from "@getpaseo/plugin/client";
-import { useProject, useProjects, useRpc } from "@getpaseo/plugin/client";
+import { useRpc } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { type CoordinatorRequest, type Task, cancelRequestRpc } from "../shared/model";
+import { type CoordinatorRequest, type Task, cancelRequestRpc, requestProjectIds } from "../shared/model";
 import { COLUMN_KEYS, type ColumnKey, columnColor } from "./agent-state";
+import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
-import { Chip, CtaButton, type ViewContext } from "./ui";
+import { CtaButton, GradeBadge, type ViewContext } from "./ui";
 
 export type RequestItem = { kind: "planning" } | { kind: "question" } | { kind: "answer" } | { kind: "task"; task: Task };
 
@@ -41,7 +41,17 @@ function requestTitle(request: CoordinatorRequest): string {
   return request.title ?? request.text.split("\n")[0]!.slice(0, 80);
 }
 
-function PlaceholderCard({ text, column, ctx }: { text: string; column: ColumnKey; ctx: ViewContext }) {
+function PlaceholderCard({
+  text,
+  column,
+  projectIds,
+  ctx,
+}: {
+  text: string;
+  column: ColumnKey;
+  projectIds: readonly string[];
+  ctx: ViewContext;
+}) {
   return (
     <View
       style={{
@@ -52,24 +62,16 @@ function PlaceholderCard({ text, column, ctx }: { text: string; column: ColumnKe
         borderRadius: 8,
         backgroundColor: ctx.theme.colors.surface1,
         padding: 10,
+        gap: 6,
       }}
     >
+      <ProjectChips projectIds={projectIds} ctx={ctx} />
       <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta }}>{text}</Text>
     </View>
   );
 }
 
-function ProjectName({ projectRef, ctx }: { projectRef: ProjectRef; ctx: ViewContext }) {
-  const name = useProject(projectRef, (project) => project.displayName);
-  return (
-    <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
-      {name ?? projectRef.id}
-    </Text>
-  );
-}
-
 function TaskCard({ task, column, ctx }: { task: Task; column: ColumnKey; ctx: ViewContext }) {
-  const projects = useProjects({ hosts: [ctx.hostId], where: (project) => project.ref.id === task.projectId });
   return (
     <View
       style={{
@@ -80,22 +82,16 @@ function TaskCard({ task, column, ctx }: { task: Task; column: ColumnKey; ctx: V
         borderRadius: 8,
         backgroundColor: ctx.theme.colors.surface1,
         padding: 10,
-        gap: 4,
+        gap: 6,
       }}
     >
+      <ProjectChips projectIds={[task.projectId]} ctx={ctx} />
       <View style={{ flexDirection: "row", gap: 8 }}>
         <Text numberOfLines={2} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600", flex: 1 }}>
           {`${task.number} ${task.name}`}
         </Text>
         <Text style={{ color: columnColor(column, ctx.theme), fontSize: ctx.fonts.meta }}>{ctx.t(`taskStatus.${task.status}`)}</Text>
       </View>
-      {projects[0] ? (
-        <ProjectName projectRef={projects[0]} ctx={ctx} />
-      ) : (
-        <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
-          {task.projectId}
-        </Text>
-      )}
       {task.note ? (
         <Text numberOfLines={3} style={{ color: ctx.theme.colors.statusDanger, fontSize: ctx.fonts.meta }}>
           {task.note}
@@ -115,11 +111,25 @@ function TaskCard({ task, column, ctx }: { task: Task; column: ColumnKey; ctx: V
   );
 }
 
-function ItemCard({ item, column, ctx }: { item: RequestItem; column: ColumnKey; ctx: ViewContext }) {
-  if (item.kind === "planning") return <PlaceholderCard text={ctx.t("requestRow.planningCard")} column={column} ctx={ctx} />;
-  if (item.kind === "question") return <PlaceholderCard text={ctx.t("requestRow.questionCard")} column={column} ctx={ctx} />;
-  if (item.kind === "answer") return <PlaceholderCard text={ctx.t("requestRow.answerCard")} column={column} ctx={ctx} />;
-  return <TaskCard task={item.task} column={column} ctx={ctx} />;
+function ItemCard({
+  item,
+  request,
+  column,
+  ctx,
+}: {
+  item: RequestItem;
+  request: CoordinatorRequest;
+  column: ColumnKey;
+  ctx: ViewContext;
+}) {
+  if (item.kind === "task") return <TaskCard task={item.task} column={column} ctx={ctx} />;
+  const text =
+    item.kind === "planning"
+      ? ctx.t("requestRow.planningCard")
+      : item.kind === "question"
+        ? ctx.t("requestRow.questionCard")
+        : ctx.t("requestRow.answerCard");
+  return <PlaceholderCard text={text} column={column} projectIds={requestProjectIds(request)} ctx={ctx} />;
 }
 
 function RequestCell({ request, ctx }: { request: CoordinatorRequest; ctx: ViewContext }) {
@@ -128,11 +138,18 @@ function RequestCell({ request, ctx }: { request: CoordinatorRequest; ctx: ViewC
   const done = request.tasks.filter((task) => task.status === "done").length;
   return (
     <View style={{ gap: 4 }}>
-      <Chip
-        label={request.grade ?? (request.kind === "read" ? ctx.t("requestRow.readKind") : ctx.t("requestRow.noGrade"))}
-        color={ctx.theme.colors.accent}
+      <GradeBadge
+        grade={request.grade}
+        label={
+          request.grade
+            ? ctx.t("card.grade", { grade: request.grade })
+            : request.kind === "read"
+              ? ctx.t("requestRow.readKind")
+              : ctx.t("requestRow.noGrade")
+        }
         theme={ctx.theme}
       />
+      <ProjectChips projectIds={requestProjectIds(request)} ctx={ctx} />
       <Text numberOfLines={3} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta, fontWeight: "600" }}>
         {requestTitle(request)}
       </Text>
@@ -177,7 +194,7 @@ export function RequestRow({ request, ctx, firstColumnWidth }: { request: Coordi
       {COLUMN_KEYS.map((key) => (
         <View key={key} style={{ flex: 1, minWidth: 0, padding: 8, gap: 8, borderLeftWidth: 1, borderColor: ctx.theme.colors.border }}>
           {(cells.get(key) ?? []).map((item, index) => (
-            <ItemCard key={item.kind === "task" ? `t${item.task.number}` : `${item.kind}${index}`} item={item} column={key} ctx={ctx} />
+            <ItemCard key={item.kind === "task" ? `t${item.task.number}` : `${item.kind}${index}`} item={item} request={request} column={key} ctx={ctx} />
           ))}
         </View>
       ))}
@@ -193,7 +210,7 @@ export function CompactRequest({ request, ctx }: { request: CoordinatorRequest; 
       <RequestCell request={request} ctx={ctx} />
       {COLUMN_KEYS.flatMap((key) =>
         (cells.get(key) ?? []).map((item, index) => (
-          <ItemCard key={`${key}${index}`} item={item} column={key} ctx={ctx} />
+          <ItemCard key={`${key}${index}`} item={item} request={request} column={key} ctx={ctx} />
         )),
       )}
     </View>

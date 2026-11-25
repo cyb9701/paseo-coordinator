@@ -50,8 +50,9 @@ function ScreenBody({ theme, layout, host, navigation }: PluginScreenProps) {
   const tabs: readonly { key: Tab; label: string }[] = [
     { key: "inbox", label: blocked > 0 ? t("tabs.inboxCount", { count: blocked }) : t("tabs.inbox") },
     { key: "progress", label: t("tabs.progress") },
-    { key: "settings", label: t("tabs.settings") },
   ];
+  // 설정은 자주 쓰지 않아서 일하는 탭과 떨어뜨려 맨 오른쪽 끝에 둔다 (2026-11-25 사용자 요청).
+  const settingsTab: readonly { key: Tab; label: string }[] = [{ key: "settings", label: t("tabs.settings") }];
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: theme.colors.surface0 }}
@@ -67,6 +68,8 @@ function ScreenBody({ theme, layout, host, navigation }: PluginScreenProps) {
           theme={theme}
           onPress={() => setComposing(true)}
         />
+        <View style={{ flex: 1 }} />
+        <TabBar<Tab> tabs={settingsTab} active={tab} onChange={setTab} theme={theme} />
       </View>
       {composing ? (
         <NewRequestPanel

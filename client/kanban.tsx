@@ -8,7 +8,7 @@ import { AgentCard } from "./agent-card";
 import { COLUMN_KEYS, type ColumnKey, columnColor, columnRank } from "./agent-state";
 import { useClassifier } from "./pending-store";
 import { formatAgo } from "./time";
-import { Chip, type ViewContext } from "./ui";
+import { ProjectTag, type ViewContext } from "./ui";
 
 type Board = Map<string, Map<ColumnKey, readonly AgentRef[]>>;
 
@@ -58,7 +58,7 @@ function WorkspaceCell({ workspaceId, ctx }: { workspaceId: string; ctx: ViewCon
   if (!workspace) return null;
   return (
     <View style={{ gap: 4 }}>
-      <Chip label={workspace.project} color={ctx.theme.colors.accent} theme={ctx.theme} />
+      <ProjectTag label={workspace.project} theme={ctx.theme} />
       <Text numberOfLines={2} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta }}>
         {workspace.name}
       </Text>
@@ -159,7 +159,7 @@ function BoardRow({
 }
 
 function CompactCard({ agentRef, workspaceId, ctx }: { agentRef: AgentRef; workspaceId: string; ctx: ViewContext }) {
-  const label = useWorkspace(workspaceId, (w) => `${w.projectDisplayName} · ${w.title ?? w.name}`);
+  const label = useWorkspace(workspaceId, (w) => w.title ?? w.name);
   return <AgentCard agentRef={agentRef} ctx={ctx} workspaceLabel={label} />;
 }
 

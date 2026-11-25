@@ -5,6 +5,7 @@ import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { type ColumnKey, columnOf, isVisibleAgent, stateColor } from "./agent-state";
 import { useClassifier } from "./pending-store";
+import { WorkspaceProjectChip } from "./project-chip";
 import { formatAgo } from "./time";
 import { CtaButton, type ViewContext } from "./ui";
 
@@ -132,6 +133,7 @@ export function AgentCard({
     lastActivityAt: a.lastActivityAt,
     hostId: a.hostId,
     parentAgentId: a.parentAgentId,
+    workspaceId: a.workspaceId,
   }));
   const running = agent?.status === "running";
   const preview = useLastAssistantText(
@@ -157,11 +159,14 @@ export function AgentCard({
         gap: 6,
       }}
     >
-      {workspaceLabel ? (
-        <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
-          {workspaceLabel}
-        </Text>
-      ) : null}
+      <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+        <WorkspaceProjectChip workspaceId={agent.workspaceId} ctx={ctx} />
+        {workspaceLabel ? (
+          <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, flexShrink: 1 }}>
+            {workspaceLabel}
+          </Text>
+        ) : null}
+      </View>
       <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
         <Text numberOfLines={2} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600", flex: 1 }}>
           {agent.parentAgentId ? `↳ ${title}` : title}

@@ -3,10 +3,11 @@ import { useProject, useProjects, useRpc } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { Text, TextInput, View } from "react-native";
-import { type CoordinatorRequest, type Task, acknowledgeRpc, cancelRequestRpc, revisePlanRpc } from "../shared/model";
+import { type CoordinatorRequest, type Task, acknowledgeRpc, cancelRequestRpc, revisePlanRpc, requestProjectIds } from "../shared/model";
 import { columnColor } from "./agent-state";
+import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
-import { Chip, CtaButton, type ViewContext } from "./ui";
+import { Chip, CtaButton, GradeBadge, type ViewContext } from "./ui";
 
 export function Row({ label, children, ctx }: { label: string; children: ReactNode; ctx: ViewContext }) {
   return (
@@ -99,13 +100,13 @@ export function StartedCard({ request, ctx }: { request: CoordinatorRequest; ctx
     >
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
         <Chip label={ctx.t("planCard.kind")} color={accent} theme={ctx.theme} />
+        <ProjectChips projectIds={requestProjectIds(request)} ctx={ctx} />
         {request.grade ? (
-          <Chip
-            label={ctx.t("planCard.decideGrade", { grade: request.grade, count: request.tasks.length })}
-            color={ctx.theme.colors.accent}
-            theme={ctx.theme}
-          />
+          <GradeBadge grade={request.grade} label={ctx.t("card.grade", { grade: request.grade })} theme={ctx.theme} />
         ) : null}
+        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
+          {ctx.t("card.taskCount", { count: request.tasks.length })}
+        </Text>
         <Text numberOfLines={1} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600", flexShrink: 1 }}>
           {request.title ?? request.id}
         </Text>

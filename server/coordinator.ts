@@ -197,6 +197,13 @@ export class CoordinatorRuntime {
     }
   }
 
+  /** 코디네이터가 남긴 프로젝트 id 중 허용된 것만 남긴다. 카드에 보일 이름용이라 틀린 id 로 실패시키지 않는다. */
+  private async knownProjects(paseo: PaseoApi, ids: readonly string[]): Promise<string[]> {
+    if (ids.length === 0) return [];
+    const allowed = new Set((await allowedProjects(paseo, this.settings)).map((project) => project.id));
+    return ids.filter((id) => allowed.has(id));
+  }
+
   tools() {
     return [
       this.getRequestTool(),
@@ -354,8 +361,9 @@ export class CoordinatorRuntime {
           )
           .min(1)
           .max(4),
+        projectIds: z.array(z.string()).default([]),
       }),
-      execute: async (input) => {
+      execute: async (input, { paseo }) => {
         const request = (await this.store.read()).requests.find((item) => item.id === input.requestId);
         if (!request) return { text: `Unknown request ${input.requestId}`, isError: true };
         if (request.status !== "planning" && request.status !== "running") {
@@ -367,6 +375,7 @@ export class CoordinatorRuntime {
           }
         }
         const now = new Date().toISOString();
+        const projectIds = await this.knownProjects(paseo, input.projectIds);
         await this.store.update((current) => ({
           state: {
             ...current,
@@ -376,7 +385,12 @@ export class CoordinatorRuntime {
                     ...item,
                     status: "needs_input" as const,
                     title: item.title ?? input.title,
-                    question: { context: input.context, questions: input.questions, at: now },
+                    question: {
+                      context: input.context,
+                      questions: input.questions,
+                      projectIds,
+                      at: now,
+                    },
                   }
                 : item,
             ),
@@ -401,8 +415,9 @@ export class CoordinatorRuntime {
         answer: z.string().trim().min(1),
         sources: z.array(z.string().trim().min(1)).min(1),
         unknowns: z.array(z.string()).default([]),
+        projectIds: z.array(z.string()).default([]),
       }),
-      execute: async (input) => {
+      execute: async (input, { paseo }) => {
         const request = (await this.store.read()).requests.find((item) => item.id === input.requestId);
         if (!request) return { text: `Unknown request ${input.requestId}`, isError: true };
         if (request.status !== "planning") {
@@ -412,6 +427,7 @@ export class CoordinatorRuntime {
           return { text: "title must be written in Korean (language is ko).", isError: true };
         }
         const now = new Date().toISOString();
+        const projectIds = await this.knownProjects(paseo, input.projectIds);
         await this.store.update((current) => ({
           state: {
             ...current,
@@ -424,7 +440,7 @@ export class CoordinatorRuntime {
                     title: input.title,
                     grade: null,
                     tasks: [],
-                    answer: { text: input.answer, sources: input.sources, unknowns: input.unknowns, at: now },
+                    answer: { text: input.answer, sources: input.sources, unknowns: input.unknowns, projectIds, at: now },
                   }
                 : item,
             ),

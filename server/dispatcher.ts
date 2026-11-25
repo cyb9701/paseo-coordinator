@@ -243,7 +243,13 @@ export class Dispatcher {
             ? {
                 ...item,
                 status: "answered" as const,
-                answer: { text: sections.join("\n\n"), sources: request.tasks.map((task) => `${task.number} ${task.name}`), unknowns: [], at },
+                answer: {
+                  text: sections.join("\n\n"),
+                  sources: request.tasks.map((task) => `${task.number} ${task.name}`),
+                  unknowns: [],
+                  projectIds: [...new Set(request.tasks.map((task) => task.projectId))],
+                  at,
+                },
               }
             : item,
         ),

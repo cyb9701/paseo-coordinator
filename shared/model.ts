@@ -90,7 +90,13 @@ export const requestSchema = z.object({
   plannedAt: z.string().nullable().default(null),
   /** 코디네이터가 사람에게 묻는 질문 카드. 답을 받으면 비운다. */
   question: z
-    .object({ context: z.string(), questions: z.array(questionSchema).min(1), at: z.string() })
+    .object({
+      context: z.string(),
+      questions: z.array(questionSchema).min(1),
+      /** 질문이 어느 프로젝트 이야기인지. 카드에 프로젝트 이름을 보이기 위해 코디네이터가 남긴다. */
+      projectIds: z.array(z.string()).default([]),
+      at: z.string(),
+    })
     .nullable()
     .default(null),
   /** 사람이 시작 카드나 답변 카드를 확인한 시각. 그 뒤에 새 계획이나 답이 오면 다시 확인 필요가 된다. */
@@ -101,6 +107,8 @@ export const requestSchema = z.object({
       text: z.string(),
       sources: z.array(z.string()),
       unknowns: z.array(z.string()),
+      /** 답이 어느 프로젝트를 보고 쓴 것인지. 카드에 프로젝트 이름을 보이기 위해 코디네이터가 남긴다. */
+      projectIds: z.array(z.string()).default([]),
       at: z.string(),
     })
     .nullable()
@@ -178,3 +186,15 @@ export const watchStateSubscription = defineSubscription({
   input: z.object({}),
   event: stateSchema,
 });
+
+/** 요청에 걸린 프로젝트. 사람이 고른 것, 작업의 프로젝트, 코디네이터가 답하거나 물을 때 본 프로젝트를 모은다. */
+export function requestProjectIds(request: CoordinatorRequest): string[] {
+  return [
+    ...new Set([
+      ...request.projectIds,
+      ...request.tasks.map((task) => task.projectId),
+      ...(request.answer?.projectIds ?? []),
+      ...(request.question?.projectIds ?? []),
+    ]),
+  ];
+}

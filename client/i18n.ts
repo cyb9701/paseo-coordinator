@@ -42,6 +42,9 @@ const en = {
     expand: "expand",
     collapse: "collapse",
     openNamed: "Open {{name}}",
+    noProject: "Project not chosen yet",
+    grade: "Grade {{grade}}",
+    taskCount: "{{count}} tasks",
   },
   board: {
     requestOrWorkspace: "Request · Workspace",
@@ -261,6 +264,9 @@ const ko = {
     expand: "펼치기",
     collapse: "접기",
     openNamed: "{{name}} 열기",
+    noProject: "프로젝트 미정",
+    grade: "등급 {{grade}}",
+    taskCount: "작업 {{count}}개",
   },
   board: {
     requestOrWorkspace: "요청 · 워크스페이스",

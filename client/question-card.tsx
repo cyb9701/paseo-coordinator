@@ -2,9 +2,10 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Text, TextInput, View } from "react-native";
-import { type CoordinatorRequest, answerQuestionsRpc, cancelRequestRpc, revisePlanRpc } from "../shared/model";
+import { type CoordinatorRequest, answerQuestionsRpc, cancelRequestRpc, revisePlanRpc, requestProjectIds } from "../shared/model";
 import { columnColor } from "./agent-state";
 import { Lines, Row } from "./plan-card";
+import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
 import { Chip, ChoiceBox, CtaButton, type ViewContext } from "./ui";
 
@@ -61,6 +62,7 @@ export function QuestionCard({ request, ctx }: { request: CoordinatorRequest; ct
     >
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
         <Chip label={ctx.t("questionCard.kind")} color={accent} theme={ctx.theme} />
+        <ProjectChips projectIds={requestProjectIds(request)} ctx={ctx} />
         <Text numberOfLines={1} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600", flexShrink: 1 }}>
           {request.title ?? request.id}
         </Text>
