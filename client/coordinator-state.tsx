@@ -1,6 +1,7 @@
 import { useRpc, useSubscription } from "@getpaseo/plugin/client";
 import { type ReactNode, createContext, useCallback, useContext, useMemo, useState } from "react";
 import {
+  type CoordinatorRequest,
   type CoordinatorState,
   type SentInstruction,
   recordInstructionRpc,
@@ -58,4 +59,19 @@ export function useSentLog(): SentLog {
     [recordRpc],
   );
   return { sent, record };
+}
+
+/** 반응 필요: 코디네이터가 질문 카드를 보내고 내 답을 기다린다. */
+export function requestNeedsReaction(request: CoordinatorRequest): boolean {
+  return request.status === "needs_input" && request.question !== null;
+}
+
+/**
+ * 확인 필요: 코디네이터가 답했거나(답변 카드), 계획해서 시작한 뒤 내가 아직 보지 않았다(시작 카드).
+ * 확인한 뒤 새 계획이 오면 다시 확인 필요가 된다.
+ */
+export function requestNeedsReview(request: CoordinatorRequest): boolean {
+  if (request.status === "answered") return request.answer !== null;
+  if (request.status !== "running" || !request.plannedAt) return false;
+  return !request.reviewedAt || request.reviewedAt < request.plannedAt;
 }

@@ -8,7 +8,7 @@ import { COLUMN_KEYS, type ColumnKey, columnColor } from "./agent-state";
 import { formatAgo } from "./time";
 import { Chip, CtaButton, type ViewContext } from "./ui";
 
-export type RequestItem = { kind: "planning" } | { kind: "approval" } | { kind: "task"; task: Task };
+export type RequestItem = { kind: "planning" } | { kind: "question" } | { kind: "answer" } | { kind: "task"; task: Task };
 
 // 작업 상태를 보드 컬럼에 놓는다. 막힌 작업은 사람을 기다리므로 가장 왼쪽(내 결정 필요)이다.
 const TASK_COLUMNS: Record<Task["status"], ColumnKey | null> = {
@@ -24,7 +24,8 @@ export function requestCells(request: CoordinatorRequest): Map<ColumnKey, Reques
   const cells = new Map<ColumnKey, RequestItem[]>();
   const add = (column: ColumnKey, item: RequestItem) => cells.set(column, [...(cells.get(column) ?? []), item]);
   if (request.status === "planning") add("auto", { kind: "planning" });
-  if (request.status === "awaiting_approval") add("react", { kind: "approval" });
+  if (request.status === "needs_input") add("react", { kind: "question" });
+  if (request.status === "answered") add("review", { kind: "answer" });
   for (const task of request.tasks) {
     const column = TASK_COLUMNS[task.status];
     if (column) add(column, { kind: "task", task });
@@ -111,7 +112,8 @@ function TaskCard({ task, column, ctx }: { task: Task; column: ColumnKey; ctx: V
 
 function ItemCard({ item, column, ctx }: { item: RequestItem; column: ColumnKey; ctx: ViewContext }) {
   if (item.kind === "planning") return <PlaceholderCard text={ctx.t("requestRow.planningCard")} column={column} ctx={ctx} />;
-  if (item.kind === "approval") return <PlaceholderCard text={ctx.t("requestRow.approvalCard")} column={column} ctx={ctx} />;
+  if (item.kind === "question") return <PlaceholderCard text={ctx.t("requestRow.questionCard")} column={column} ctx={ctx} />;
+  if (item.kind === "answer") return <PlaceholderCard text={ctx.t("requestRow.answerCard")} column={column} ctx={ctx} />;
   return <TaskCard task={item.task} column={column} ctx={ctx} />;
 }
 
@@ -121,7 +123,11 @@ function RequestCell({ request, ctx }: { request: CoordinatorRequest; ctx: ViewC
   const done = request.tasks.filter((task) => task.status === "done").length;
   return (
     <View style={{ gap: 4 }}>
-      <Chip label={request.grade ?? ctx.t("requestRow.noGrade")} color={ctx.theme.colors.accent} theme={ctx.theme} />
+      <Chip
+        label={request.grade ?? (request.kind === "read" ? ctx.t("requestRow.readKind") : ctx.t("requestRow.noGrade"))}
+        color={ctx.theme.colors.accent}
+        theme={ctx.theme}
+      />
       <Text numberOfLines={3} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta, fontWeight: "600" }}>
         {requestTitle(request)}
       </Text>

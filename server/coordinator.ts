@@ -65,11 +65,22 @@ async function allowedProjects(paseo: PaseoApi, settings: Settings) {
     .map((project) => ({ id: project.projectId, name: project.projectDisplayName, path: project.projectRootPath }));
 }
 
-function needsPlanning(request: CoordinatorRequest): boolean {
+// 알린 뒤 이만큼 지났는데 코디네이터가 쉬고 있고 요청이 아직 planning 이면 알림이 유실된 것으로 본다.
+const RENOTIFY_AFTER_MS = 60_000;
+const MAX_RENOTIFY = 3;
+
+/**
+ * 코디네이터에게 (다시) 알려야 하는 요청인가.
+ * 알림 메시지는 코디네이터 세션이 다시 열리거나 턴이 끊기면 사라질 수 있다 (2026-11-25: 알림을 기록한 직후 세션을
+ * 다시 열어 메시지가 사라졌고, 이미 알린 것으로 기록돼 요청이 planning 에 멈췄다). 그래서 쉬는 코디네이터가 처리하지
+ * 않은 요청은 다시 알린다.
+ */
+function needsPlanning(request: CoordinatorRequest, coordinatorIdle: boolean, now: number): boolean {
   if (request.status !== "planning") return false;
   if (!request.notifiedAt) return true;
   const lastFeedback = request.feedback.at(-1)?.at;
-  return Boolean(lastFeedback && lastFeedback > request.notifiedAt);
+  if (lastFeedback && lastFeedback > request.notifiedAt) return true;
+  return coordinatorIdle && now - Date.parse(request.notifiedAt) > RENOTIFY_AFTER_MS;
 }
 
 /**
@@ -79,6 +90,8 @@ function needsPlanning(request: CoordinatorRequest): boolean {
 export class CoordinatorRuntime {
   private creating: Promise<string> | null = null;
   private notifying = false;
+  /** 요청마다 다시 알린 횟수. 플러그인 프로세스 동안만 센다. */
+  private readonly renotified = new Map<string, number>();
 
   constructor(
     private readonly store: StateStore,
@@ -139,12 +152,30 @@ export class CoordinatorRuntime {
     this.notifying = true;
     try {
       const state = await this.store.read();
-      const waiting = state.requests.filter(needsPlanning);
-      if (waiting.length === 0) return;
-      const agentId = await this.ensure(paseo, waiting[0]!.language);
+      if (!state.requests.some((request) => needsPlanning(request, true, Date.now()))) return;
+      const language = state.requests.find((request) => request.status === "planning")?.language ?? "en";
+      const agentId = await this.ensure(paseo, language);
       const snapshot = await paseo.agents.ref(agentId).refresh();
       if (!snapshot) return;
       if (snapshot.agent.status === "running" || (snapshot.agent.pendingPermissions?.length ?? 0) > 0) return;
+      // 여기까지 왔으면 코디네이터는 쉬고 있다.
+      const waiting = state.requests.filter((request) => {
+        if (!needsPlanning(request, true, Date.now())) return false;
+        // 처음 알리거나 새 지시가 온 경우는 세지 않는다. 유실을 의심해 다시 알리는 경우만 센다.
+        const lastFeedback = request.feedback.at(-1)?.at;
+        if (!request.notifiedAt || (lastFeedback && lastFeedback > request.notifiedAt)) {
+          this.renotified.delete(request.id);
+          return true;
+        }
+        const count = this.renotified.get(request.id) ?? 0;
+        if (count >= MAX_RENOTIFY) {
+          console.error(`[coordinator] ${request.id} is still planning after ${count} reminders; not reminding again`);
+          return false;
+        }
+        this.renotified.set(request.id, count + 1);
+        return true;
+      });
+      if (waiting.length === 0) return;
       const now = new Date().toISOString();
       const ids = waiting.map((request) => request.id);
       await this.store.update((current) => ({
@@ -157,7 +188,7 @@ export class CoordinatorRuntime {
       await paseo.agents
         .ref(agentId)
         .send(
-          `[paseo-coordinator] Requests waiting for a plan: ${ids.join(", ")}. For each one, call coordinator_get_request, then coordinator_submit_plan.`,
+          `[paseo-coordinator] Requests waiting for you: ${ids.join(", ")}. For each one, call coordinator_get_request, classify it, then answer it (coordinator_submit_answer) or plan it (coordinator_submit_plan).`,
         );
     } finally {
       this.notifying = false;
@@ -170,6 +201,8 @@ export class CoordinatorRuntime {
       this.projectOverviewTool(),
       this.listFilesTool(),
       this.readFileTool(),
+      this.askHumanTool(),
+      this.submitAnswerTool(),
       this.submitPlanTool(),
     ];
   }
@@ -295,6 +328,112 @@ export class CoordinatorRuntime {
     });
   }
 
+  /**
+   * 사람에게 질문 카드를 보낸다. 요청을 두 가지 이상으로 읽을 수 있거나, 사람이 정할 선택(제품·UX 방향, 데이터 구조,
+   * 라이브러리, 공개 API)이 있거나, A 등급의 실제 변경을 시작해야 할 때만 쓴다 (RULES.md §2.0).
+   */
+  private askHumanTool() {
+    return defineAgentTool({
+      name: "coordinator_ask_human",
+      title: "Ask the human",
+      description:
+        "Send the human a question card when the request is ambiguous, needs a human choice (product or UX direction, data structure, library, public API), or is grade A and the real change must start. Give context, concrete questions, options and your recommendation. Do not ask about things you can decide yourself.",
+      input: z.object({
+        requestId: z.string(),
+        title: z.string().trim().min(1),
+        context: z.string().trim().min(1),
+        questions: z
+          .array(
+            z.object({
+              question: z.string().trim().min(1),
+              options: z.array(z.object({ label: z.string().trim().min(1), description: z.string().optional() })).min(2),
+              recommended: z.string().nullable().default(null),
+            }),
+          )
+          .min(1)
+          .max(4),
+      }),
+      execute: async (input) => {
+        const request = (await this.store.read()).requests.find((item) => item.id === input.requestId);
+        if (!request) return { text: `Unknown request ${input.requestId}`, isError: true };
+        if (request.status !== "planning" && request.status !== "running") {
+          return { text: `Request ${request.id} is ${request.status}; it does not take questions now.`, isError: true };
+        }
+        for (const question of input.questions) {
+          if (question.recommended && !question.options.some((option) => option.label === question.recommended)) {
+            return { text: `recommended "${question.recommended}" is not one of the option labels.`, isError: true };
+          }
+        }
+        const now = new Date().toISOString();
+        await this.store.update((current) => ({
+          state: {
+            ...current,
+            requests: current.requests.map((item) =>
+              item.id === request.id
+                ? {
+                    ...item,
+                    status: "needs_input" as const,
+                    title: item.title ?? input.title,
+                    question: { context: input.context, questions: input.questions, at: now },
+                  }
+                : item,
+            ),
+          },
+          result: undefined,
+        }));
+        return { text: `Question card sent for ${request.id}. Wait for the human's answer; the plugin will tell you.` };
+      },
+    });
+  }
+
+  /** 읽기 요청에 직접 답한다. 등급도 계획 승인도 없다. 사람은 인박스 '확인 필요'의 답변 카드로 본다. */
+  private submitAnswerTool() {
+    return defineAgentTool({
+      name: "coordinator_submit_answer",
+      title: "Submit answer",
+      description:
+        "Answer a read request (one that changes nothing) directly. Use this when your read-only tools were enough to answer.",
+      input: z.object({
+        requestId: z.string(),
+        title: z.string().trim().min(1),
+        answer: z.string().trim().min(1),
+        sources: z.array(z.string().trim().min(1)).min(1),
+        unknowns: z.array(z.string()).default([]),
+      }),
+      execute: async (input) => {
+        const request = (await this.store.read()).requests.find((item) => item.id === input.requestId);
+        if (!request) return { text: `Unknown request ${input.requestId}`, isError: true };
+        if (request.status !== "planning") {
+          return { text: `Request ${request.id} is ${request.status}; it no longer takes an answer.`, isError: true };
+        }
+        if (request.language === "ko" && !HANGUL.test(input.title)) {
+          return { text: "title must be written in Korean (language is ko).", isError: true };
+        }
+        const now = new Date().toISOString();
+        await this.store.update((current) => ({
+          state: {
+            ...current,
+            requests: current.requests.map((item) =>
+              item.id === request.id
+                ? {
+                    ...item,
+                    kind: "read" as const,
+                    status: "answered" as const,
+                    title: input.title,
+                    grade: null,
+                    tasks: [],
+                    answer: { text: input.answer, sources: input.sources, unknowns: input.unknowns, at: now },
+                  }
+                : item,
+            ),
+          },
+          result: undefined,
+        }));
+        return { text: `Answer stored for ${request.id}. The human reviews it in the inbox.` };
+      },
+    });
+  }
+
   private submitPlanTool() {
     const taskInput = z.object({
       number: z.number().int().positive(),
@@ -308,11 +447,13 @@ export class CoordinatorRuntime {
     return defineAgentTool({
       name: "coordinator_submit_plan",
       title: "Submit plan",
-      description: "Submit or replace the plan for a request that is in the planning state.",
+      description:
+        "Submit or replace the plan for a request in the planning state. For a change request set readOnly false and a grade. For a read request too large to answer yourself, set readOnly true and omit grade: read-only investigation workers start without approval.",
       input: z.object({
         requestId: z.string(),
+        readOnly: z.boolean().default(false),
         title: z.string().trim().min(1),
-        grade: z.enum(GRADES),
+        grade: z.enum(GRADES).optional(),
         gradeReasons: z.array(z.string().trim().min(1)).min(1),
         recommendation: z.string().trim().min(1),
         risks: z.array(z.string()).default([]),
@@ -331,9 +472,18 @@ export class CoordinatorRuntime {
           (request.projectIds.length > 0 ? projects.filter((p) => request.projectIds.includes(p.id)) : projects).map((p) => p.id),
         );
         const problems = validatePlan(input, request.language, usable);
+        if (!input.readOnly && !input.grade) problems.push("A change request needs a grade.");
+        // A 등급의 실제 변경은 사람이 질문 카드에 답한 뒤에만 시작한다 (RULES.md §2.0, H4). 코드로 막는다.
+        if (!input.readOnly && input.grade === "A" && request.feedback.at(-1)?.kind !== "answer") {
+          problems.push(
+            "Grade A: start with a readOnly investigation plan, or ask the human with coordinator_ask_human before planning the real change.",
+          );
+        }
         if (problems.length > 0) return { text: `Plan rejected:\n- ${problems.join("\n- ")}`, isError: true };
-        // D 는 계획 카드 없이 시작한다 (RULES.md §10). 나머지는 사람이 승인한다. C 의 자동 승인(W6)은 6단계에서 붙인다.
-        const status = input.grade === "D" ? ("running" as const) : ("awaiting_approval" as const);
+        // v3: 명확한 요청은 코디네이터 판단으로 바로 시작한다. 사람은 확인 필요의 시작 카드로 본다 (RULES.md §2.0).
+        // 읽기 전용 조사 워커는 읽기 전용 모드로 띄운다 (3e).
+        const status = "running" as const;
+        const grade = input.readOnly ? null : (input.grade ?? null);
         const now = new Date().toISOString();
         await this.store.update((current) => ({
           state: {
@@ -343,8 +493,10 @@ export class CoordinatorRuntime {
                 ? {
                     ...item,
                     status,
+                    kind: input.readOnly ? ("read" as const) : ("change" as const),
                     title: input.title,
-                    grade: input.grade,
+                    grade,
+                    answer: null,
                     gradeReasons: input.gradeReasons,
                     recommendation: input.recommendation,
                     risks: input.risks,
@@ -364,9 +516,7 @@ export class CoordinatorRuntime {
         }));
         return {
           text:
-            status === "running"
-              ? `Plan stored for ${request.id}. Grade D starts without plan approval.`
-              : `Plan stored for ${request.id}. It is waiting for the human's approval in the inbox.`,
+            `Plan stored for ${request.id} and started. The human sees it as a start card and can stop or redirect it.`,
         };
       },
     });

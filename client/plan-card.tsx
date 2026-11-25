@@ -3,12 +3,12 @@ import { useProject, useProjects, useRpc } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { Text, TextInput, View } from "react-native";
-import { type CoordinatorRequest, type Task, approvePlanRpc, cancelRequestRpc, revisePlanRpc } from "../shared/model";
+import { type CoordinatorRequest, type Task, acknowledgeRpc, cancelRequestRpc, revisePlanRpc } from "../shared/model";
 import { columnColor } from "./agent-state";
 import { formatAgo } from "./time";
 import { Chip, CtaButton, type ViewContext } from "./ui";
 
-function Row({ label, children, ctx }: { label: string; children: ReactNode; ctx: ViewContext }) {
+export function Row({ label, children, ctx }: { label: string; children: ReactNode; ctx: ViewContext }) {
   return (
     <View style={{ flexDirection: ctx.compact ? "column" : "row", gap: ctx.compact ? 4 : 12 }}>
       <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, width: ctx.compact ? undefined : 84 }}>{label}</Text>
@@ -17,7 +17,7 @@ function Row({ label, children, ctx }: { label: string; children: ReactNode; ctx
   );
 }
 
-function Lines({ items, ctx }: { items: readonly string[]; ctx: ViewContext }) {
+export function Lines({ items, ctx }: { items: readonly string[]; ctx: ViewContext }) {
   return (
     <>
       {items.map((item, index) => (
@@ -65,11 +65,12 @@ function TaskBlock({ task, ctx }: { task: Task; ctx: ViewContext }) {
 }
 
 /**
- * 계획 승인 카드. 코디네이터가 세운 계획을 사람이 승인하거나 수정 지시를 보낸다.
+ * 시작 카드 (확인 필요). 코디네이터가 계획해서 바로 시작한 요청을 사람이 확인하거나 방향을 바꾼다 (RULES.md §2.0).
+ * v2 의 계획 승인 카드였다. 이제 승인을 기다리지 않고, 사람은 나중에 보고 멈추거나 수정 지시를 보낸다.
  * 원래 요청 원문을 함께 보여서, 계획이 요청과 어긋나는지 사람이 바로 비교할 수 있게 한다 (RULES.md H1).
  */
-export function PlanApprovalCard({ request, ctx }: { request: CoordinatorRequest; ctx: ViewContext }) {
-  const approve = useRpc(approvePlanRpc);
+export function StartedCard({ request, ctx }: { request: CoordinatorRequest; ctx: ViewContext }) {
+  const approve = useRpc(acknowledgeRpc);
   const revise = useRpc(revisePlanRpc);
   const cancel = useRpc(cancelRequestRpc);
   const [revising, setRevising] = useState(false);
@@ -82,7 +83,7 @@ export function PlanApprovalCard({ request, ctx }: { request: CoordinatorRequest
     },
   });
   const busy = action.isPending;
-  const accent = columnColor("react", ctx.theme);
+  const accent = columnColor("review", ctx.theme);
   return (
     <View
       style={{
@@ -110,7 +111,7 @@ export function PlanApprovalCard({ request, ctx }: { request: CoordinatorRequest
         </Text>
         <View style={{ flex: 1 }} />
         <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
-          {ctx.t("time.waiting", { ago: formatAgo(request.plannedAt ?? request.createdAt, ctx.now, ctx.t) })}
+          {formatAgo(request.plannedAt ?? request.createdAt, ctx.now, ctx.t)}
         </Text>
       </View>
 

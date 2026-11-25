@@ -1,10 +1,11 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { COORDINATOR_TOOL_PREFIX, CoordinatorRuntime, isCoordinatorSession } from "./server/coordinator";
 import { COORDINATOR_PROMPT } from "./server/prompt";
-import { approvePlan, cancelRequest, createRequest, recordInstruction, revisePlan } from "./server/requests";
+import { acknowledge, answerQuestions, cancelRequest, createRequest, recordInstruction, revisePlan } from "./server/requests";
 import { StateStore } from "./server/store";
 import {
-  approvePlanRpc,
+  acknowledgeRpc,
+  answerQuestionsRpc,
   cancelRequestRpc,
   createRequestRpc,
   recordInstructionRpc,
@@ -27,9 +28,14 @@ export default function contribute(server: PluginServerContext) {
     return result;
   });
   server.handle(cancelRequestRpc, (input) => cancelRequest(input, store));
-  server.handle(approvePlanRpc, (input) => approvePlan(input, store));
   server.handle(revisePlanRpc, async (input, { paseo }) => {
     const result = await revisePlan(input, store);
+    coordinator.notify(paseo).catch(logFailure("notify"));
+    return result;
+  });
+  server.handle(acknowledgeRpc, (input) => acknowledge(input, store));
+  server.handle(answerQuestionsRpc, async (input, { paseo }) => {
+    const result = await answerQuestions(input, store);
     coordinator.notify(paseo).catch(logFailure("notify"));
     return result;
   });

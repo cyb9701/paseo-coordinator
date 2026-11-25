@@ -5,7 +5,7 @@ import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { Text, View } from "react-native";
 import { useMemo } from "react";
 import { isVisibleAgent } from "./agent-state";
-import { CoordinatorStateProvider, useCoordinatorState } from "./coordinator-state";
+import { CoordinatorStateProvider, requestNeedsReaction, useCoordinatorState } from "./coordinator-state";
 import { useT } from "./i18n";
 import { cardCount, classifierFor, usePendingDirectory } from "./pending-store";
 
@@ -35,7 +35,7 @@ function SidebarItemBody({ theme, host, currentScreen, openScreen }: PluginSideb
   });
   const count =
     cardCount(blocked.map((ref) => ref.id), directory) +
-    (state?.requests ?? []).filter((request) => request.status === "awaiting_approval").length;
+    (state?.requests ?? []).filter(requestNeedsReaction).length;
   return (
     <SidebarRow
       icon="LayoutDashboard"

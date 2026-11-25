@@ -6,8 +6,10 @@ import { type ReactNode, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { AgentCard } from "./agent-card";
 import { columnColor, isVisibleAgent } from "./agent-state";
-import { useCoordinatorState, useSentLog } from "./coordinator-state";
-import { PlanApprovalCard } from "./plan-card";
+import { AnswerCard } from "./answer-card";
+import { requestNeedsReaction, requestNeedsReview, useCoordinatorState, useSentLog } from "./coordinator-state";
+import { StartedCard } from "./plan-card";
+import { QuestionCard } from "./question-card";
 import { cardCount, useClassifier, usePending } from "./pending-store";
 import {
   type PermissionAction,
@@ -532,12 +534,18 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
   const needsReview = (agent: PluginAgentSnapshot) => isVisibleAgent(agent) && classify.column(agent) === "review";
   const reacting = useAgents({ hosts: [ctx.hostId], where: needsReaction, orderBy: oldestFirst });
   const reviewing = useAgents({ hosts: [ctx.hostId], where: needsReview, orderBy: ["lastActivityAt", "desc"] });
-  // 계획 승인은 요청 전체를 막고 있어서 에이전트 카드보다 위에, 오래 기다린 순서로 둔다.
+  // 질문 카드는 요청 전체를 막고 있어서 에이전트 카드보다 위에, 오래 기다린 순서로 둔다.
   const { state } = useCoordinatorState();
-  const plans = (state?.requests ?? [])
-    .filter((request) => request.status === "awaiting_approval")
-    .sort((a, b) => (a.plannedAt ?? a.createdAt).localeCompare(b.plannedAt ?? b.createdAt));
-  const reactCount = plans.length + cardCount(reacting.map((ref) => ref.id), directory);
+  const requests = state?.requests ?? [];
+  const questions = requests
+    .filter(requestNeedsReaction)
+    .sort((a, b) => (a.question?.at ?? a.createdAt).localeCompare(b.question?.at ?? b.createdAt));
+  // 확인 필요는 최근 순서. 답변 카드와 시작 카드가 에이전트 카드보다 위다.
+  const reviews = requests
+    .filter(requestNeedsReview)
+    .sort((a, b) => (b.answer?.at ?? b.plannedAt ?? b.createdAt).localeCompare(a.answer?.at ?? a.plannedAt ?? a.createdAt));
+  const reactCount = questions.length + cardCount(reacting.map((ref) => ref.id), directory);
+  const reviewCount = reviews.length + reviewing.length;
   return (
     <View style={{ gap: 20, maxWidth: 880 }}>
       <View style={{ gap: 10 }}>
@@ -551,8 +559,8 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
         {reactCount === 0 ? (
           <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.body }}>{ctx.t("inbox.nothingBlocked")}</Text>
         ) : null}
-        {plans.map((request) => (
-          <PlanApprovalCard key={request.id} request={request} ctx={ctx} />
+        {questions.map((request) => (
+          <QuestionCard key={request.id} request={request} ctx={ctx} />
         ))}
         {reacting.map((ref) => (
           <AgentDecisions key={ref.key} agentRef={ref} ctx={ctx} />
@@ -561,16 +569,24 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
       <View style={{ gap: 10 }}>
         <SectionHeader
           title={ctx.t("inbox.review")}
-          count={reviewing.length}
+          count={reviewCount}
           hint={ctx.t("inbox.reviewHint")}
           color={columnColor("review", ctx.theme)}
           ctx={ctx}
         />
-        {reviewing.length === 0 ? (
+        {reviewCount === 0 ? (
           <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.body }}>{ctx.t("inbox.nothingToReview")}</Text>
-        ) : (
-          reviewing.map((ref) => <AgentCard key={ref.key} agentRef={ref} ctx={ctx} />)
+        ) : null}
+        {reviews.map((request) =>
+          request.status === "answered" ? (
+            <AnswerCard key={request.id} request={request} ctx={ctx} />
+          ) : (
+            <StartedCard key={request.id} request={request} ctx={ctx} />
+          ),
         )}
+        {reviewing.map((ref) => (
+          <AgentCard key={ref.key} agentRef={ref} ctx={ctx} />
+        ))}
       </View>
     </View>
   );
