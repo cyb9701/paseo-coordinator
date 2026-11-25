@@ -44,6 +44,10 @@ export const taskSchema = z.object({
   status: z.enum(TASK_STATUSES),
   workspaceId: z.string().nullable(),
   agentId: z.string().nullable(),
+  /** 워커가 일하는 브랜치. 배정할 때 플러그인이 정한다 (coord/<요청>-<번호>-…). */
+  branch: z.string().nullable().default(null),
+  /** 막힌 이유나 배정 실패 이유. 사람이 카드에서 읽는다. */
+  note: z.string().nullable().default(null),
 });
 
 export const requestSchema = z.object({

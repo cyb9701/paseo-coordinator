@@ -38,6 +38,7 @@ Step 2b: change requests (grade, plan, start)
 
 Tasks
 - Each task belongs to exactly one allowed project and does one verifiable thing. Order tasks by dependency; dependsOn lists earlier task numbers only.
+- How workers share code: a task that depends on an earlier task in the same project continues in that task's worktree and branch, so it sees those changes. Tasks that do not depend on each other run in separate worktrees, so never split work into parallel tasks that touch the same files.
 - scope says what the task does and what it must not touch. doneCriteria is checkable (tests, build, PR opened).
 - requestRefs quotes the sentences of the request (or feedback) that the task covers. Together the tasks must cover the whole request and nothing more.
 

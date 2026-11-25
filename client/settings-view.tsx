@@ -195,6 +195,75 @@ function FontSizeBlock({ theme, t }: { theme: PluginTheme; t: T }) {
   );
 }
 
+/** 모델과 effort 고르기. 코디네이터와 워커가 같이 쓴다. 모델을 바꾸면 그 모델이 지원하는 effort 로 맞춘다. */
+function ModelBlock({
+  title,
+  hint,
+  value,
+  models,
+  loading,
+  failedProviders,
+  onChange,
+  theme,
+  t,
+}: {
+  title: string;
+  hint: string;
+  value: { model: string; effort: string };
+  models: readonly ModelOption[];
+  loading: boolean;
+  failedProviders: readonly string[];
+  onChange(next: { model: string; effort: string }): void;
+  theme: PluginTheme;
+  t: T;
+}) {
+  const fonts = useFonts();
+  const current = models.find((model) => model.value === value.model);
+  return (
+    <Block title={title} hint={hint} theme={theme}>
+      {loading ? <Note text={t("settings.loadingModels")} color={theme.colors.foregroundMuted} /> : null}
+      {failedProviders.map((provider) => (
+        <Note key={provider} text={t("settings.modelsFailed", { provider })} color={theme.colors.statusDanger} />
+      ))}
+      <Wrap>
+        {models.map((model) => (
+          <ChoiceBox
+            key={model.value}
+            label={model.label}
+            detail={model.provider}
+            selected={value.model === model.value}
+            onPress={() =>
+              onChange({
+                model: model.value,
+                effort: model.efforts.includes(value.effort)
+                  ? value.effort
+                  : (model.efforts.find((effort) => effort === "high") ?? model.efforts[0] ?? value.effort),
+              })
+            }
+            theme={theme}
+          />
+        ))}
+      </Wrap>
+      {current && current.efforts.length > 0 ? (
+        <View style={{ gap: 6 }}>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: fonts.meta }}>{t("settings.effort")}</Text>
+          <Wrap>
+            {current.efforts.map((effort) => (
+              <ChoiceBox
+                key={effort}
+                label={effort}
+                selected={value.effort === effort}
+                onPress={() => onChange({ ...value, effort })}
+                theme={theme}
+              />
+            ))}
+          </Wrap>
+        </View>
+      ) : null}
+    </Block>
+  );
+}
+
 function toggle(list: readonly string[], value: string): string[] {
   return list.includes(value) ? list.filter((item) => item !== value) : [...list, value];
 }
@@ -245,7 +314,6 @@ export function SettingsView({ theme, hostId, t }: { theme: PluginTheme; hostId:
     setDraft((current) => (current ? patch(current) : current));
   };
   const models = catalog.data?.models ?? [];
-  const coordinatorModel = models.find((model) => model.value === draft.coordinator.model);
   const reviewerModels = models.filter(
     (model) =>
       catalog.data?.readOnlyProviders.has(model.provider) &&
@@ -262,50 +330,29 @@ export function SettingsView({ theme, hostId, t }: { theme: PluginTheme; hostId:
     <View style={{ gap: 16, maxWidth: 880 }}>
       <Text style={{ color: theme.colors.foreground, fontSize: fonts.title, fontWeight: "600" }}>{t("settings.title")}</Text>
 
-      <Block title={t("settings.coordinator")} hint={t("settings.coordinatorHint")} theme={theme}>
-        {catalog.isPending ? <Note text={t("settings.loadingModels")} color={theme.colors.foregroundMuted} /> : null}
-        {(catalog.data?.failedProviders ?? []).map((provider) => (
-          <Note key={provider} text={t("settings.modelsFailed", { provider })} color={theme.colors.statusDanger} />
-        ))}
-        <Wrap>
-          {models.map((model) => (
-            <ChoiceBox
-              key={model.value}
-              label={model.label}
-              detail={model.provider}
-              selected={draft.coordinator.model === model.value}
-              onPress={() =>
-                update((current) => ({
-                  ...current,
-                  coordinator: {
-                    model: model.value,
-                    effort: model.efforts.includes(current.coordinator.effort)
-                      ? current.coordinator.effort
-                      : (model.efforts.find((effort) => effort === "high") ?? model.efforts[0] ?? current.coordinator.effort),
-                  },
-                }))
-              }
-              theme={theme}
-            />
-          ))}
-        </Wrap>
-        {coordinatorModel && coordinatorModel.efforts.length > 0 ? (
-          <View style={{ gap: 6 }}>
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: fonts.meta }}>{t("settings.effort")}</Text>
-            <Wrap>
-              {coordinatorModel.efforts.map((effort) => (
-                <ChoiceBox
-                  key={effort}
-                  label={effort}
-                  selected={draft.coordinator.effort === effort}
-                  onPress={() => update((current) => ({ ...current, coordinator: { ...current.coordinator, effort } }))}
-                  theme={theme}
-                />
-              ))}
-            </Wrap>
-          </View>
-        ) : null}
-      </Block>
+      <ModelBlock
+        title={t("settings.coordinator")}
+        hint={t("settings.coordinatorHint")}
+        value={draft.coordinator}
+        models={models}
+        loading={catalog.isPending}
+        failedProviders={catalog.data?.failedProviders ?? []}
+        onChange={(coordinator) => update((current) => ({ ...current, coordinator }))}
+        theme={theme}
+        t={t}
+      />
+
+      <ModelBlock
+        title={t("settings.worker")}
+        hint={t("settings.workerHint")}
+        value={draft.worker}
+        models={models}
+        loading={catalog.isPending}
+        failedProviders={[]}
+        onChange={(worker) => update((current) => ({ ...current, worker }))}
+        theme={theme}
+        t={t}
+      />
 
       <Block title={t("settings.reviewers")} hint={t("settings.reviewersHint")} theme={theme}>
         {catalog.data && catalog.data.readOnlyProviders.size === 0 ? (

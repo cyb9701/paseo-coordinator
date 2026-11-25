@@ -1,5 +1,6 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { COORDINATOR_TOOL_PREFIX, CoordinatorRuntime, isCoordinatorSession } from "./server/coordinator";
+import { Dispatcher } from "./server/dispatcher";
 import { COORDINATOR_PROMPT } from "./server/prompt";
 import { acknowledge, answerQuestions, cancelRequest, createRequest, recordInstruction, revisePlan } from "./server/requests";
 import { StateStore } from "./server/store";
@@ -18,8 +19,11 @@ export default function contribute(server: PluginServerContext) {
   // 등록해야 클라이언트 useSettings 가 쓰는 읽기·쓰기 RPC 가 생긴다.
   const settings = server.registerSettings(coordinatorSettings);
   const store = new StateStore();
-  const coordinator = new CoordinatorRuntime(store, settings);
   const logFailure = (what: string) => (error: unknown) => console.error(`[coordinator] ${what} failed`, error);
+  const dispatcher = new Dispatcher(store, settings);
+  const coordinator = new CoordinatorRuntime(store, settings, (paseo) => {
+    dispatcher.run(paseo).catch(logFailure("dispatch"));
+  });
 
   server.handle(createRequestRpc, async (input, { paseo }) => {
     const result = await createRequest(input, store, settings);
@@ -47,6 +51,7 @@ export default function contribute(server: PluginServerContext) {
     // 화면이 열릴 때마다 계획이 필요한 요청이 남아 있는지 보고 코디네이터에게 알린다.
     // 플러그인 재시작이나 실패로 알림을 놓쳐도 사람이 화면을 열면 다시 이어진다.
     coordinator.notify(paseo).catch(logFailure("notify on subscribe"));
+    dispatcher.run(paseo).catch(logFailure("dispatch on subscribe"));
     // 구독이 막 끊긴 순간에 보내면 실패할 수 있다. 다음 구독이 처음에 전체 상태를 받으므로 버려도 된다.
     const send = (state: Parameters<typeof push>[0]) => {
       push(state).catch(() => undefined);
@@ -66,10 +71,13 @@ export default function contribute(server: PluginServerContext) {
     };
   });
 
-  // 코디네이터가 일을 마치면, 그동안 쌓인 요청이 있는지 보고 알린다.
-  server.addHook("agent.turn.after", async ({ agent }, { paseo }) => {
-    if (agent.id !== (await coordinator.agentId())) return;
-    await coordinator.notify(paseo).catch(logFailure("notify after turn"));
+  // 코디네이터가 일을 마치면 그동안 쌓인 요청을 알린다. 워커가 일을 마치면 작업 상태를 바꾸고 다음 작업을 배정한다.
+  server.addHook("agent.turn.after", async ({ agent, outcome }, { paseo }) => {
+    if (agent.id === (await coordinator.agentId())) {
+      await coordinator.notify(paseo).catch(logFailure("notify after turn"));
+      return;
+    }
+    await dispatcher.onWorkerTurn(paseo, agent.id, outcome).catch(logFailure("worker turn"));
   });
 
   // 코디네이터가 자기 전용 도구를 부를 때 권한 확인이 뜨면 기계적으로 허용한다. 이 도구는 요청을 읽고

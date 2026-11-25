@@ -95,6 +95,11 @@ export async function revisePlan({ id, text }: { id: string; text: string }, sto
     if (request.status === "done" || request.status === "canceled") {
       throw new Error(`Request ${id} is ${request.status}; it does not take instructions now.`);
     }
+    // 이미 워커가 일하는 요청을 다시 계획하면 같은 작업이 또 배정된다. 워커에게 바뀐 내용을 전하는 길(4단계)이
+    // 생기기 전까지는 막고, 워커를 직접 열어 지시하게 한다.
+    if (request.status === "running" && request.tasks.some((task) => task.agentId)) {
+      throw new Error("Workers have already started on this request. Open a worker and instruct it directly for now.");
+    }
     const entry = { text, at: new Date().toISOString(), kind: "instruction" as const };
     return {
       state: {

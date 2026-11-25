@@ -193,6 +193,8 @@ const en = {
     coordinator: "Coordinator model",
     coordinatorHint: "Splits requests, grades them, and writes decision cards. Applies from the next coordinator session.",
     effort: "Effort",
+    worker: "Worker model",
+    workerHint: "Coding agents the coordinator starts for each task. Applies to workers started after you save.",
     reviewers: "Reviewer models",
     reviewersHint:
       "Fresh agents that must all pass a decision before the coordinator acts on it. Only providers with a read-only mode can review. Seats rotate through the selected models.",
@@ -409,6 +411,8 @@ const ko = {
     coordinator: "코디네이터 모델",
     coordinatorHint: "요청 분해, 등급 분류, 결정 카드 작성을 맡아요. 다음 코디네이터 세션부터 적용돼요.",
     effort: "Effort",
+    worker: "워커 모델",
+    workerHint: "코디네이터가 작업마다 띄우는 코딩 에이전트예요. 저장한 뒤 새로 띄우는 워커부터 적용돼요.",
     reviewers: "검토자 모델",
     reviewersHint:
       "코디네이터가 대신 결정하기 전에 모두 통과를 줘야 하는 새 에이전트예요. 읽기 전용 모드가 있는 provider만 검토할 수 있어요. 자리는 고른 모델에 번갈아 배정돼요.",

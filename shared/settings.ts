@@ -22,6 +22,8 @@ const reviewersSchema = z.object({
 
 export const settingsSchema = z.object({
   coordinator: coordinatorSchema.default({ model: DEFAULT_COORDINATOR_MODEL, effort: "high" }),
+  /** 코디네이터가 배정하는 워커. 형식은 코디네이터와 같다. */
+  worker: coordinatorSchema.default({ model: DEFAULT_COORDINATOR_MODEL, effort: "high" }),
   reviewers: reviewersSchema.default({ models: DEFAULT_REVIEWER_MODELS, effort: "high" }),
   /** 코디네이터가 워커를 만들 수 있는 프로젝트. 비어 있으면 어디에도 만들지 않는다. */
   allowedProjectIds: z.array(z.string()).default([]),

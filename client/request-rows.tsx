@@ -96,6 +96,11 @@ function TaskCard({ task, column, ctx }: { task: Task; column: ColumnKey; ctx: V
           {task.projectId}
         </Text>
       )}
+      {task.note ? (
+        <Text numberOfLines={3} style={{ color: ctx.theme.colors.statusDanger, fontSize: ctx.fonts.meta }}>
+          {task.note}
+        </Text>
+      ) : null}
       {task.agentId && ctx.navigation ? (
         <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
           <CtaButton

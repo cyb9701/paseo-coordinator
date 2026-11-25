@@ -96,6 +96,8 @@ export class CoordinatorRuntime {
   constructor(
     private readonly store: StateStore,
     private readonly settings: Settings,
+    /** 계획이 저장되어 시작된 직후 부른다. 배정기가 워커를 만든다. */
+    private readonly onPlanStarted: (paseo: PaseoApi) => void = () => {},
   ) {}
 
   async agentId(): Promise<string | null> {
@@ -507,6 +509,8 @@ export class CoordinatorRuntime {
                       status: "waiting" as const,
                       workspaceId: null,
                       agentId: null,
+                      branch: null,
+                      note: null,
                     })),
                   }
                 : item,
@@ -514,9 +518,10 @@ export class CoordinatorRuntime {
           },
           result: undefined,
         }));
+        this.onPlanStarted(paseo);
         return {
           text:
-            `Plan stored for ${request.id} and started. The human sees it as a start card and can stop or redirect it.`,
+            `Plan stored for ${request.id} and started. The plugin creates the workers. The human sees it as a start card and can stop or redirect it.`,
         };
       },
     });
