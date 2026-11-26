@@ -194,6 +194,8 @@ export class Dispatcher {
     const found = await this.findWorker(agentId);
     if (!found || found.request.status !== "running") return;
     const { request, task } = found;
+    // 취소한 작업의 워커는 멈추기 직전의 턴이 늦게 끝날 수 있다. 처리하면 취소한 작업이 막힘이나 완료로 되살아난다.
+    if (task.status === "canceled") return;
     // 턴 사이에 쌓인 메시지(코디네이터 지시, 사람의 결정)가 있으면 먼저 보낸다. 워커가 이어서 일하므로 상태는 그대로다.
     // 쌓인 메시지가 있는데 보내지 못했으면(워커가 다시 바쁨) 아직 끝난 것이 아니다.
     if (task.outbox.length > 0) {
@@ -484,12 +486,29 @@ export class Dispatcher {
     return { use: false, note: say(request.language, `Started without /poteto-mode: ${reason}.`, `/poteto-mode 없이 시작했어요: ${reason}.`) };
   }
 
+  /**
+   * 사람이 작업을 취소한 뒤. 취소된 작업의 워커를 멈추고, 남은 작업이 모두 끝났으면 요청을 마무리한다
+   * (읽기 요청은 답변을 모으고, 변경 요청은 끝낸다).
+   */
+  async afterCancel(paseo: PaseoApi, requestId: string, agentIds: readonly string[]): Promise<void> {
+    for (const agentId of agentIds) await paseo.agents.ref(agentId).archive().catch(() => undefined);
+    const request = (await this.store.read()).requests.find((item) => item.id === requestId);
+    if (!request || request.status !== "running") return;
+    if (request.kind === "read") await this.compileAnswer(paseo, requestId);
+    else if (await finishRequestIfDone(this.store, requestId)) this.onRequestDone(paseo, requestId);
+  }
+
   /** 읽기 조사가 모두 끝났으면 워커들의 마지막 보고를 모아 답변으로 만든다. */
   private async compileAnswer(paseo: PaseoApi, requestId: string): Promise<void> {
     const request = (await this.store.read()).requests.find((item) => item.id === requestId);
-    if (!request || request.status !== "running" || !request.tasks.every((task) => task.status === "done")) return;
+    if (!request || request.status !== "running" || !request.tasks.every((task) => task.status === "done" || task.status === "canceled")) return;
     const sections: string[] = [];
     for (const task of request.tasks) {
+      // 취소한 조사는 답에 없다는 것을 밝힌다. 빠뜨리면 그 프로젝트도 조사한 것처럼 읽힌다.
+      if (task.status === "canceled") {
+        sections.push(`## ${task.number} ${task.name}\n\n(canceled by the human; not investigated)`);
+        continue;
+      }
       if (!task.agentId) continue;
       const page = await paseo.agents.ref(task.agentId).timeline.refetch({ direction: "tail", limit: 30 }).catch(() => null);
       const entries = (page as { entries?: readonly { item?: { type?: string; text?: string } }[] } | null)?.entries ?? [];
@@ -507,7 +526,7 @@ export class Dispatcher {
                 status: "answered" as const,
                 answer: {
                   text: sections.join("\n\n"),
-                  sources: request.tasks.map((task) => `${task.number} ${task.name}`),
+                  sources: request.tasks.filter((task) => task.status !== "canceled").map((task) => `${task.number} ${task.name}`),
                   unknowns: [],
                   projectIds: [...new Set(request.tasks.map((task) => task.projectId))],
                   at,

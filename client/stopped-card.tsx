@@ -2,7 +2,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Text, TextInput, View } from "react-native";
-import { type CoordinatorRequest, type Task, retryTaskRpc } from "../shared/model";
+import { type CoordinatorRequest, type Task, cancelTaskRpc, dependentsOf, retryTaskRpc } from "../shared/model";
 import { columnColor } from "./agent-state";
 import { DecisionHistory } from "./decision-history";
 import { Row } from "./plan-card";
@@ -12,15 +12,28 @@ import { Chip, CtaButton, type ViewContext } from "./ui";
 /**
  * 멈춘 작업 카드 (반응 필요). 워커 질문 카드 없이 막힌 작업이다: 워커를 만들지 못했거나, 턴이 에러로 끝났거나,
  * 완료 보고 없이 두 번 끝났다. 사람이 원인을 보고 다시 시작하거나(지시를 붙일 수 있다) 워커를 열어 직접 본다.
+ * 진행하지 않을 작업은 취소한다. 기대는 작업도 함께 취소되므로, 누르면 바로 취소하지 않고 함께 취소될 작업을 보여 준 뒤 확정받는다.
  * 읽는 순서: 내 요청 → 이 작업 → 멈춘 이유 → 결정할 것 → 버튼.
  */
 export function StoppedCard({ request, task, ctx }: { request: CoordinatorRequest; task: Task; ctx: ViewContext }) {
   const retry = useRpc(retryTaskRpc);
+  const cancelTask = useRpc(cancelTaskRpc);
   const [text, setText] = useState("");
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
   const action = useMutation({
-    mutationFn: () => retry({ requestId: request.id, taskNumber: task.number, instruction: text.trim() || null }),
-    onSuccess: () => setText(""),
+    mutationFn: (kind: "retry" | "cancel") =>
+      kind === "retry"
+        ? retry({ requestId: request.id, taskNumber: task.number, instruction: text.trim() || null })
+        : cancelTask({ requestId: request.id, taskNumber: task.number }),
+    onSuccess: () => {
+      setText("");
+      setConfirmingCancel(false);
+    },
   });
+  const dependents = dependentsOf(request, task.number)
+    .map((number) => request.tasks.find((item) => item.number === number))
+    .filter((item): item is Task => Boolean(item))
+    .map((item) => `${item.number} ${item.name}`);
   const accent = columnColor("react", ctx.theme);
   const body = { color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body } as const;
   return (
@@ -86,8 +99,43 @@ export function StoppedCard({ request, task, ctx }: { request: CoordinatorReques
           />
         ) : null}
       </View>
+      {confirmingCancel ? (
+        <View style={{ gap: 6 }}>
+          <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600" }}>{ctx.t("stoppedCard.cancelConfirm")}</Text>
+          {dependents.length > 0 ? (
+            <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>
+              {ctx.t("stoppedCard.cancelDependents", { tasks: dependents.join(", ") })}
+            </Text>
+          ) : null}
+          {task.agentId ? (
+            <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{ctx.t("stoppedCard.cancelWorker")}</Text>
+          ) : null}
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+            <CtaButton
+              label={ctx.t("stoppedCard.cancelYes")}
+              tone="primary"
+              disabled={action.isPending}
+              theme={ctx.theme}
+              onPress={() => action.mutate("cancel")}
+            />
+            <CtaButton label={ctx.t("stoppedCard.cancelBack")} disabled={action.isPending} theme={ctx.theme} onPress={() => setConfirmingCancel(false)} />
+          </View>
+        </View>
+      ) : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-        <CtaButton label={ctx.t("stoppedCard.retry")} tone="primary" disabled={action.isPending} theme={ctx.theme} onPress={() => action.mutate()} />
+        <CtaButton
+          label={ctx.t("stoppedCard.retry")}
+          tone="primary"
+          disabled={action.isPending || confirmingCancel}
+          theme={ctx.theme}
+          onPress={() => action.mutate("retry")}
+        />
+        <CtaButton
+          label={ctx.t("stoppedCard.cancel")}
+          disabled={action.isPending || confirmingCancel}
+          theme={ctx.theme}
+          onPress={() => setConfirmingCancel(true)}
+        />
         {task.agentId && ctx.navigation ? (
           <CtaButton
             label={ctx.t("blockerCard.openWorker")}

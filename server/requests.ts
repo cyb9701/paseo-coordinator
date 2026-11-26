@@ -1,7 +1,7 @@
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { RpcInput } from "@getpaseo/plugin";
 import type { cancelRequestRpc, createRequestRpc, recordInstructionRpc } from "../shared/model";
-import { hasStarted, openCard, withCardQa } from "../shared/model";
+import { dependentsOf, hasStarted, openCard, withCardQa } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
 import type { StateStore } from "./store";
 import { queued } from "./worker-channel";
@@ -303,6 +303,49 @@ export async function retryTask(
         ),
       },
       result: { hasWorker: Boolean(task.agentId) },
+    };
+  });
+}
+
+/**
+ * 멈춘 작업(워커 질문 카드가 없는 것)을 진행하지 않고 취소한다. 이 작업에 기대는 작업도 함께 취소한다. 기대는 작업은
+ * 앞 작업의 결과 위에서 일하도록 계획됐으므로, 혼자 돌면 계획과 다른 일을 한다.
+ * 모든 작업이 취소되면 요청도 취소한다. 워커를 멈추는 일은 호출한 쪽이 돌려받은 agentIds 로 한다.
+ */
+export async function cancelTask(
+  input: { requestId: string; taskNumber: number },
+  store: StateStore,
+): Promise<{ agentIds: string[]; requestCanceled: boolean }> {
+  return store.update((state) => {
+    const request = state.requests.find((item) => item.id === input.requestId);
+    const task = request?.tasks.find((item) => item.number === input.taskNumber);
+    if (!request || request.status !== "running" || !task || task.status !== "blocked" || task.blocker) {
+      throw new Error(say(request?.language, "This task cannot be canceled now.", "이 작업은 지금 취소할 수 없어요."));
+    }
+    const dependents = dependentsOf(request, task.number);
+    const canceled = new Set([task.number, ...dependents]);
+    const at = new Date().toISOString();
+    const tasks = request.tasks.map((item) => {
+      if (!canceled.has(item.number)) return item;
+      const summary = item.number === task.number ? "Canceled by the human" : `Canceled with task ${task.number}, which it depends on`;
+      return {
+        ...item,
+        status: "canceled" as const,
+        note: null,
+        outbox: [],
+        decisions: [...item.decisions, { summary, by: "human" as const, at, qa: [] }],
+      };
+    });
+    const requestCanceled = tasks.every((item) => item.status === "canceled");
+    const agentIds = request.tasks.filter((item) => canceled.has(item.number) && item.agentId).map((item) => item.agentId!);
+    return {
+      state: {
+        ...state,
+        requests: state.requests.map((item) =>
+          item.id !== request.id ? item : { ...item, tasks, status: requestCanceled ? ("canceled" as const) : item.status },
+        ),
+      },
+      result: { agentIds, requestCanceled },
     };
   });
 }

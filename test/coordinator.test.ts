@@ -16,7 +16,7 @@ import { resolveBaseRef } from "../server/branches";
 import { CompletionRunner } from "../server/completion";
 import { validatePlan } from "../server/coordinator";
 import { Dispatcher } from "../server/dispatcher";
-import { answerQuestions, askCoordinator, resolveBlocker, retryTask } from "../server/requests";
+import { answerQuestions, askCoordinator, cancelTask, resolveBlocker, retryTask } from "../server/requests";
 import { ReviewRunner } from "../server/review";
 import { StateStore } from "../server/store";
 import { WorkerChannel } from "../server/worker-channel";
@@ -556,5 +556,105 @@ describe("기준 브랜치", () => {
     assert.equal(created, false);
     assert.equal(task.status, "blocked");
     assert.match(task.note ?? "", /기준 브랜치 gone/);
+  });
+});
+
+/** 작업 여러 개짜리 요청. 각 작업은 번호, 상태, 의존, 워커를 받는다. */
+function multiTaskState(kind: "read" | "change", tasks: { number: number; status: string; dependsOn?: number[]; agentId?: string | null }[]) {
+  return stateSchema.parse({
+    requests: [
+      {
+        id: "r1",
+        text: "정리",
+        doneCriteria: null,
+        projectIds: [],
+        language: "ko",
+        createdAt: now(),
+        status: "running",
+        kind,
+        grade: kind === "read" ? null : "C",
+        title: "정리",
+        tasks: tasks.map((task) => ({
+          name: `작업${task.number}`,
+          projectId: "p",
+          dependsOn: [],
+          workspaceId: null,
+          agentId: null,
+          ...task,
+        })),
+      },
+    ],
+    sent: [],
+  });
+}
+
+describe("작업 취소", () => {
+  test("멈춘 작업과 그 작업에 기대는 작업만 취소하고, 워커를 돌려준다", async () => {
+    const { store } = await storeWith(
+      multiTaskState("change", [
+        { number: 1, status: "done" },
+        { number: 2, status: "blocked", agentId: "w2" },
+        { number: 3, status: "waiting", dependsOn: [2] },
+        { number: 4, status: "waiting", dependsOn: [3] },
+        { number: 5, status: "waiting", dependsOn: [1] },
+      ]),
+    );
+    const result = await cancelTask({ requestId: "r1", taskNumber: 2 }, store);
+    const request = (await store.read()).requests[0]!;
+    assert.deepEqual(request.tasks.map((task) => task.status), ["done", "canceled", "canceled", "canceled", "waiting"]);
+    assert.deepEqual(result, { agentIds: ["w2"], requestCanceled: false });
+    assert.equal(request.status, "running");
+    assert.match(request.tasks[3]!.decisions.at(-1)!.summary, /Canceled with task 2/);
+  });
+
+  test("멈춘 작업이 아니면 취소하지 않는다", async () => {
+    const { store } = await storeWith(multiTaskState("change", [{ number: 1, status: "running", agentId: "w1" }]));
+    await assert.rejects(cancelTask({ requestId: "r1", taskNumber: 1 }, store), /취소할 수 없어요/);
+  });
+
+  test("모든 작업이 취소되면 요청도 취소된다", async () => {
+    const { store } = await storeWith(multiTaskState("change", [{ number: 1, status: "blocked" }, { number: 2, status: "waiting", dependsOn: [1] }]));
+    assert.equal((await cancelTask({ requestId: "r1", taskNumber: 1 }, store)).requestCanceled, true);
+    assert.equal((await store.read()).requests[0]!.status, "canceled");
+  });
+
+  test("변경 요청은 남은 작업이 끝나 있으면 취소 뒤에 끝난다", async () => {
+    const { store, channel } = await storeWith(multiTaskState("change", [{ number: 1, status: "done" }, { number: 2, status: "blocked" }]));
+    const done: string[] = [];
+    const settings: Fake = { read: async () => ({ status: "ready", values: {} }) };
+    const { agentIds } = await cancelTask({ requestId: "r1", taskNumber: 2 }, store);
+    await new Dispatcher(store, settings, channel, (_paseo, id) => done.push(id)).afterCancel(fakePaseo([]), "r1", agentIds);
+    assert.equal((await store.read()).requests[0]!.status, "done");
+    assert.deepEqual(done, ["r1"]);
+  });
+
+  test("읽기 요청은 취소한 조사를 빼고 답을 모으며, 빠진 조사를 답에 밝힌다", async () => {
+    const { store, channel } = await storeWith(
+      multiTaskState("read", [{ number: 1, status: "done", agentId: "w1" }, { number: 2, status: "blocked" }]),
+    );
+    const settings: Fake = { read: async () => ({ status: "ready", values: {} }) };
+    const paseo: Fake = {
+      agents: {
+        ref: () => ({
+          archive: async () => ({}),
+          timeline: { refetch: async () => ({ entries: [{ item: { type: "assistant_message", text: "조사 결과" } }] }) },
+        }),
+      },
+    };
+    await cancelTask({ requestId: "r1", taskNumber: 2 }, store);
+    await new Dispatcher(store, settings, channel, () => {}).afterCancel(paseo, "r1", []);
+    const request = (await store.read()).requests[0]!;
+    assert.equal(request.status, "answered");
+    assert.match(request.answer!.text, /조사 결과/);
+    assert.match(request.answer!.text, /## 2 작업2\n\n\(canceled by the human/);
+    assert.deepEqual(request.answer!.sources, ["1 작업1"]);
+  });
+
+  test("취소한 작업의 워커 턴이 늦게 끝나도 작업을 되살리지 않는다", async () => {
+    const { store, channel } = await storeWith(multiTaskState("change", [{ number: 1, status: "blocked", agentId: "w1" }, { number: 2, status: "waiting" }]));
+    await cancelTask({ requestId: "r1", taskNumber: 1 }, store);
+    const settings: Fake = { read: async () => ({ status: "ready", values: {} }) };
+    await new Dispatcher(store, settings, channel, () => {}).onWorkerTurn(fakePaseo([]), "w1", { kind: "failed", error: { message: "x" } }, false);
+    assert.equal((await firstTask(store)).status, "canceled");
   });
 });

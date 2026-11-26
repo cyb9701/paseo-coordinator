@@ -28,7 +28,8 @@ export const questionSchema = z.object({
  * (읽기만 하는 요청에 변경 요청의 등급 기준을 쓰자 '문서 파악' 요청이 A 등급이 됐다. 2026-11-25 사용자 피드백.)
  */
 export const REQUEST_KINDS = ["read", "change"] as const;
-export const TASK_STATUSES = ["waiting", "running", "blocked", "review", "done"] as const;
+/** canceled: 사람이 멈춘 작업을 진행하지 않기로 했다. 그 작업에 기대는 작업도 함께 canceled 가 된다. */
+export const TASK_STATUSES = ["waiting", "running", "blocked", "review", "done", "canceled"] as const;
 
 const qaSchema = z.object({
   question: z.string(),
@@ -468,6 +469,31 @@ export const retryTaskRpc = defineRpc({
   input: z.object({ requestId: z.string(), taskNumber: z.number().int().positive(), instruction: z.string().trim().nullable() }),
   output: z.object({}),
 });
+
+/**
+ * 멈춘 작업을 진행하지 않고 취소한다. 다시 시작만 있으면, 진행하지 않을 작업 때문에 요청 전체가 끝나지 못한다
+ * (r13 의 git 저장소가 아닌 프로젝트 조사, 2026-11-26). 이 작업에 기대는 작업도 함께 취소한다.
+ */
+export const cancelTaskRpc = defineRpc({
+  name: "tasks.cancel",
+  input: z.object({ requestId: z.string(), taskNumber: z.number().int().positive() }),
+  output: z.object({}),
+});
+
+/** 이 작업을 취소하면 함께 취소되는 작업 번호. 의존을 따라가며 아직 끝나지 않은 작업만 모은다. */
+export function dependentsOf(request: Pick<CoordinatorRequest, "tasks">, taskNumber: number): number[] {
+  const found = new Set<number>();
+  const visit = (number: number) => {
+    for (const task of request.tasks) {
+      if (task.dependsOn.includes(number) && !found.has(task.number) && task.status !== "done" && task.status !== "canceled") {
+        found.add(task.number);
+        visit(task.number);
+      }
+    }
+  };
+  visit(taskNumber);
+  return [...found].sort((a, b) => a - b);
+}
 
 /** 새 요청 창과 설정에서 기준 브랜치를 고를 때 보이는 목록. 허용된 프로젝트만 읽는다. */
 export const listBranchesRpc = defineRpc({

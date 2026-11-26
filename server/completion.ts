@@ -120,12 +120,12 @@ function patchTask(
   );
 }
 
-/** 모든 작업이 끝났으면 요청을 끝낸다. 끝냈으면 true. */
+/** 모든 작업이 끝났거나 사람이 취소했으면 요청을 끝낸다. 끝냈으면 true. 모두 취소된 요청은 cancelTask 가 취소로 둔다. */
 export async function finishRequestIfDone(store: StateStore, requestId: string): Promise<boolean> {
   return store.update((state) => {
     const request = state.requests.find((item) => item.id === requestId);
     if (!request || request.status !== "running" || request.kind !== "change") return { state, result: false };
-    if (!request.tasks.every((task) => task.status === "done")) return { state, result: false };
+    if (!request.tasks.every((task) => task.status === "done" || task.status === "canceled")) return { state, result: false };
     return {
       state: { ...state, requests: state.requests.map((item) => (item.id === requestId ? { ...item, status: "done" as const } : item)) },
       result: true,

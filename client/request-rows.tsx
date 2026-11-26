@@ -30,6 +30,7 @@ const TASK_COLUMNS: Record<Task["status"], ColumnKey | null> = {
   running: "running",
   waiting: "waiting",
   done: null,
+  canceled: null,
 };
 
 /** 요청 하나를 (컬럼 → 카드) 로 나눈다. 헤더의 컬럼별 숫자도 이 결과로 센다. */
@@ -158,6 +159,8 @@ function RequestCell({ request, ctx }: { request: CoordinatorRequest; ctx: ViewC
   const cancel = useRpc(cancelRequestRpc);
   const cancelMutation = useMutation({ mutationFn: () => cancel({ id: request.id }) });
   const done = request.tasks.filter((task) => task.status === "done").length;
+  // 취소한 작업은 할 일에서 빠진다. 세면 끝난 요청이 끝나지 않은 것처럼 보인다.
+  const total = request.tasks.filter((task) => task.status !== "canceled").length;
   return (
     <View style={{ gap: 4 }}>
       <GradeBadge
@@ -177,7 +180,7 @@ function RequestCell({ request, ctx }: { request: CoordinatorRequest; ctx: ViewC
       </Text>
       <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
         {request.tasks.length > 0
-          ? `${ctx.t(`requestRow.${request.status}`)} · ${ctx.t("requestRow.progress", { done, total: request.tasks.length })}`
+          ? `${ctx.t(`requestRow.${request.status}`)} · ${ctx.t("requestRow.progress", { done, total })}`
           : ctx.t(`requestRow.${request.status}`)}
       </Text>
       <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{formatAgo(request.createdAt, ctx.now, ctx.t)}</Text>

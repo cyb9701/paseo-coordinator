@@ -35,7 +35,7 @@ Grade A changes always wait for you. Automatic answers for a rule stop after you
 | Worker questions that need a person | Answers to read-only requests |
 | Answers that failed independent review | Decisions made automatically after review |
 | Pull requests to merge | |
-| Stopped tasks, permission requests and errors | |
+| Stopped tasks (restart or cancel), permission requests and errors | |
 
 <p>
   <img src="assets/inbox-needs-reaction.png" alt="Needs reaction: a coordinator question card with options and a recommendation for each question, followed by a worker question card" width="49%">

@@ -14,6 +14,7 @@ import {
   resolveBlocker,
   retryTask,
   revisePlan,
+  cancelTask,
 } from "./server/requests";
 import { ReviewRunner, isReviewerSession } from "./server/review";
 import { WorkerChannel } from "./server/worker-channel";
@@ -22,6 +23,7 @@ import { StateStore } from "./server/store";
 import {
   closeCompletionRpc,
   retryTaskRpc,
+  cancelTaskRpc,
   enableRuleRpc,
   reviewAutoDecisionRpc,
   acknowledgeRpc,
@@ -142,6 +144,12 @@ export default function contribute(server: PluginServerContext) {
     const { hasWorker } = await retryTask(input, store);
     if (hasWorker) await channel.flush(paseo, input.requestId, input.taskNumber).catch(logFailure("send retry to worker"));
     else dispatcher.run(paseo).catch(logFailure("dispatch retry"));
+    return {};
+  });
+  server.handle(cancelTaskRpc, async (input, { paseo }) => {
+    const { agentIds, requestCanceled } = await cancelTask(input, store);
+    if (requestCanceled) coordinator.retire(paseo, input.requestId).catch(logFailure("retire coordinator"));
+    await dispatcher.afterCancel(paseo, input.requestId, agentIds).catch(logFailure("finish after cancel"));
     return {};
   });
   server.handle(closeCompletionRpc, async (input, { paseo }) => {
