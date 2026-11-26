@@ -259,26 +259,39 @@ export function GradeBadge({ grade, label, theme }: { grade: Grade | null; label
 
 /** 카드의 한 구역. 왼쪽에 이름, 오른쪽에 내용. 좁은 화면에서는 이름이 위로 간다. */
 export function Row({ label, children, ctx }: { label: string; children: ReactNode; ctx: ViewContext }) {
+  // 이름은 본문보다 작은 글자라 위쪽에 붙어 보였다. 본문 첫 줄과 같은 줄 높이를 주어 같은 높이에서 읽히게 한다.
   return (
     <View style={{ flexDirection: ctx.compact ? "column" : "row", gap: ctx.compact ? 4 : 12 }}>
-      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, width: ctx.compact ? undefined : 84 }}>{label}</Text>
-      <View style={{ flex: 1, gap: 4 }}>{children}</View>
+      <Text
+        style={{
+          color: ctx.theme.colors.foregroundMuted,
+          fontSize: ctx.fonts.meta,
+          lineHeight: ctx.compact ? undefined : Math.round(ctx.fonts.body * 1.35),
+          width: ctx.compact ? undefined : 84,
+        }}
+      >
+        {label}
+      </Text>
+      <View style={{ flex: 1, gap: 6 }}>{children}</View>
     </View>
   );
 }
 
 export function Lines({ items, ctx, muted = false }: { items: readonly string[]; ctx: ViewContext; muted?: boolean }) {
-  const style = muted
-    ? { color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }
-    : { color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body };
+  const size = muted ? ctx.fonts.meta : ctx.fonts.body;
+  const style = { color: muted ? ctx.theme.colors.foregroundMuted : ctx.theme.colors.foreground, fontSize: size, lineHeight: Math.round(size * 1.4) };
+  // 항목이 여러 줄로 넘어갈 때 글머리 아래로 들여 써야 항목끼리 구분된다.
   return (
-    <>
+    <View style={{ gap: 4 }}>
       {items.map((item, index) => (
-        <Text key={index} selectable style={style}>
-          {`• ${item}`}
-        </Text>
+        <View key={index} style={{ flexDirection: "row", gap: 6 }}>
+          <Text style={style}>•</Text>
+          <Text selectable style={{ ...style, flex: 1 }}>
+            {item}
+          </Text>
+        </View>
       ))}
-    </>
+    </View>
   );
 }
 

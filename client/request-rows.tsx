@@ -141,7 +141,20 @@ function TaskCard({ task, column, ctx }: { task: Task; column: ColumnKey; ctx: V
         </Text>
       ) : null}
       {task.note ? (
-        <Text numberOfLines={3} style={{ color: ctx.theme.colors.statusDanger, fontSize: ctx.fonts.meta }}>
+        // 메모는 막힘 이유일 때만 빨간색이다. 대기 이유(워크스페이스가 바쁨)나 진행 안내(백그라운드 작업 대기)까지 빨갛게 보여
+        // 모든 메모가 오류처럼 읽혔다.
+        <Text
+          numberOfLines={3}
+          style={{
+            color:
+              task.status === "blocked"
+                ? ctx.theme.colors.statusDanger
+                : task.status === "waiting"
+                  ? ctx.theme.colors.statusWarning
+                  : ctx.theme.colors.foregroundMuted,
+            fontSize: ctx.fonts.meta,
+          }}
+        >
           {task.note}
         </Text>
       ) : null}
