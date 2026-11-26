@@ -5,6 +5,7 @@ import { type ReactNode, useState } from "react";
 import { Text, TextInput, View } from "react-native";
 import { createRequestRpc } from "../shared/model";
 import { coordinatorSettings } from "../shared/settings";
+import { BranchPicker } from "./branch-picker";
 import { ChoiceBox, CtaButton, type ViewContext } from "./ui";
 
 function ProjectToggle({
@@ -20,6 +21,34 @@ function ProjectToggle({
 }) {
   const name = useProject(projectRef, (p) => p.displayName);
   return <ChoiceBox label={name ?? projectRef.id} selected={selected} multiple onPress={onToggle} theme={ctx.theme} />;
+}
+
+/** 고른 프로젝트마다 기준 브랜치를 고른다. 비워 두면 코디네이터가 정한다. */
+function BaseBranchField({
+  projectRef,
+  value,
+  onChange,
+  ctx,
+}: {
+  projectRef: ProjectRef;
+  value: string | null;
+  onChange(branch: string | null): void;
+  ctx: ViewContext;
+}) {
+  const name = useProject(projectRef, (p) => p.displayName);
+  return (
+    <Field label={ctx.t("request.baseBranch", { project: name ?? projectRef.id })} hint={ctx.t("request.baseBranchHint")} ctx={ctx}>
+      <BranchPicker
+        hostId={ctx.hostId}
+        projectId={projectRef.id}
+        value={value}
+        onChange={onChange}
+        autoLabel={() => ctx.t("request.baseBranchAuto")}
+        theme={ctx.theme}
+        t={ctx.t}
+      />
+    </Field>
+  );
 }
 
 function Field({ label, hint, children, ctx }: { label: string; hint?: string; children: ReactNode; ctx: ViewContext }) {
@@ -42,9 +71,17 @@ export function NewRequestPanel({ ctx, locale, onClose }: { ctx: ViewContext; lo
   const [text, setText] = useState("");
   const [doneCriteria, setDoneCriteria] = useState("");
   const [projectIds, setProjectIds] = useState<string[]>([]);
+  const [baseBranches, setBaseBranches] = useState<Record<string, string>>({});
   const submit = useMutation({
     mutationFn: () =>
-      create({ text, doneCriteria: doneCriteria.trim() || null, projectIds, locale }),
+      create({
+        text,
+        doneCriteria: doneCriteria.trim() || null,
+        projectIds,
+        // 고른 뒤 해제한 프로젝트의 브랜치는 보내지 않는다. server 는 요청에 없는 프로젝트의 브랜치를 거절한다.
+        baseBranches: Object.fromEntries(Object.entries(baseBranches).filter(([id]) => projectIds.includes(id))),
+        locale,
+      }),
     onSuccess: () => onClose(true),
   });
   const allowed = settings.status === "ready" ? settings.values.allowedProjectIds : [];
@@ -108,6 +145,22 @@ export function NewRequestPanel({ ctx, locale, onClose }: { ctx: ViewContext; lo
           </View>
         )}
       </Field>
+      {allowedRefs
+        .filter((ref) => projectIds.includes(ref.id))
+        .map((ref) => (
+          <BaseBranchField
+            key={ref.key}
+            projectRef={ref}
+            value={baseBranches[ref.id] ?? null}
+            onChange={(branch) =>
+              setBaseBranches((current) => {
+                const { [ref.id]: _removed, ...rest } = current;
+                return branch ? { ...rest, [ref.id]: branch } : rest;
+              })
+            }
+            ctx={ctx}
+          />
+        ))}
       <Field label={ctx.t("request.doneCriteria")} ctx={ctx}>
         <TextInput
           value={doneCriteria}

@@ -7,10 +7,12 @@
  */
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
+import { resolveBaseRef } from "../server/branches";
 import { CompletionRunner } from "../server/completion";
 import { validatePlan } from "../server/coordinator";
 import { Dispatcher } from "../server/dispatcher";
@@ -410,8 +412,9 @@ describe("배정", () => {
   for (const cancelMidway of [false, true]) {
     test(cancelMidway ? "워커를 만드는 사이 요청이 취소되면 그 워커를 정리하고 기록하지 않는다" : "대기 작업에 워커를 한 번만 배정한다", async () => {
       const calls: string[] = [];
+      let createdOptions: unknown;
       const { store, channel } = await storeWith(baseState({ status: "waiting", agentId: null, workspaceId: null }));
-      const values = { allowedProjectIds: ["p"], worker: { model: "claude/opus", effort: "high" }, poteto: false };
+      const values = { allowedProjectIds: ["p"], baseBranches: {}, worker: { model: "claude/opus", effort: "high" }, poteto: false };
       const startSettings: Fake = { read: async () => ({ status: "ready", values }) };
       const paseo: Fake = {
         projects: { list: async () => ({ projects: [{ projectId: "p", projectRootPath: "/repo" }] }) },
@@ -421,7 +424,8 @@ describe("배정", () => {
             id: "wsN",
             archive: async () => (calls.push("archive-ws wsN"), {}),
             agents: {
-              create: async () => {
+              create: async (input: Fake) => {
+                createdOptions = input.config.options;
                 if (cancelMidway) {
                   await store.update((state) => ({
                     state: { ...state, requests: state.requests.map((request) => ({ ...request, status: "canceled" as const })) },
@@ -450,9 +454,107 @@ describe("배정", () => {
       } else {
         assert.equal(task.agentId, "agentN");
         assert.equal(task.workspaceId, "wsN");
+        // 보고 도구를 미리 허용해야 권한 요청과 그 알림이 생기지 않는다.
+        assert.deepEqual(createdOptions, { allowedTools: ["mcp__paseo__report_blocker", "mcp__paseo__report_done"] });
         await dispatcher.run(paseo);
         assert.equal(calls.filter((call) => call.startsWith("send agentN")).length, 1);
       }
     });
   }
+});
+
+/**
+ * origin 이 있는 임시 저장소. 브랜치 상태: main(원격 기본), feature(원격과 같음), behind(로컬이 원격보다 뒤), ahead(로컬에만
+ * 커밋이 더 있음), local-only(원격에 없음).
+ */
+async function gitFixture(): Promise<string> {
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", ...args], { cwd, stdio: "pipe" });
+  const origin = await mkdtemp(join(tmpdir(), "coordinator-origin-"));
+  git(origin, "init", "--bare", "-b", "main");
+  const work = await mkdtemp(join(tmpdir(), "coordinator-work-"));
+  git(work, "clone", origin, ".");
+  const commit = (message: string) => git(work, "commit", "--allow-empty", "-m", message);
+  commit("init");
+  git(work, "push", "origin", "main");
+  git(work, "remote", "set-head", "origin", "main");
+  for (const branch of ["feature", "behind", "ahead"]) {
+    git(work, "checkout", "-b", branch, "main");
+    commit(branch);
+    commit(`${branch} 2`);
+    git(work, "push", "origin", branch);
+  }
+  git(work, "branch", "-f", "behind", "behind~1");
+  git(work, "checkout", "ahead");
+  commit("ahead unpushed");
+  git(work, "checkout", "-b", "local-only", "main");
+  commit("local only");
+  git(work, "checkout", "main");
+  return work;
+}
+
+describe("기준 브랜치", () => {
+  test("로컬이 원격에 들어 있으면 원격 최신을, 로컬에만 커밋이 있으면 로컬을, 원격에 없으면 로컬 전용으로 쓴다", async () => {
+    const root = await gitFixture();
+    assert.deepEqual(await resolveBaseRef(root, "feature"), { branch: "feature", refName: "origin/feature", remote: true });
+    assert.deepEqual(await resolveBaseRef(root, "behind"), { branch: "behind", refName: "origin/behind", remote: true });
+    assert.deepEqual(await resolveBaseRef(root, "ahead"), { branch: "ahead", refName: "refs/heads/ahead", remote: true });
+    assert.deepEqual(await resolveBaseRef(root, "local-only"), { branch: "local-only", refName: "refs/heads/local-only", remote: false });
+    assert.equal(await resolveBaseRef(root, "missing"), null);
+    assert.equal(await resolveBaseRef(root, "--upload-pack=x"), null);
+  });
+
+  // 우선순위: 작업에 적힌 브랜치(사람 또는 코디네이터) > 설정 > 원격 기본 브랜치.
+  for (const [label, taskBase, settingsBase, expected] of [
+    ["작업에 적힌 브랜치를 설정보다 먼저 쓴다", "local-only", "feature", { refName: "refs/heads/local-only", base: "local-only" }],
+    ["작업에 없으면 설정의 브랜치를 쓴다", null, "feature", { refName: "origin/feature", base: "feature" }],
+    ["둘 다 없으면 원격 기본 브랜치의 최신을 쓴다", null, null, { refName: "origin/main", base: "main" }],
+  ] as const) {
+    test(label, async () => {
+      const root = await gitFixture();
+      const { store, channel } = await storeWith(baseState({ status: "waiting", agentId: null, workspaceId: null, baseBranch: taskBase }));
+      const values = {
+        allowedProjectIds: ["p"],
+        baseBranches: settingsBase ? { p: settingsBase } : {},
+        worker: { model: "claude/opus", effort: "high" },
+        poteto: false,
+      };
+      let source: Fake = null;
+      let kickoff = "";
+      const paseo: Fake = {
+        projects: { list: async () => ({ projects: [{ projectId: "p", projectRootPath: root }] }) },
+        providers: { listModes: async () => ({ modes: [{ id: "auto" }] }) },
+        workspaces: {
+          create: async (input: Fake) => {
+            source = input.source;
+            return { id: "wsN", archive: async () => ({}), agents: { create: async () => ({ id: "agentN" }) } };
+          },
+        },
+        agents: {
+          ref: () => ({ send: async (text: string) => void (kickoff = text), archive: async () => ({}), refresh: async () => ({ agent: { status: "running" } }) }),
+        },
+      };
+      await new Dispatcher(store, { read: async () => ({ status: "ready", values }) } as Fake, channel, () => {}).run(paseo);
+      assert.equal(source.refName, expected.refName);
+      assert.equal((await firstTask(store)).baseBranch, expected.base);
+      if (expected.base === "local-only") assert.match(kickoff, /Do not push or open a pull request: the base branch local-only exists only on this machine/);
+      else assert.match(kickoff, new RegExp(`gh pr create --base ${expected.base}`));
+    });
+  }
+
+  test("정한 기준 브랜치가 저장소에 없으면 워커를 만들지 않고 막힘으로 둔다", async () => {
+    const root = await gitFixture();
+    const { store, channel } = await storeWith(baseState({ status: "waiting", agentId: null, workspaceId: null, baseBranch: "gone" }));
+    const values = { allowedProjectIds: ["p"], baseBranches: {}, worker: { model: "claude/opus", effort: "high" }, poteto: false };
+    let created = false;
+    const paseo: Fake = {
+      projects: { list: async () => ({ projects: [{ projectId: "p", projectRootPath: root }] }) },
+      workspaces: { create: async () => ((created = true), {}) },
+    };
+    await new Dispatcher(store, { read: async () => ({ status: "ready", values }) } as Fake, channel, () => {}).run(paseo);
+    const task = await firstTask(store);
+    assert.equal(created, false);
+    assert.equal(task.status, "blocked");
+    assert.match(task.note ?? "", /기준 브랜치 gone/);
+  });
 });

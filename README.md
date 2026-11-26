@@ -80,7 +80,7 @@ Go to **Settings** (top right):
 
 <img src="assets/settings.png" alt="Settings: coordinator model and effort, worker model and effort, the /poteto-mode switch, and reviewer models" width="60%">
 
-Then press **+ New request**, describe what you want, and optionally pick projects and a done criterion. Leave projects empty to let the coordinator choose among the allowed ones.
+Then press **+ New request**, describe what you want, and optionally pick projects and a done criterion. Leave projects empty to let the coordinator choose among the allowed ones. For each project you pick you can also choose the base branch: workers branch off it and open pull requests against it. Pick the feature branch when the request builds on work that is not merged yet; otherwise the coordinator decides, then the per-project base in settings, then the remote default branch.
 
 <img src="assets/new-request.png" alt="New request panel: a text box for the request, project choices limited to the allowed projects, and an optional done criterion" width="60%">
 

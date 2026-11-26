@@ -4,14 +4,17 @@ import type { PaseoApi } from "./paseo-api";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { CoordinatorRequest, CoordinatorState, Task } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
-import { continuedBy, finishRequestIfDone } from "./completion";
+import { REPORT_DONE_TOOL, continuedBy, finishRequestIfDone } from "./completion";
 import { workspaceTitle } from "./coordinator";
 import type { StateStore } from "./store";
 import { type WorkerChannel, queued } from "./worker-channel";
+import { type BaseRef, remoteDefaultBranch, resolveBaseRef } from "./branches";
+import { preapprovedOptions } from "./preapprove";
 import { say } from "./say";
+import { REPORT_BLOCKER_TOOL } from "./worker-tools";
 
 type Settings = PluginSettings<typeof settingsSchema>;
-type TaskPatch = Partial<Pick<Task, "status" | "workspaceId" | "agentId" | "branch" | "note" | "poteto" | "doneNudgedAt">>;
+type TaskPatch = Partial<Pick<Task, "status" | "workspaceId" | "agentId" | "branch" | "baseBranch" | "note" | "poteto" | "doneNudgedAt">>;
 
 /** 이 라벨로 워커를 알아본다. 코디네이터 라벨과 같은 키를 쓴다. */
 const ROLE_LABEL = "paseo-coordinator.role";
@@ -67,7 +70,14 @@ function potetoOverride(grade: CoordinatorRequest["grade"], branch: string): str
  * 워커 첫 프롬프트. 플러그인이 보내므로 Paseo 가 감싸지 않는다 (RULES.md §13). A·B·C 등급 Claude 워커는 /poteto-mode 로 시작한다.
  * 금지 사항은 RULES.md H2 와 같다. 명령 단위 차단은 Claude auto 모드와 사용자 권한 규칙(ask: gh pr merge 등)이 맡는다.
  */
-function kickoff(request: CoordinatorRequest, task: Task, branch: string, continuesFrom: Task | null, poteto: boolean): string {
+function kickoff(
+  request: CoordinatorRequest,
+  task: Task,
+  branch: string,
+  continuesFrom: Task | null,
+  poteto: boolean,
+  base: BaseRef | null,
+): string {
   const readOnly = request.kind === "read";
   const others = request.tasks
     .filter((other) => other.number !== task.number)
@@ -91,7 +101,9 @@ function kickoff(request: CoordinatorRequest, task: Task, branch: string, contin
     ...(others.length ? ["", "Other tasks in this request (context only, do not do them):", ...others] : []),
     "",
     "Rules:",
-    `- Work only inside this worktree, on branch ${branch}. Do not read or change other worktrees.`,
+    // r12(2026-11-26): 워커가 필요한 코드가 다른 worktree 의 브랜치에 있자 그 브랜치를 checkout 했다. 기준이 틀렸으면 보고하게 한다.
+    `- Work only inside this worktree, on branch ${branch}. Do not read or change other worktrees, and do not check out other branches or commits. If the code you need is not in this worktree, report it with report_blocker.`,
+    ...(base && !continuesFrom ? [`- This worktree was cut from ${base.branch}.`] : []),
     ...(continuesFrom
       ? [
           `- Task ${continuesFrom.number} (${continuesFrom.name}) ran before you in this same worktree. Its changes, committed or not, are already here; build on them.`,
@@ -101,7 +113,9 @@ function kickoff(request: CoordinatorRequest, task: Task, branch: string, contin
       ? "- This is a read-only investigation. Do not change, create or delete any file. Investigate and report."
       : successor
         ? `- You may edit files here, run local builds, tests and linters, and commit. Do not push or open a pull request: task ${successor.number} (${successor.name}) continues in this worktree and opens it.`
-        : "- You may edit files here, run local builds, tests and linters, commit, push this branch, and open a pull request from it against the default branch.",
+        : base && !base.remote
+          ? `- You may edit files here, run local builds, tests and linters, and commit on ${branch}. Do not push or open a pull request: the base branch ${base.branch} exists only on this machine, so there is nothing on GitHub to open it against. When done, call report_done with noPullRequestReason saying the base branch ${base.branch} is local only.`
+          : `- You may edit files here, run local builds, tests and linters, commit, push this branch, and open a pull request from it against ${base ? `${base.branch} (gh pr create --base ${base.branch})` : "the default branch"}.`,
     "- Never merge pull requests, push to any other branch, force push, write to any database (any environment), deploy, send messages to people, or read or write secret files (.env, keys, credentials).",
     "- If you need a decision the request and scope do not settle, a change to your scope or approach, or you are stuck, call the report_blocker tool with the facts, the options and your recommendation, then end your turn and wait. Do not ask in plain text: only report_blocker reaches the human as a decision card.",
     readOnly
@@ -350,13 +364,17 @@ export class Dispatcher {
       );
     }
     const branch = continuesFrom?.branch ?? branchFor(request, task);
+    const base = await this.baseFor(request, continuesFrom ?? task, values, project.projectRootPath);
     // 두 번 배정되지 않게 워커를 만들기 전에 먼저 실행 중으로 표시한다. 저장하는 순간에 요청과 작업이 그대로인지 확인한다
     // (취소되거나 다시 계획됐으면 시작하지 않는다). 이후 기록은 이 브랜치로 표시한 작업에만 한다.
     const claimed = await this.store.update((state) => {
       const current = state.requests.find((item) => item.id === request.id);
       const target = current?.tasks.find((item) => item.number === task.number);
       if (current?.status !== "running" || target?.status !== "waiting") return { state, result: false };
-      return { state: patch(state, request.id, task.number, { status: "running", branch, note: null }), result: true };
+      return {
+        state: patch(state, request.id, task.number, { status: "running", branch, baseBranch: base?.branch ?? null, note: null }),
+        result: true,
+      };
     });
     if (!claimed) return;
     const title = workspaceTitle(request.title ?? request.id, task);
@@ -370,6 +388,8 @@ export class Dispatcher {
             projectId: project.projectId,
             action: "branch-off",
             branchName: branch,
+            // 비우면 데몬이 저장소 기본 브랜치의 로컬 ref 에서 딴다. 그 ref 가 낡았을 수 있어 항상 정해서 넘긴다.
+            ...(base ? { refName: base.refName } : {}),
             worktreeSlug: branch.replace(/\//g, "-"),
           },
         });
@@ -392,7 +412,12 @@ export class Dispatcher {
       request.kind === "read" ? (has("plan") ? "plan" : undefined) : has("auto") ? "auto" : has("acceptEdits") ? "acceptEdits" : undefined;
     // 킥오프를 보내기 전에 세션이 /poteto-mode 를 실제로 불러왔는지 본다. 그래서 프롬프트 없이 먼저 만든다.
     const agent = await workspace.agents.create({
-      config: { provider: values.worker.model, modeId, thinkingOptionId: values.worker.effort },
+      config: {
+        provider: values.worker.model,
+        modeId,
+        thinkingOptionId: values.worker.effort,
+        options: preapprovedOptions(values.worker.model, [REPORT_BLOCKER_TOOL, REPORT_DONE_TOOL]),
+      },
       title: `${task.number} ${task.name}`,
       labels: {
         [ROLE_LABEL]: "worker",
@@ -401,7 +426,7 @@ export class Dispatcher {
       },
     });
     const poteto = values.poteto ? await this.potetoFor(paseo, request, provider, agent.id) : { use: false, note: null };
-    await paseo.agents.ref(agent.id).send(kickoff(request, task, branch, continuesFrom, poteto.use));
+    await paseo.agents.ref(agent.id).send(kickoff(request, task, branch, continuesFrom, poteto.use, base));
     // 킥오프를 보낸 뒤에 기록한다. 먼저 기록하면 보정 검사(reconcile)가 프롬프트 전의 쉬는 워커를 끝난 것으로 본다.
     // 그사이 요청이 취소됐거나 다시 계획됐으면 이 워커는 맡을 작업이 없다. 정리한다.
     if (!(await this.patchClaimed(request.id, task.number, branch, { agentId: agent.id, poteto: poteto.use, note: poteto.note }))) {
@@ -409,6 +434,33 @@ export class Dispatcher {
       return;
     }
     console.log(`[coordinator] started ${request.id} task ${task.number} as ${agent.id} on ${branch}${poteto.use ? " with /poteto-mode" : ""}`);
+  }
+
+  /**
+   * 작업의 worktree 를 딸 기준 브랜치. 우선순위는 server/branches.ts 머리말과 같다. 작업의 baseBranch 에는 사람이 고른 것이나
+   * 코디네이터가 적은 것이 이미 들어 있다. 정한 브랜치가 저장소에 없으면 막힘으로 두어 사람이 고치게 한다. 다른 브랜치로
+   * 몰래 바꾸면 워커가 엉뚱한 코드 위에서 일한다.
+   */
+  private async baseFor(
+    request: CoordinatorRequest,
+    task: Task,
+    values: Awaited<ReturnType<typeof readSettings>>,
+    root: string,
+  ): Promise<BaseRef | null> {
+    const chosen = task.baseBranch ?? request.baseBranches[task.projectId] ?? values.baseBranches[task.projectId] ?? null;
+    const name = chosen ?? (await remoteDefaultBranch(root));
+    if (!name) return null;
+    const base = await resolveBaseRef(root, name);
+    if (!base) {
+      throw new Error(
+        say(
+          request.language,
+          `Base branch ${name} does not exist in project ${task.projectId}. Restore that branch and retry, or cancel the request.`,
+          `기준 브랜치 ${name} 가 프로젝트 ${task.projectId} 에 없어요. 그 브랜치를 되살린 뒤 다시 시작하거나 요청을 취소해 주세요.`,
+        ),
+      );
+    }
+    return base;
   }
 
   /**

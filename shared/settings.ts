@@ -32,6 +32,8 @@ export const settingsSchema = z.object({
   reviewers: reviewersSchema.default({ models: DEFAULT_REVIEWER_MODELS, effort: "high" }),
   /** 코디네이터가 워커를 만들 수 있는 프로젝트. 비어 있으면 어디에도 만들지 않는다. */
   allowedProjectIds: z.array(z.string()).default([]),
+  /** projectId → 워커 worktree 의 기본 기준 브랜치. 없으면 원격 기본 브랜치(origin/HEAD)를 쓴다 (server/branches.ts). */
+  baseBranches: z.record(z.string(), z.string().min(1)).default({}),
   /**
    * 코디네이터가 쓰는 워크스페이스 이름과 결정 카드의 언어.
    * auto 는 요청을 보낸 사람의 앱 언어를 따른다. server 는 앱 언어를 모르므로 요청을 만들 때 클라이언트가 함께 보낸다.

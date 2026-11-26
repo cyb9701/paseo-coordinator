@@ -1,6 +1,7 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { CompletionRunner, reportDoneTool } from "./server/completion";
 import { COORDINATOR_TOOL_PREFIX, CoordinatorRuntime, isCoordinatorSession } from "./server/coordinator";
+import { listBranches, resolveBaseRef } from "./server/branches";
 import { Dispatcher } from "./server/dispatcher";
 import { COORDINATOR_PROMPT } from "./server/prompt";
 import {
@@ -29,6 +30,7 @@ import {
   resolveBlockerRpc,
   cancelRequestRpc,
   createRequestRpc,
+  listBranchesRpc,
   recordInstructionRpc,
   revisePlanRpc,
   watchStateSubscription,
@@ -68,8 +70,20 @@ export default function contribute(server: PluginServerContext) {
     reviews.finalize(paseo, requestId, taskNumber, "complete").catch(logFailure("finalize review"));
   });
 
+  // 사람이 쓰는 화면에서만 부른다. 설정 화면에서 아직 저장하지 않은 프로젝트의 기준 브랜치도 고를 수 있게, 허용 목록이 아니라
+  // 이 host 에 등록된 프로젝트면 읽는다. 브랜치 이름과 worktree 경로만 돌려준다.
+  const projectRoot = async (paseo: Parameters<typeof coordinator.notify>[0], projectId: string) =>
+    (await paseo.projects.list()).projects.find((project) => project.projectId === projectId)?.projectRootPath ?? null;
+  server.handle(listBranchesRpc, async ({ projectId }, { paseo }) => {
+    const root = await projectRoot(paseo, projectId);
+    if (!root) throw new Error(`Project ${projectId} is not registered on this host.`);
+    return listBranches(root);
+  });
   server.handle(createRequestRpc, async (input, { paseo }) => {
-    const result = await createRequest(input, store, settings);
+    const result = await createRequest(input, store, settings, async (projectId, branch) => {
+      const root = await projectRoot(paseo, projectId);
+      return Boolean(root && (await resolveBaseRef(root, branch)));
+    });
     // 코디네이터 생성과 알림은 오래 걸릴 수 있어서 요청 저장과 떼어 놓는다. 실패하면 다음 턴 종료 때 다시 시도한다.
     coordinator.notify(paseo).catch(logFailure("notify"));
     return result;

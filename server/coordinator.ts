@@ -11,6 +11,8 @@ import type { settingsSchema } from "../shared/settings";
 import { type StateStore, dataDirectory } from "./store";
 import type { ReviewRunner } from "./review";
 import { type WorkerChannel, queued } from "./worker-channel";
+import { preapprovedOptions } from "./preapprove";
+import { listBranches, listTreeAt, readBlobAt, resolveBaseRef, treePath } from "./branches";
 
 type Settings = PluginSettings<typeof settingsSchema>;
 
@@ -250,7 +252,12 @@ export class CoordinatorRuntime {
     const create = async () => {
       const workspaceId = await this.ensureWorkspace(paseo, request.language);
       return paseo.workspaces.ref(workspaceId).agents.create({
-        config: { provider: values.coordinator.model, modeId, thinkingOptionId: values.coordinator.effort },
+        config: {
+          provider: values.coordinator.model,
+          modeId,
+          thinkingOptionId: values.coordinator.effort,
+          options: preapprovedOptions(values.coordinator.model, this.tools().map((tool) => tool.name)),
+        },
         title: `${request.id} · ${label}`,
         labels: { [COORDINATOR_LABEL]: "coordinator", "paseo-coordinator.request": request.id },
       });
@@ -419,6 +426,7 @@ export class CoordinatorRuntime {
       this.projectOverviewTool(),
       this.listFilesTool(),
       this.readFileTool(),
+      this.listBranchesTool(),
       this.askHumanTool(),
       this.submitAnswerTool(),
       this.submitPlanTool(),
@@ -643,11 +651,21 @@ export class CoordinatorRuntime {
     return defineAgentTool({
       name: "coordinator_list_files",
       title: "List project files",
-      description: "List files and folders in a directory of an allowed project. path is relative to the project root; use \".\" for the root.",
-      input: z.object({ projectId: z.string(), path: z.string().default(".") }),
-      execute: async ({ projectId, path }, { paseo }) => {
+      description:
+        "List files and folders in a directory of an allowed project. path is relative to the project root; use \".\" for the root. Without branch it reads the project folder as it is on disk; with branch it reads what is committed on that branch.",
+      input: z.object({ projectId: z.string(), path: z.string().default("."), branch: z.string().trim().min(1).optional() }),
+      execute: async ({ projectId, path, branch }, { paseo }) => {
         const project = (await allowedProjects(paseo, this.settings)).find((item) => item.id === projectId);
         if (!project) return { text: `Project ${projectId} is not allowed in coordinator settings.`, isError: true };
+        if (branch) {
+          const base = await resolveBaseRef(project.path, branch);
+          if (!base) return { text: `Branch ${branch} does not exist in ${project.name}.`, isError: true };
+          const inTree = treePath(path);
+          const names = inTree === null ? null : await listTreeAt(project.path, base.refName, inTree).catch(() => null);
+          if (!names) return { text: `${path} is not a directory on ${branch}.`, isError: true };
+          const shown = names.filter((name) => name !== "node_modules/").sort().slice(0, LIST_LIMIT);
+          return { text: shown.join("\n") + (names.length > shown.length ? `\n… ${names.length - shown.length} more` : "") };
+        }
         const target = await resolveInside(project.path, path);
         if (!target) return { text: `${path} is not inside project ${project.name}.`, isError: true };
         const entries = await readdir(target, { withFileTypes: true }).catch(() => null);
@@ -662,15 +680,58 @@ export class CoordinatorRuntime {
     });
   }
 
+  /** 요청 대상 기능이 아직 기본 브랜치에 없는 브랜치에만 있는지 보려고 쓴다. 브랜치 이름과 worktree 경로만 읽는다. */
+  private listBranchesTool() {
+    return defineAgentTool({
+      name: "coordinator_list_branches",
+      title: "List project branches",
+      description:
+        "List an allowed project's recent branches (local and origin), the worktree each is checked out in (including worktrees made outside Paseo), the remote default branch, and the base branch configured in settings.",
+      input: z.object({ projectId: z.string() }),
+      execute: async ({ projectId }, { paseo }) => {
+        const project = (await allowedProjects(paseo, this.settings)).find((item) => item.id === projectId);
+        if (!project) return { text: `Project ${projectId} is not allowed in coordinator settings.`, isError: true };
+        const list = await listBranches(project.path).catch(() => null);
+        if (!list) return { text: `Could not read the branches of ${project.name}.`, isError: true };
+        const configured = (await readSettings(this.settings)).baseBranches[projectId] ?? null;
+        return {
+          text: [
+            `Remote default branch: ${list.defaultBranch ?? "(unknown)"}`,
+            `Base branch in settings: ${configured ?? "(none; the remote default branch is used)"}`,
+            "Branches, most recently committed first:",
+            ...list.branches.map(
+              (branch) =>
+                `- ${branch.name} [${[branch.local ? "local" : null, branch.remote ? "origin" : "local only"].filter(Boolean).join(", ")}] ${branch.updatedAt}${branch.worktree ? ` worktree: ${branch.worktree}` : ""}`,
+            ),
+          ].join("\n"),
+        };
+      },
+    });
+  }
+
   private readFileTool() {
     return defineAgentTool({
       name: "coordinator_read_file",
       title: "Read project file",
-      description: `Read a text file in an allowed project. path is relative to the project root. Returns at most ${READ_LIMIT} characters; secrets such as .env files are refused.`,
-      input: z.object({ projectId: z.string(), path: z.string().min(1) }),
-      execute: async ({ projectId, path }, { paseo }) => {
+      description: `Read a text file in an allowed project. path is relative to the project root. Without branch it reads the file on disk; with branch it reads the version committed on that branch. Returns at most ${READ_LIMIT} characters; secrets such as .env files are refused.`,
+      input: z.object({ projectId: z.string(), path: z.string().min(1), branch: z.string().trim().min(1).optional() }),
+      execute: async ({ projectId, path, branch }, { paseo }) => {
         const project = (await allowedProjects(paseo, this.settings)).find((item) => item.id === projectId);
         if (!project) return { text: `Project ${projectId} is not allowed in coordinator settings.`, isError: true };
+        if (branch) {
+          const base = await resolveBaseRef(project.path, branch);
+          if (!base) return { text: `Branch ${branch} does not exist in ${project.name}.`, isError: true };
+          const inTree = treePath(path);
+          if (!inTree) return { text: `${path} is not a path inside ${project.name}.`, isError: true };
+          if (inTree.split("/").includes(".git") || SECRET_FILE.test(inTree.split("/").at(-1)!)) {
+            return { text: `${path} may hold secrets and is not readable.`, isError: true };
+          }
+          const blob = await readBlobAt(project.path, base.refName, inTree, READ_LIMIT * 16).catch(() => null);
+          if (blob === null) return { text: `${path} is not a file on ${branch}.`, isError: true };
+          if (blob === "too-large") return { text: `${path} on ${branch} is too large to read.`, isError: true };
+          if (blob.includes("\0")) return { text: `${path} looks like a binary file.`, isError: true };
+          return { text: blob.length > READ_LIMIT ? `${blob.slice(0, READ_LIMIT)}\n… truncated` : blob };
+        }
         const target = await resolveInside(project.path, path);
         if (!target) return { text: `${path} is not inside project ${project.name}.`, isError: true };
         if (isSecretPath(await realpath(project.path), target)) return { text: `${path} may hold secrets and is not readable.`, isError: true };
@@ -707,6 +768,8 @@ export class CoordinatorRuntime {
               feedback: request.feedback,
               currentPlan: request.tasks.length > 0 ? { title: request.title, grade: request.grade, tasks: request.tasks } : null,
               projects: usable,
+              // 사람이 고른 기준 브랜치. 있으면 그 프로젝트 작업은 이 브랜치에서 시작하고, 계획에서 바꿀 수 없다.
+              humanBaseBranches: request.baseBranches,
             },
             null,
             2,
@@ -900,6 +963,14 @@ export class CoordinatorRuntime {
       scope: z.string().trim().min(1),
       doneCriteria: z.string().trim().min(1),
       requestRefs: z.array(z.string().trim().min(1)).min(1),
+      baseBranch: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe(
+          "Branch to cut this task's worktree from and open its pull request against. Set it only when the work builds on a branch that is not merged into the default branch yet (see coordinator_list_branches). Omit it to use the project's configured base.",
+        ),
     });
     return defineAgentTool({
       name: "coordinator_submit_plan",
@@ -929,6 +1000,18 @@ export class CoordinatorRuntime {
           (request.projectIds.length > 0 ? projects.filter((p) => request.projectIds.includes(p.id)) : projects).map((p) => p.id),
         );
         const problems = validatePlan(input, request.language, usable);
+        // 사람이 새 요청 창에서 고른 기준 브랜치는 코디네이터가 바꾸지 못한다. 적은 브랜치는 저장소에 있어야 한다.
+        for (const task of input.tasks) {
+          const chosen = request.baseBranches[task.projectId];
+          if (chosen && task.baseBranch && task.baseBranch !== chosen) {
+            problems.push(`Task ${task.number}: the human chose base branch ${chosen} for project ${task.projectId}; omit baseBranch or use ${chosen}.`);
+            continue;
+          }
+          const root = projects.find((project) => project.id === task.projectId)?.path;
+          if (!chosen && task.baseBranch && root && !(await resolveBaseRef(root, task.baseBranch))) {
+            problems.push(`Task ${task.number}: branch ${task.baseBranch} does not exist in project ${task.projectId}.`);
+          }
+        }
         if (!input.readOnly && !input.grade) problems.push("A change request needs a grade.");
         // A 등급의 실제 변경은 사람이 질문 카드에 답한 뒤에만 시작한다 (RULES.md §2.0, H4). 코드로 막는다.
         if (!input.readOnly && input.grade === "A" && request.feedback.at(-1)?.kind !== "answer") {
@@ -968,6 +1051,7 @@ export class CoordinatorRuntime {
                     plannedAt: now,
                     tasks: input.tasks.map((task) => ({
                       ...task,
+                      baseBranch: request.baseBranches[task.projectId] ?? task.baseBranch ?? null,
                       status: "waiting" as const,
                       workspaceId: null,
                       agentId: null,

@@ -19,6 +19,7 @@ Every card reads top to bottom: your request, the task, what was found, the reco
 
 - Settings live on the Coordinator screen. Choose the projects the coordinator may use; with none selected it starts no workers.
 - Pick the model and thinking effort for the coordinator, the workers and the reviewers. Reviewers must run read-only, so only Claude models in plan mode are offered, at high effort or above.
+- Each worker gets a new worktree cut from a base branch, and opens its pull request against that branch. The base is, in order: the branch you pick per project in the new request panel, the branch the coordinator picks when the request builds on unmerged work, the base branch set per project in settings, then the remote default branch (`origin/HEAD`). When the local branch is behind origin, the fresh remote tip is used. A base that exists only on your machine has no pull request: the worker commits on its branch and the card keeps the worktree so you can merge it locally.
 - Pull request lookup and merging use the GitHub CLI. `gh` must be installed and signed in, and the project needs a GitHub remote.
 - If the pstack plugin is loaded in Claude, grade A, B and C workers start with `/poteto-mode`. You can turn this off in settings.
 

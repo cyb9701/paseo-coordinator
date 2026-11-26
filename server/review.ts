@@ -7,7 +7,12 @@ import { AUTO_RULES } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
 import type { StateStore } from "./store";
 import { type WorkerChannel, queued } from "./worker-channel";
+import { preapprovedOptions } from "./preapprove";
 import { say } from "./say";
+
+const RECORD_OWN_ANSWER_TOOL = "reviewer_record_own_answer";
+const SUBMIT_VERDICT_TOOL = "reviewer_submit_verdict";
+const REVIEWER_TOOL_NAMES = [RECORD_OWN_ANSWER_TOOL, SUBMIT_VERDICT_TOOL];
 
 type Settings = PluginSettings<typeof settingsSchema>;
 type Proposal = NonNullable<NonNullable<Task["blocker"]>["proposal"]>;
@@ -191,7 +196,12 @@ export class ReviewRunner {
       const agent = await workspace.agents
         .create({
           // plan 모드라 파일을 바꿀 수 없다. 그래도 오는 쓰기 권한 요청은 플러그인이 거절한다 (index.server.ts).
-          config: { provider: model, modeId: modes.some((mode) => mode.id === "plan") ? "plan" : undefined, thinkingOptionId: effort },
+          config: {
+            provider: model,
+            modeId: modes.some((mode) => mode.id === "plan") ? "plan" : undefined,
+            thinkingOptionId: effort,
+            options: preapprovedOptions(model, REVIEWER_TOOL_NAMES),
+          },
           title: `review ${requestId}-${taskNumber} #${index + 1}`,
           labels: { [ROLE_LABEL]: "reviewer", "paseo-coordinator.request": requestId, "paseo-coordinator.task": String(taskNumber) },
         })
@@ -345,7 +355,7 @@ export class ReviewRunner {
 
   tools(onAllSubmitted: (paseo: PaseoApi, requestId: string, taskNumber: number) => void) {
     const recordOwn = defineAgentTool({
-      name: "reviewer_record_own_answer",
+      name: RECORD_OWN_ANSWER_TOOL,
       title: "Record your own answer",
       description: "Record what you would tell the worker, before seeing the coordinator's proposal.",
       input: z.object({ answer: z.string().trim().min(1) }),
@@ -357,7 +367,7 @@ export class ReviewRunner {
       },
     });
     const submit = defineAgentTool({
-      name: "reviewer_submit_verdict",
+      name: SUBMIT_VERDICT_TOOL,
       title: "Submit verdict",
       description: "Submit your verdict after recording your own answer and checking the evidence.",
       input: z.object({

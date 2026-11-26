@@ -14,6 +14,7 @@ import { enableRuleRpc } from "../shared/model";
 import { useCoordinatorState } from "./coordinator-state";
 import type { T } from "./i18n";
 import { DEFAULT_CONTENT_SIZE, DEFAULT_INTERFACE_SIZE, FONT_SIZE_RANGE, displaySettings, useFonts } from "./fonts";
+import { BranchPicker } from "./branch-picker";
 import { ChoiceBox, CtaButton } from "./ui";
 
 // 검토자는 읽기 전용으로 띄워야 한다 (RULES.md §7). 지금 이 조건을 만족하는 모드는 claude 의 plan 뿐이다.
@@ -306,6 +307,41 @@ function toggle(list: readonly string[], value: string): string[] {
  * 코디네이터 설정. Paseo 설정의 플러그인 화면과 Coordinator 화면의 설정 탭에서 같이 쓴다.
  * 고친 값은 저장을 눌러야 반영된다. 저장은 읽어 온 revision 을 기준으로 해서, 다른 곳에서 먼저 바꿨으면 실패한다.
  */
+function BaseBranchChoice({
+  projectRef,
+  hostId,
+  value,
+  onChange,
+  theme,
+  t,
+}: {
+  projectRef: ProjectRef;
+  hostId: string;
+  value: string | null;
+  onChange(branch: string | null): void;
+  theme: PluginTheme;
+  t: T;
+}) {
+  const fonts = useFonts();
+  const name = useProject(projectRef, (p) => p.displayName);
+  return (
+    <View style={{ gap: 6 }}>
+      <Text style={{ color: theme.colors.foreground, fontSize: fonts.label, fontWeight: "600" }}>{name ?? projectRef.id}</Text>
+      <BranchPicker
+        hostId={hostId}
+        projectId={projectRef.id}
+        value={value}
+        onChange={onChange}
+        autoLabel={(defaultBranch) =>
+          defaultBranch ? t("settings.baseBranchDefault", { name: defaultBranch }) : t("settings.baseBranchDefaultUnknown")
+        }
+        theme={theme}
+        t={t}
+      />
+    </View>
+  );
+}
+
 export function SettingsView({ theme, hostId, t }: { theme: PluginTheme; hostId: string; t: T }) {
   const fonts = useFonts();
   const settings = useSettings(coordinatorSettings);
@@ -484,6 +520,30 @@ export function SettingsView({ theme, hostId, t }: { theme: PluginTheme; hostId:
               theme={theme}
             />
           ))}
+        </View>
+      </Block>
+
+      <Block title={t("settings.baseBranches")} hint={t("settings.baseBranchesHint")} theme={theme}>
+        {draft.allowedProjectIds.length === 0 ? <Note text={t("settings.noAllowedForBase")} color={theme.colors.foregroundMuted} /> : null}
+        <View style={{ gap: 12 }}>
+          {projects
+            .filter((ref) => draft.allowedProjectIds.includes(ref.id))
+            .map((ref) => (
+              <BaseBranchChoice
+                key={ref.key}
+                projectRef={ref}
+                hostId={hostId}
+                value={draft.baseBranches[ref.id] ?? null}
+                onChange={(branch) =>
+                  update((current) => {
+                    const { [ref.id]: _removed, ...rest } = current.baseBranches;
+                    return { ...current, baseBranches: branch ? { ...rest, [ref.id]: branch } : rest };
+                  })
+                }
+                theme={theme}
+                t={t}
+              />
+            ))}
         </View>
       </Block>
 

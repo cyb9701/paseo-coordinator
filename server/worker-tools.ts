@@ -3,6 +3,8 @@ import { defineAgentTool } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import type { StateStore } from "./store";
 
+export const REPORT_BLOCKER_TOOL = "report_blocker";
+
 /** 이 라벨로 워커 세션을 알아본다. 배정기가 워커를 만들 때 붙인다. */
 export function isWorkerSession(labels: Readonly<Record<string, string>>): boolean {
   return labels["paseo-coordinator.role"] === "worker";
@@ -19,7 +21,7 @@ export function reportBlockerTool(
   onReviewReplaced: (paseo: PaseoApi, requestId: string, taskNumber: number, reviewerIds: string[]) => void,
 ) {
   return defineAgentTool({
-    name: "report_blocker",
+    name: REPORT_BLOCKER_TOOL,
     title: "Report a blocker",
     description:
       "Report that you need a decision before you can continue: a question the request and your scope do not settle, a change to your scope or approach, or something that stops you. Give the facts you checked, the options with what each leads to, and your recommendation. Then stop and wait: the reply arrives in this conversation.",

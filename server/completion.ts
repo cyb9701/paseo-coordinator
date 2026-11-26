@@ -1,6 +1,5 @@
 /// <reference types="node" />
 
-import { execFile } from "node:child_process";
 import type { PaseoApi } from "./paseo-api";
 import { defineAgentTool } from "@getpaseo/plugin/server";
 import { z } from "zod";
@@ -8,21 +7,12 @@ import type { CoordinatorRequest, Task } from "../shared/model";
 import { answeredQa } from "./requests";
 import type { StateStore } from "./store";
 import { type WorkerChannel, queued } from "./worker-channel";
+import { run } from "./run";
 import { say } from "./say";
 
+export const REPORT_DONE_TOOL = "report_done";
+
 type PullRequest = NonNullable<NonNullable<Task["completion"]>["pr"]>;
-
-// 플러그인 server 는 앱이 띄운 프로세스라 셸 프로필의 PATH 를 받지 못할 수 있다. Homebrew 위치를 덧붙인다.
-const PATH = [process.env.PATH, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].filter(Boolean).join(":");
-
-function run(command: string, args: readonly string[], cwd: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(command, args, { cwd, env: { ...process.env, PATH }, timeout: 60_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error) reject(new Error(`${command} ${args.slice(0, 3).join(" ")}: ${(stderr || error.message).trim()}`));
-      else resolve(stdout);
-    });
-  });
-}
 
 const PR_FIELDS = "number,url,title,state,baseRefName,headRefName,additions,deletions,changedFiles,mergeable,statusCheckRollup";
 
@@ -85,12 +75,20 @@ async function readPullRequest(cwd: string, url: string): Promise<PullRequest> {
  * worktree 에 PR 에 담기지 않은 변경이 남았는지. 커밋하지 않은 파일, 또는 원격의 다른 브랜치(main 포함)에 없는 커밋.
  * PR 없이 '끝났다'고 보고한 워커가 정말 바꾼 것이 없는지 확인할 때 쓴다.
  */
-async function unpublishedWork(cwd: string, branch: string): Promise<string | null> {
+async function unpublishedWork(cwd: string, branch: string, baseBranch: string | null): Promise<string | null> {
   const dirty = (await run("git", ["status", "--porcelain"], cwd)).trim();
   if (dirty) return `uncommitted changes:\n${dirty.split("\n").slice(0, 10).join("\n")}`;
+  // 기준 브랜치가 원격에 없는 로컬 브랜치면 그 커밋은 워커가 만든 것이 아니다. 빼야 워커의 커밋만 센다.
+  const localBase = baseBranch && (await run("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${baseBranch}`], cwd).then(() => true, () => false));
   const ahead = Number(
     // --remotes 앞의 --exclude 패턴은 refs/remotes/ 를 뺀 이름으로 써야 걸린다 (git 문서; refs/remotes/… 로 쓰면 아무것도 제외되지 않았다).
-    (await run("git", ["rev-list", "--count", "HEAD", "--not", `--exclude=origin/${branch}`, "--remotes"], cwd)).trim(),
+    (
+      await run(
+        "git",
+        ["rev-list", "--count", "HEAD", "--not", `--exclude=origin/${branch}`, "--remotes", ...(localBase ? [`refs/heads/${baseBranch}`] : [])],
+        cwd,
+      )
+    ).trim(),
   );
   return ahead > 0 ? `${ahead} commit(s) on ${branch} that no pull request carries` : null;
 }
@@ -141,7 +139,7 @@ export async function finishRequestIfDone(store: StateStore, requestId: string):
  */
 export function reportDoneTool(store: StateStore) {
   return defineAgentTool({
-    name: "report_done",
+    name: REPORT_DONE_TOOL,
     title: "Report the task done",
     description:
       "Call this once your task is finished and verified, as your last action before ending the turn. If you are the last task on your branch, push the branch and open a pull request first: the plugin finds the pull request by your branch. Give what you did, how you verified it (commands and results), the reversible choices you made yourself with why, and anything left.",
@@ -173,11 +171,11 @@ export function reportDoneTool(store: StateStore) {
         try {
           pr = await findPullRequest(agent.cwd, task.branch);
           if (!pr) {
-            const left = await unpublishedWork(agent.cwd, task.branch);
+            const left = await unpublishedWork(agent.cwd, task.branch, task.baseBranch);
             unpublished = left;
             if (left && !input.noPullRequestReason) {
               return {
-                text: `There is work on ${task.branch} without a pull request (${left}). Commit, push ${task.branch} and open a pull request against the default branch, then call report_done again.`,
+                text: `There is work on ${task.branch} without a pull request (${left}). Commit, push ${task.branch} and open a pull request against ${task.baseBranch ?? "the default branch"}, then call report_done again.`,
                 isError: true,
               };
             }

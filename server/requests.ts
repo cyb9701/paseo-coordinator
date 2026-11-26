@@ -24,6 +24,8 @@ export async function createRequest(
   input: RpcInput<typeof createRequestRpc>,
   store: StateStore,
   settings: Settings,
+  /** 사람이 고른 기준 브랜치가 그 프로젝트 저장소에 있는지. 없는 이름을 받아 두면 배정할 때야 막힌다. */
+  branchExists: (projectId: string, branch: string) => Promise<boolean> = async () => true,
 ): Promise<{ id: string }> {
   const values = await readSettings(settings);
   // 허용 목록 밖 프로젝트는 여기서 막는다. 화면은 허용된 프로젝트만 보여 주지만, RPC 는 다른 경로로도 불릴 수 있다.
@@ -35,6 +37,14 @@ export async function createRequest(
   if (values.allowedProjectIds.length === 0) {
     throw new Error(say(language, "No projects are allowed. Choose projects in coordinator settings first.", "허용된 프로젝트가 없어요. 먼저 코디네이터 설정에서 프로젝트를 골라 주세요."));
   }
+  for (const [projectId, branch] of Object.entries(input.baseBranches)) {
+    if (!input.projectIds.includes(projectId)) {
+      throw new Error(say(language, `A base branch was chosen for ${projectId}, which is not in this request.`, `요청에 없는 프로젝트 ${projectId} 에 기준 브랜치를 골랐어요.`));
+    }
+    if (!(await branchExists(projectId, branch))) {
+      throw new Error(say(language, `Branch ${branch} does not exist in project ${projectId}.`, `프로젝트 ${projectId} 에 ${branch} 브랜치가 없어요.`));
+    }
+  }
   return store.update((state) => {
     const used = state.requests.map((request) => Number(request.id.slice(1))).filter(Number.isFinite);
     const id = `r${(used.length > 0 ? Math.max(...used) : 0) + 1}`;
@@ -43,6 +53,7 @@ export async function createRequest(
       text: input.text,
       doneCriteria: input.doneCriteria || null,
       projectIds: input.projectIds,
+      baseBranches: input.baseBranches,
       language,
       createdAt: new Date().toISOString(),
       status: "planning" as const,

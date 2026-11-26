@@ -165,6 +165,11 @@ export const taskSchema = z.object({
   agentId: z.string().nullable(),
   /** 워커가 일하는 브랜치. 배정할 때 플러그인이 정한다 (coord/<요청>-<번호>-…). */
   branch: z.string().nullable().default(null),
+  /**
+   * worktree 를 딴 기준 브랜치이자 PR 의 대상. 코디네이터가 계획에 적을 수 있고(요청 대상 기능이 아직 기본 브랜치에 없는
+   * 브랜치에만 있을 때), 비어 있으면 배정할 때 플러그인이 정해 채운다 (server/branches.ts 의 우선순위).
+   */
+  baseBranch: z.string().nullable().default(null),
   /** 막힌 이유나 배정 실패 이유. 사람이 카드에서 읽는다. */
   note: z.string().nullable().default(null),
   blocker: blockerSchema.nullable().default(null),
@@ -214,6 +219,8 @@ export const requestSchema = z.object({
   doneCriteria: z.string().nullable(),
   /** 사람이 고른 프로젝트. 비어 있으면 코디네이터가 허용 목록 안에서 고른다. */
   projectIds: z.array(z.string()),
+  /** 사람이 새 요청 창에서 프로젝트별로 고른 기준 브랜치. 코디네이터가 바꿀 수 없다. 없으면 코디네이터와 설정이 정한다. */
+  baseBranches: z.record(z.string(), z.string()).default({}),
   /** 코디네이터가 쓰는 워크스페이스 이름과 카드의 언어. 요청을 만들 때 정해진다. */
   language: z.enum(["en", "ko"]),
   createdAt: z.string(),
@@ -339,6 +346,8 @@ export const createRequestRpc = defineRpc({
     text: z.string().trim().min(1),
     doneCriteria: z.string().trim().nullable(),
     projectIds: z.array(z.string()),
+    /** projectId → 기준 브랜치. 고른 프로젝트에만 쓸 수 있다. */
+    baseBranches: z.record(z.string(), z.string().trim().min(1)).default({}),
     /** 요청을 보낸 앱의 언어. 출력 언어 설정이 auto 일 때 쓴다. */
     locale: z.string(),
   }),
@@ -458,4 +467,16 @@ export const retryTaskRpc = defineRpc({
   name: "tasks.retry",
   input: z.object({ requestId: z.string(), taskNumber: z.number().int().positive(), instruction: z.string().trim().nullable() }),
   output: z.object({}),
+});
+
+/** 새 요청 창과 설정에서 기준 브랜치를 고를 때 보이는 목록. 허용된 프로젝트만 읽는다. */
+export const listBranchesRpc = defineRpc({
+  name: "projects.branches",
+  input: z.object({ projectId: z.string() }),
+  output: z.object({
+    defaultBranch: z.string().nullable(),
+    branches: z.array(
+      z.object({ name: z.string(), local: z.boolean(), remote: z.boolean(), worktree: z.string().nullable(), updatedAt: z.string() }),
+    ),
+  }),
 });
