@@ -6,7 +6,7 @@ A [Paseo](https://paseo.sh) plugin that keeps you from becoming the bottleneck w
 
 ![Progress board: one row per request with its grade and projects, and task cards in columns ordered by how much they wait on you](assets/progress-board.png)
 
-*Progress board. Each request is a row; its tasks sit in the column that says who they are waiting on: you, the coordinator and its reviewers, a worker, or nothing yet.*
+*Progress board. Each request is a row; its tasks sit in the column that says who they are waiting on: you now, you later (to review), the coordinator and its reviewers, a worker, or nothing yet. Agents you launched yourself get their own rows below. Each task shows its branch and worktree path.*
 
 ## How it works
 
@@ -23,17 +23,17 @@ You write a request
       │     ├─ settled by your request or the repo's conventions → coordinator proposes an answer,
       │     │     2–3 fresh read-only reviewer agents check it, all must pass → sent to the worker
       │     └─ otherwise → a decision card for you
-      ├─ code task done → verifies, pushes, opens a pull request, report_done
+      ├─ code task done → verifies and commits; in a new worktree it also pushes and opens a pull request; report_done
       └─ operation task done → acted only on the targets you approved, report_done (no pull request)
-  → Merge card: you squash-merge; the plugin deletes the branch and archives the workspace
-  → Finished without a pull request and nothing left behind: a card to review later
+  → Merge card: you squash-merge exactly what the card shows; the plugin deletes the branch and archives the workspace
+  → Committed in your own workspace, or finished with nothing left behind: a card to review later
 ```
 
 A request that asks for a change never ends as just a report:
 
 - **Investigations come back.** When a change needs an investigation first, its report goes back to the coordinator instead of becoming an answer you confirm and close. The same happens when you write to a request while its investigation runs.
 - **Grade A waits for you.** The real change starts only after you answer a question card written from the investigation.
-- **Operation tasks.** Work outside a worktree, such as deleting branches or worktrees, deleting a remote branch or running an app, lists exactly what it touches. It starts only after you answer a question card that shows that list, and after the pull requests it depends on are merged.
+- **Operation tasks.** Work outside a worktree, such as deleting branches or worktrees, deleting a remote branch or running an app, lists exactly what it touches. It starts only after you answer a question card that shows that list, and after the work it depends on is settled: its pull request merged or its card closed.
 - **Instructions while it runs.** Send them from the start card or the request on the progress board. The coordinator passes them to the workers, adds tasks or drops unfinished ones, and asks you first when they go beyond the request.
 - **Automatic answers.** They stop for a rule for the rest of a request after you revert one, and everywhere after you revert two of its last ten. You can switch them off in settings.
 
@@ -44,10 +44,10 @@ A request that asks for a change never ends as just a report:
 | Questions from the coordinator, including approving operation tasks | Requests the coordinator started on its own |
 | Worker questions that need a person | Answers to read-only requests |
 | Answers that failed independent review | Decisions made automatically after review |
-| Pull requests to merge, and finished work left outside a pull request | Tasks that finished without a pull request and left nothing behind |
-| Stopped tasks (restart or cancel), a stopped coordinator, permission requests | |
+| Pull requests to merge, and finished work left outside a pull request | Tasks that finished without a pull request and left nothing behind, or committed in your workspace |
+| Stopped tasks (restart or cancel), a stopped coordinator, permission requests | Results of agents you launched yourself |
 
-The sidebar badge counts only the left column. Buttons say what they do: "End with this answer" closes a read request, "Seen, keep going" leaves a started request running, and "Finish · clean up" closes a task without a pull request. "Mark all reviewed" handles the right column in one go but skips answers, because confirming an answer ends its request. If the coordinator itself stops (it cannot be reached, or keeps ignoring what it was sent), a "Coordinator stopped" card shows why and lets you try again.
+The sidebar badge counts only the left column. Buttons say what they do: "End with this answer" closes a read request, "Seen, keep going" leaves a started request running, and "Finish · clean up" closes a task without a pull request. "Mark all reviewed" handles the right column in one go but skips answers, because confirming an answer ends its request, and cards with work left or an unanswered question. Canceling a request asks first, and is refused while finished work still waits on a decision card. If the coordinator itself stops (it cannot be reached, or keeps ignoring what it was sent), a "Coordinator stopped" card shows why and lets you try again.
 
 <p>
   <img src="assets/inbox-needs-reaction.png" alt="Needs my decision: a coordinator question card with your request, the background and two questions with a recommended option each, followed by a worker question card" width="49%">
@@ -87,14 +87,19 @@ Open **Coordinator** from the sidebar. The badge counts cards that need your dec
 Go to **Settings** (top right):
 
 1. Choose the projects the coordinator may use. With none selected it starts no workers.
-2. Pick the model and effort for the coordinator, the workers and the reviewers.
+2. Pick the model and effort for the coordinator, the workers and the reviewers, and optionally a base branch per project.
 3. Choose whether workers use `/poteto-mode`, whether the coordinator may answer workers automatically after independent review, and the output language for workspace names and cards.
 
 <img src="assets/settings.png" alt="Settings: coordinator model and effort, worker model and effort, the /poteto-mode switch, and reviewer models" width="60%">
 
-Then press **+ New request**, describe what you want, and optionally pick projects and a done criterion. Leave projects empty to let the coordinator choose among the allowed ones. For each project you pick you can also choose the base branch: workers branch off it and open pull requests against it. Pick the feature branch when the request builds on work that is not merged yet; otherwise the coordinator decides, then the per-project base in settings, then the remote default branch.
+Then press **+ New request**, describe what you want, and optionally pick projects and a done criterion. Leave projects empty to let the coordinator choose among the allowed ones.
 
-Instead of a new worktree you can pick one of your open workspaces for a project. Workers then continue there in a new session, on the branch checked out there: code tasks commit and do not push or open a pull request, and you merge that branch your own way. A task waits while the workspace has uncommitted changes or another agent is working in it. The coordinator can also propose one of your workspaces, but only after you approve it on a question card. Closing the card closes the worker's session and leaves your workspace and branch alone. The progress board shows each task's branch and worktree path.
+For each project you pick, choose where workers work:
+
+- **New worktree · new branch** (default). Each task gets its own worktree and a new branch. The branch starts from the branch the coordinator picks when the request builds on unmerged work, otherwise the per-project base in settings, otherwise the remote default branch. To start from a particular branch, say so in the request. Workers open pull requests against that base.
+- **One of your open workspaces.** Workers continue there in a new session, on the branch checked out there. Code tasks only commit; you push and merge that branch your own way. A task waits while the workspace has uncommitted changes, another agent works in it, or another unfinished task still uses it. Closing the card closes only the worker's session.
+
+The coordinator can also propose one of your workspaces, but only after you approve its directory on a question card, and never one on the default branch for code tasks.
 
 <img src="assets/new-request.png" alt="New request panel: a text box for the request, project choices limited to the allowed projects, and an optional done criterion" width="60%">
 
@@ -119,7 +124,7 @@ paseo plugin install /absolute/path/to/paseo-coordinator
 paseo plugin reload paseo-coordinator   # after each change
 ```
 
-The plugin has no build step and no runtime dependencies beyond what Paseo provides. `npm test` runs the server code against a fake Paseo API and temporary git repositories: review failures and timeouts, auto-stop, races between hooks and the reconcile pass, dispatch during cancel, merge-card flows, investigations returning to the coordinator, the grade A and operation-task gates, adding and canceling tasks, honest reverts, replaying a report whose tool call failed, and coordinator stalls.
+The plugin has no build step and no runtime dependencies beyond what Paseo provides. `npm test` runs the server code against a fake Paseo API and temporary git repositories: review failures and timeouts, auto-stop, races between hooks and the reconcile pass, dispatch during cancel, merge-card flows, investigations returning to the coordinator, the grade A, operation-task and existing-workspace gates, adding and canceling tasks, honest reverts, replaying a report whose tool call failed, coordinator stalls, base branches, and merging only what the card showed (with a fake `gh`).
 
 ## Documents
 
