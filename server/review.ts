@@ -7,6 +7,7 @@ import { AUTO_RULES } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
 import type { StateStore } from "./store";
 import { type WorkerChannel, queued } from "./worker-channel";
+import { say } from "./say";
 
 type Settings = PluginSettings<typeof settingsSchema>;
 type Proposal = NonNullable<NonNullable<Task["blocker"]>["proposal"]>;
@@ -401,7 +402,7 @@ export class ReviewRunner {
   ): Promise<void> {
     const found = await this.find(input.requestId, input.taskNumber);
     const decision = found?.task.autoDecisions.find((item) => item.id === input.id);
-    if (!found || !decision) throw new Error("This automatic decision no longer exists.");
+    if (!found || !decision) throw new Error(say(found?.request.language, "This automatic decision no longer exists.", "이 자동 결정은 더 이상 없어요."));
     const revert = Boolean(input.revertText?.trim());
     const at = new Date().toISOString();
     const revertMessage = `[From the human] The earlier automatic decision is withdrawn: "${decision.answer}"\n${input.revertText}\nUndo what that decision changed if needed (${decision.undo}), then continue with this instruction.`;

@@ -8,6 +8,7 @@ import type { CoordinatorRequest, Task } from "../shared/model";
 import { answeredQa } from "./requests";
 import type { StateStore } from "./store";
 import { type WorkerChannel, queued } from "./worker-channel";
+import { say } from "./say";
 
 type PullRequest = NonNullable<NonNullable<Task["completion"]>["pr"]>;
 
@@ -237,24 +238,37 @@ export class CompletionRunner {
     const task = request?.tasks.find((item) => item.number === input.taskNumber);
     const completion = task?.completion;
     if (!request || !task || !completion || completion.closedAt || task.status !== "review") {
-      throw new Error("This card is no longer open.");
+      throw new Error(say(request?.language, "This card is no longer open.", "이 카드는 이미 닫혔어요."));
     }
+    const lang = request.language;
     if (input.action === "revise") return this.revise(paseo, request, task, input.instruction);
 
     const projects = (await paseo.projects.list()).projects;
     const root = projects.find((item) => item.projectId === task.projectId)?.projectRootPath;
-    if (!root) throw new Error(`Project ${task.projectId} is not registered on this host.`);
+    if (!root) throw new Error(say(lang, `Project ${task.projectId} is not registered on this host.`, `프로젝트 ${task.projectId} 가 이 호스트에 등록돼 있지 않아요.`));
     if (completion.pr) {
       // 카드가 뜬 뒤 워커가 더 고쳤을 수 있다. worktree 가 남아 있으면 PR 과 같은지 다시 본다.
       const worktree = task.agentId ? (await paseo.agents.ref(task.agentId).refresh().catch(() => null))?.agent.cwd : null;
       if (worktree) {
         const differs = await differsFromPr(worktree, completion.pr.url).catch(() => null);
-        if (differs) throw new Error(`The worker's worktree has changes the pull request does not (${differs}). Ask the worker to push them first.`);
+        if (differs) {
+          throw new Error(
+            say(
+              lang,
+              `The worker's worktree has changes the pull request does not (${differs}). Ask the worker to push them first.`,
+              `워커의 worktree 에 PR 에 없는 변경이 있어요 (${differs}). 수정 지시로 먼저 push 해 달라고 해 주세요.`,
+            ),
+          );
+        }
       }
       const pr = await readPullRequest(root, completion.pr.url);
-      if (pr.state === "CLOSED") throw new Error(`Pull request #${pr.number} was closed without merging.`);
+      if (pr.state === "CLOSED") throw new Error(say(lang, `Pull request #${pr.number} was closed without merging.`, `PR #${pr.number} 이 머지되지 않고 닫혔어요.`));
       if (pr.state === "OPEN") {
-        if (pr.mergeable === "CONFLICTING") throw new Error(`Pull request #${pr.number} has conflicts with ${pr.baseRefName}. Ask the worker to fix them.`);
+        if (pr.mergeable === "CONFLICTING") {
+          throw new Error(
+            say(lang, `Pull request #${pr.number} has conflicts with ${pr.baseRefName}. Ask the worker to fix them.`, `PR #${pr.number} 이 ${pr.baseRefName} 과 충돌해요. 수정 지시로 워커에게 고쳐 달라고 해 주세요.`),
+          );
+        }
         await run("gh", ["pr", "merge", pr.url, "--squash"], root);
       }
       // 저장소 설정으로 이미 지워졌으면 실패해도 된다.
@@ -312,7 +326,7 @@ export class CompletionRunner {
 
   private async revise(paseo: PaseoApi, request: CoordinatorRequest, task: Task, instruction: string | null): Promise<void> {
     const text = instruction?.trim();
-    if (!text) throw new Error("Write what the worker should change.");
+    if (!text) throw new Error(say(request.language, "Write what the worker should change.", "워커가 무엇을 고쳐야 하는지 적어 주세요."));
     const at = new Date().toISOString();
     await this.store.update((current) => ({
       state: {

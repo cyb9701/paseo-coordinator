@@ -8,6 +8,7 @@ import { continuedBy, finishRequestIfDone } from "./completion";
 import { workspaceTitle } from "./coordinator";
 import type { StateStore } from "./store";
 import { type WorkerChannel, queued } from "./worker-channel";
+import { say } from "./say";
 
 type Settings = PluginSettings<typeof settingsSchema>;
 type TaskPatch = Partial<Pick<Task, "status" | "workspaceId" | "agentId" | "branch" | "note" | "poteto" | "doneNudgedAt">>;
@@ -188,7 +189,10 @@ export class Dispatcher {
     // report_blocker 로 보고하고 멈춘 워커는 결정을 기다리는 중이다. 끝난 것으로 보지 않는다.
     if (task.blocker) return;
     if (outcome.kind === "failed") {
-      await this.patchTask(request.id, task.number, { status: "blocked", note: outcome.error.message });
+      await this.patchTask(request.id, task.number, {
+        status: "blocked",
+        note: say(request.language, `The worker stopped with an error: ${outcome.error.message}`, `워커가 에러로 멈췄어요: ${outcome.error.message}`),
+      });
     } else if (outcome.kind === "completed") {
       if (request.kind === "read") {
         await this.patchTask(request.id, task.number, { status: "done", note: null });
@@ -237,7 +241,14 @@ export class Dispatcher {
     // 다시 요청한 메시지를 처리하는 중일 수 있다. 정말 쉬고 있을 때만 막힘으로 둔다.
     const snapshot = task.agentId ? await paseo.agents.ref(task.agentId).refresh().catch(() => null) : null;
     if (!snapshot || snapshot.agent.status === "running" || (snapshot.agent.pendingPermissions?.length ?? 0) > 0) return false;
-    await this.patchTask(request.id, task.number, { status: "blocked", note: "The worker ended twice without report_done. Open the worker to see where it stopped." });
+    await this.patchTask(request.id, task.number, {
+      status: "blocked",
+      note: say(
+        request.language,
+        "The worker ended twice without reporting the task done. Open the worker to see where it stopped.",
+        "워커가 완료 보고 없이 두 번 멈췄어요. 워커를 열어 어디서 멈췄는지 확인해 주세요.",
+      ),
+    });
     return true;
   }
 
@@ -315,10 +326,12 @@ export class Dispatcher {
   ): Promise<void> {
     // 계획을 제출할 때 확인했지만, 그사이 설정에서 빠졌을 수 있어 배정 직전에 다시 확인한다.
     if (!values.allowedProjectIds.includes(task.projectId)) {
-      throw new Error(`Project ${task.projectId} is no longer allowed in coordinator settings.`);
+      throw new Error(
+        say(request.language, `Project ${task.projectId} is no longer allowed in coordinator settings.`, `프로젝트 ${task.projectId} 가 코디네이터 설정의 허용 목록에서 빠졌어요.`),
+      );
     }
     const project = projects.find((item) => item.projectId === task.projectId);
-    if (!project) throw new Error(`Project ${task.projectId} is not registered on this host.`);
+    if (!project) throw new Error(say(request.language, `Project ${task.projectId} is not registered on this host.`, `프로젝트 ${task.projectId} 가 이 호스트에 등록돼 있지 않아요.`));
     // 같은 프로젝트의 앞 작업에 이어지는 작업은 그 작업의 worktree 와 브랜치를 이어서 쓴다. 따로 worktree 를 만들면
     // 앞 작업의 (커밋하지 않은) 결과가 보이지 않아, 워커가 다른 worktree 를 뒤져 읽었다 (2026-11-25 r6 테스트).
     const continuesFrom =
@@ -328,7 +341,13 @@ export class Dispatcher {
     // 한 작업의 worktree 는 한 작업만 이어 쓴다. 둘이 이어 쓰면 두 워커가 한 worktree 에서 동시에 일하고,
     // 한쪽을 머지할 때 다른 쪽의 worktree 가 지워진다. 계획 검증(validatePlan)이 막지만 여기서도 한 번 더 막는다.
     if (continuesFrom && continuedBy(request, continuesFrom)?.number !== task.number) {
-      throw new Error(`Task ${task.number} and another task both continue task ${continuesFrom.number} in the same worktree. Chain them instead.`);
+      throw new Error(
+        say(
+          request.language,
+          `Task ${task.number} and another task both continue task ${continuesFrom.number} in the same worktree. Chain them instead.`,
+          `작업 ${task.number} 와 다른 작업이 모두 작업 ${continuesFrom.number} 의 worktree 를 이어 써요. 앞뒤로 이어지게 계획을 고쳐야 해요.`,
+        ),
+      );
     }
     const branch = continuesFrom?.branch ?? branchFor(request, task);
     // 두 번 배정되지 않게 워커를 만들기 전에 먼저 실행 중으로 표시한다. 저장하는 순간에 요청과 작업이 그대로인지 확인한다
@@ -409,7 +428,8 @@ export class Dispatcher {
       error: error instanceof Error ? error.message : String(error),
     }));
     if (result.commands.some((command) => /(^|:)poteto-mode$/.test(command.name.replace(/^\//, "")))) return { use: true, note: null };
-    return { use: false, note: `Started without /poteto-mode: ${result.error ?? "pstack is not loaded in the worker session"}.` };
+    const reason = result.error ?? say(request.language, "pstack is not loaded in the worker session", "워커 세션에 pstack 이 없어요");
+    return { use: false, note: say(request.language, `Started without /poteto-mode: ${reason}.`, `/poteto-mode 없이 시작했어요: ${reason}.`) };
   }
 
   /** 읽기 조사가 모두 끝났으면 워커들의 마지막 보고를 모아 답변으로 만든다. */

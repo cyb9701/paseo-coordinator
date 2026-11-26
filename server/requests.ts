@@ -5,6 +5,7 @@ import { hasStarted, openCard, withCardQa } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
 import type { StateStore } from "./store";
 import { queued } from "./worker-channel";
+import { say } from "./say";
 
 type Settings = PluginSettings<typeof settingsSchema>;
 
@@ -26,10 +27,13 @@ export async function createRequest(
 ): Promise<{ id: string }> {
   const values = await readSettings(settings);
   // 허용 목록 밖 프로젝트는 여기서 막는다. 화면은 허용된 프로젝트만 보여 주지만, RPC 는 다른 경로로도 불릴 수 있다.
+  const language = resolveLanguage(values.outputLanguage, input.locale);
   const outside = input.projectIds.filter((id) => !values.allowedProjectIds.includes(id));
-  if (outside.length > 0) throw new Error(`Projects not allowed in coordinator settings: ${outside.join(", ")}`);
+  if (outside.length > 0) {
+    throw new Error(say(language, `Projects not allowed in coordinator settings: ${outside.join(", ")}`, `코디네이터 설정에서 허용되지 않은 프로젝트예요: ${outside.join(", ")}`));
+  }
   if (values.allowedProjectIds.length === 0) {
-    throw new Error("No projects are allowed. Choose projects in coordinator settings first.");
+    throw new Error(say(language, "No projects are allowed. Choose projects in coordinator settings first.", "허용된 프로젝트가 없어요. 먼저 코디네이터 설정에서 프로젝트를 골라 주세요."));
   }
   return store.update((state) => {
     const used = state.requests.map((request) => Number(request.id.slice(1))).filter(Number.isFinite);
@@ -39,7 +43,7 @@ export async function createRequest(
       text: input.text,
       doneCriteria: input.doneCriteria || null,
       projectIds: input.projectIds,
-      language: resolveLanguage(values.outputLanguage, input.locale),
+      language,
       createdAt: new Date().toISOString(),
       status: "planning" as const,
       title: null,
@@ -96,7 +100,7 @@ export async function revisePlan({ id, text }: { id: string; text: string }, sto
     const request = state.requests.find((item) => item.id === id);
     if (!request) throw new Error(`Unknown request ${id}`);
     if (request.status === "done" || request.status === "canceled") {
-      throw new Error(`Request ${id} is ${request.status}; it does not take instructions now.`);
+      throw new Error(say(request.language, `Request ${id} is ${request.status}; it does not take instructions now.`, `요청 ${id} 은 이미 끝나서 지시를 받지 않아요.`));
     }
     const entry = { text, at: new Date().toISOString(), kind: "instruction" as const };
     // 이미 워커가 일하는 요청은 다시 계획하지 않는다(같은 작업이 또 배정된다). 요청은 진행 중인 채로 지시만 남기고,
@@ -136,7 +140,9 @@ export async function answerQuestions(
     const request = state.requests.find((item) => item.id === id);
     if (!request) throw new Error(`Unknown request ${id}`);
     const running = request.status === "running" && request.question !== null;
-    if (request.status !== "needs_input" && !running) throw new Error(`Request ${id} is ${request.status}, not waiting for answers.`);
+    if (request.status !== "needs_input" && !running) {
+      throw new Error(say(request.language, `Request ${id} is ${request.status}, not waiting for answers.`, `요청 ${id} 은 답을 기다리고 있지 않아요.`));
+    }
     const at = new Date().toISOString();
     const entries = answers.map(({ question, answer }) => ({ text: `${question} → ${answer}`, at, kind: "answer" as const }));
     return {
@@ -190,11 +196,11 @@ export async function resolveBlocker(
     const request = state.requests.find((item) => item.id === input.requestId);
     const task = request?.tasks.find((item) => item.number === input.taskNumber);
     const blocker = task?.blocker;
-    if (!request || !task || !blocker) throw new Error("This decision card is no longer open.");
+    if (!request || !task || !blocker) throw new Error(say(request?.language, "This decision card is no longer open.", "이 결정 카드는 이미 닫혔어요."));
     const option = input.choice ? blocker.coordinator?.options.find((item) => item.label === input.choice) : undefined;
-    if (input.choice && !option) throw new Error(`Unknown option ${input.choice}.`);
+    if (input.choice && !option) throw new Error(say(request.language, `Unknown option ${input.choice}.`, `선택지 ${input.choice} 를 찾을 수 없어요. 카드가 바뀌었을 수 있어요.`));
     const instruction = input.instruction?.trim();
-    if (!option && !instruction) throw new Error("Choose an option or write an instruction.");
+    if (!option && !instruction) throw new Error(say(request.language, "Choose an option or write an instruction.", "선택지를 고르거나 지시를 적어 주세요."));
     const message = option
       ? `[Decision from the human on what you reported: "${blocker.summary}"]\nChosen: ${option.label}\n${option.instruction}${instruction ? `\nAlso: ${instruction}` : ""}\nContinue your task with this decision.`
       : `[Instruction from the human on what you reported: "${blocker.summary}"]\n${instruction}\nContinue your task with this instruction.`;
@@ -238,7 +244,7 @@ export async function askCoordinator(input: { requestId: string; taskNumber: num
   await store.update((state) => {
     const request = state.requests.find((item) => item.id === input.requestId);
     const task = request?.tasks.find((item) => item.number === input.taskNumber);
-    if (!task || !openCard(task)) throw new Error("This card is no longer open.");
+    if (!task || !openCard(task)) throw new Error(say(request?.language, "This card is no longer open.", "이 카드는 이미 닫혔어요."));
     const entry = { question: input.question, answer: null, at: new Date().toISOString(), answeredAt: null, notifiedAt: null };
     return {
       state: {
@@ -267,7 +273,7 @@ export async function retryTask(
     const request = state.requests.find((item) => item.id === input.requestId);
     const task = request?.tasks.find((item) => item.number === input.taskNumber);
     if (!request || request.status !== "running" || !task || task.status !== "blocked" || task.blocker) {
-      throw new Error("This task is not waiting to be restarted.");
+      throw new Error(say(request?.language, "This task is not waiting to be restarted.", "이 작업은 다시 시작할 상태가 아니에요."));
     }
     const at = new Date().toISOString();
     const text = input.instruction?.trim();

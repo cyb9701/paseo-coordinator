@@ -99,11 +99,12 @@ See [OVERVIEW.md](OVERVIEW.md) for the full list and known limits.
 ```bash
 npm install
 npm run typecheck
+npm test                                # server flow tests, no Paseo needed
 paseo plugin install /absolute/path/to/paseo-coordinator
 paseo plugin reload paseo-coordinator   # after each change
 ```
 
-The plugin has no build step and no runtime dependencies beyond what Paseo provides.
+The plugin has no build step and no runtime dependencies beyond what Paseo provides. `npm test` runs the server code against a fake Paseo API: review failures and timeouts, auto-stop, races between hooks and the reconcile pass, dispatch during cancel, and merge-card flows.
 
 ## Documents
 
