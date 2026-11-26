@@ -1,4 +1,4 @@
-import type { PaseoApi } from "@getpaseo/client";
+import type { PaseoApi } from "./paseo-api";
 import { defineAgentTool } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import type { StateStore } from "./store";

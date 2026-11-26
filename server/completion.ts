@@ -1,7 +1,7 @@
 /// <reference types="node" />
 
 import { execFile } from "node:child_process";
-import type { PaseoApi } from "@getpaseo/client";
+import type { PaseoApi } from "./paseo-api";
 import { defineAgentTool } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import type { CoordinatorRequest, Task } from "../shared/model";

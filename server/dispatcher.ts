@@ -1,6 +1,6 @@
 /// <reference types="node" />
 
-import type { PaseoApi } from "@getpaseo/client";
+import type { PaseoApi } from "./paseo-api";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { CoordinatorRequest, Task } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";

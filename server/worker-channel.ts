@@ -1,4 +1,4 @@
-import type { PaseoApi } from "@getpaseo/client";
+import type { PaseoApi } from "./paseo-api";
 import type { Task } from "../shared/model";
 import type { StateStore } from "./store";
 
