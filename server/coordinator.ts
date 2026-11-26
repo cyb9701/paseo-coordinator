@@ -29,6 +29,8 @@ import type { ReviewRunner } from "./review";
 import { type WorkerChannel, queued } from "./worker-channel";
 import { preapprovedOptions } from "./preapprove";
 import { listBranches, listTreeAt, readBlobAt, resolveBaseRef, treePath } from "./branches";
+import { uncommittedChanges } from "./completion";
+import { listExistingWorkspaces, pluginWorkspaceIds, readCheckout, workspaceProblem } from "./existing-workspace";
 
 type Settings = PluginSettings<typeof settingsSchema>;
 
@@ -543,6 +545,7 @@ export class CoordinatorRuntime {
       this.listFilesTool(),
       this.readFileTool(),
       this.listBranchesTool(),
+      this.listWorkspacesTool(),
       this.askHumanTool(),
       this.submitAnswerTool(),
       this.submitPlanTool(),
@@ -842,6 +845,52 @@ export class CoordinatorRuntime {
     });
   }
 
+  /**
+   * 사람이 이미 쓰는 워크스페이스를 찾는다. 요청이 그 워크스페이스의 일(아직 머지되지 않은 로컬 브랜치의 기능, 그 worktree 에서
+   * 앱 실행)이면 새 worktree 대신 거기서 일하도록 계획한다 (작업의 workspaceId). 이 도구는 읽기만 한다.
+   */
+  private listWorkspacesTool() {
+    return defineAgentTool({
+      name: "coordinator_list_workspaces",
+      title: "List project workspaces",
+      description:
+        "List the open Paseo workspaces of an allowed project: id, name, directory, checked-out branch, uncommitted changes and agents working there. Use it to plan a task in the human's existing workspace (workspaceId) instead of a new worktree.",
+      input: z.object({ projectId: z.string() }),
+      execute: async ({ projectId }, { paseo }) => {
+        const project = (await allowedProjects(paseo, this.settings)).find((item) => item.id === projectId);
+        if (!project) return { text: `Project ${projectId} is not allowed in coordinator settings.`, isError: true };
+        const [workspaces, state, agents] = await Promise.all([
+          listExistingWorkspaces(paseo, projectId).catch(() => null),
+          this.store.read(),
+          paseo.agents.list({ filter: { statuses: ["running", "initializing"] }, page: { limit: 200 } }).catch(() => null),
+        ]);
+        if (!workspaces) return { text: `Could not list the workspaces of ${project.name}.`, isError: true };
+        const pluginIds = pluginWorkspaceIds(state);
+        const lines = await Promise.all(
+          workspaces
+            .filter((workspace) => workspace.projectId === projectId)
+            .map(async (workspace) => {
+              const problem = workspaceProblem(workspace, workspace.id, projectId, pluginIds);
+              const checkout = problem ? null : await readCheckout(workspace.directory).catch(() => null);
+              const dirty = problem ? false : await uncommittedChanges(workspace.directory).then(Boolean, () => false);
+              const working =
+                agents?.entries.filter(
+                  (entry) => !entry.agent.archivedAt && (entry.agent.workspaceId === workspace.id || entry.agent.cwd === workspace.directory),
+                ).length ?? 0;
+              const notes = [
+                problem ? `not usable: ${problem}` : null,
+                !problem && !checkout?.branch ? "detached HEAD, not usable" : null,
+                dirty ? "uncommitted changes" : null,
+                working ? `${working} agent(s) working` : null,
+              ].filter(Boolean);
+              return `- ${workspace.id} "${workspace.name}" directory: ${workspace.directory}${checkout?.branch ? ` branch: ${checkout.branch}` : ""}${notes.length ? ` [${notes.join("; ")}]` : ""}`;
+            }),
+        );
+        return { text: lines.length ? ["Open workspaces:", ...lines].join("\n") : `No open workspaces in ${project.name}.` };
+      },
+    });
+  }
+
   private readFileTool() {
     return defineAgentTool({
       name: "coordinator_read_file",
@@ -917,6 +966,8 @@ export class CoordinatorRuntime {
               projects: usable,
               // 사람이 고른 기준 브랜치. 있으면 그 프로젝트 작업은 이 브랜치에서 시작하고, 계획에서 바꿀 수 없다.
               humanBaseBranches: request.baseBranches,
+              // 사람이 고른 기존 워크스페이스(projectId → workspaceId). 그 프로젝트 작업은 모두 이 워크스페이스에서 일한다.
+              humanWorkspaces: request.workspaces,
             },
             null,
             2,
@@ -1168,15 +1219,38 @@ export class CoordinatorRuntime {
     });
   }
 
-  /** 계획과 작업 추가가 같이 쓰는 검사: 허용된 프로젝트, 기준 브랜치, 사람의 답이 필요한 작업. */
+  /**
+   * 계획과 작업 추가가 같이 쓰는 검사: 기준 브랜치와 기존 워크스페이스. approvals 는 사람의 승인이 필요한 기존 워크스페이스의
+   * 경로다. 사람이 고른 워크스페이스나 이 요청의 작업이 이미 쓰는 워크스페이스는 다시 묻지 않는다.
+   */
   private async taskProblems(
     paseo: PaseoApi,
     request: CoordinatorRequest,
     tasks: readonly z.infer<typeof taskInput>[],
     projects: Awaited<ReturnType<typeof allowedProjects>>,
-  ): Promise<string[]> {
+  ): Promise<{ problems: string[]; approvals: string[] }> {
     const problems: string[] = [];
+    const approvals = new Set<string>();
+    const wanted = tasks.some((task) => task.workspaceId || request.workspaces[task.projectId]);
+    const workspaces = wanted ? await listExistingWorkspaces(paseo).catch(() => []) : [];
+    const pluginIds = wanted ? pluginWorkspaceIds(await this.store.read()) : new Set<string>();
     for (const task of tasks) {
+      const human = request.workspaces[task.projectId];
+      if (human && task.workspaceId && task.workspaceId !== human) {
+        problems.push(`Task ${task.number}: the human chose workspace ${human} for project ${task.projectId}; omit workspaceId or use ${human}.`);
+        continue;
+      }
+      const workspaceId = human ?? task.workspaceId;
+      if (workspaceId) {
+        if (task.baseBranch) problems.push(`Task ${task.number}: a task in an existing workspace works on the branch checked out there; omit baseBranch.`);
+        const workspace = workspaces.find((item) => item.id === workspaceId);
+        const problem = workspaceProblem(workspace, workspaceId, task.projectId, pluginIds);
+        if (problem) problems.push(`Task ${task.number}: ${problem}.`);
+        else if (!human && !request.tasks.some((other) => other.status !== "canceled" && other.existingWorkspaceId === workspaceId)) {
+          approvals.add(workspace!.directory);
+        }
+        continue;
+      }
       // 사람이 새 요청 창에서 고른 기준 브랜치는 코디네이터가 바꾸지 못한다. 적은 브랜치는 저장소에 있어야 한다.
       const chosen = request.baseBranches[task.projectId];
       if (chosen && task.baseBranch && task.baseBranch !== chosen) {
@@ -1188,7 +1262,7 @@ export class CoordinatorRuntime {
         problems.push(`Task ${task.number}: branch ${task.baseBranch} does not exist in project ${task.projectId}.`);
       }
     }
-    return problems;
+    return { problems, approvals: [...approvals] };
   }
 
   private submitPlanTool() {
@@ -1223,7 +1297,8 @@ export class CoordinatorRuntime {
         const usable = new Set(
           (request.projectIds.length > 0 ? projects.filter((p) => request.projectIds.includes(p.id)) : projects).map((p) => p.id),
         );
-        const problems = [...validatePlan(input, request.language, usable), ...(await this.taskProblems(paseo, request, input.tasks, projects))];
+        const checked = await this.taskProblems(paseo, request, input.tasks, projects);
+        const problems = [...validatePlan(input, request.language, usable, [], request.workspaces), ...checked.problems];
         if (!input.readOnly && !input.grade) problems.push("A change request needs a grade.");
         if (input.beforeChange && !input.readOnly) problems.push("beforeChange is only for a readOnly investigation.");
         if (input.beforeChange && !input.grade) problems.push("beforeChange needs the grade of the change that follows the investigation.");
@@ -1243,7 +1318,9 @@ export class CoordinatorRuntime {
         ) {
           problems.push("This request asked for a change. A further investigation must keep beforeChange true and the grade of the change.");
         }
-        problems.push(...humanGateProblems(request, input.tasks, input.readOnly ? null : (input.grade ?? null), decisionBasisAt(request)));
+        problems.push(
+          ...humanGateProblems(request, input.tasks, input.readOnly ? null : (input.grade ?? null), decisionBasisAt(request), checked.approvals),
+        );
         if (problems.length > 0) return { text: `Plan rejected:\n- ${problems.join("\n- ")}`, isError: true };
         // v3: 명확한 요청은 코디네이터 판단으로 바로 시작한다. 사람은 확인 필요의 시작 카드로 본다 (RULES.md §2.0).
         // 읽기 전용 조사 워커는 읽기 전용 모드로 띄운다 (3e).
@@ -1331,14 +1408,15 @@ export class CoordinatorRuntime {
         const outside = [...new Set(input.tasks.map((task) => task.projectId))].filter(
           (id) => request.projectIds.length > 0 && !request.projectIds.includes(id),
         );
+        const checked = await this.taskProblems(paseo, request, input.tasks, projects);
         const problems = [
-          ...validatePlan({ title: request.title ?? request.id, tasks: input.tasks }, request.language, usable, request.tasks),
+          ...validatePlan({ title: request.title ?? request.id, tasks: input.tasks }, request.language, usable, request.tasks, request.workspaces),
           ...(outside.length > 0 && !humanAnsweredSince(request, request.plannedAt)
             ? [`Project ${outside.join(", ")} is outside the projects the human chose. Ask the human with coordinator_ask_human first.`]
             : []),
-          ...(await this.taskProblems(paseo, request, input.tasks, projects)),
+          ...checked.problems,
           // 지금 계획 뒤에 받은 답이어야 한다. 계획을 세울 때 받은 답으로 새 작업까지 통과시키지 않는다.
-          ...humanGateProblems(request, input.tasks, request.grade, request.plannedAt),
+          ...humanGateProblems(request, input.tasks, request.grade, request.plannedAt, checked.approvals),
         ];
         if (problems.length > 0) return { text: `Tasks rejected:\n- ${problems.join("\n- ")}`, isError: true };
         const now = new Date().toISOString();
@@ -1457,12 +1535,22 @@ const taskInput = z.object({
     .describe(
       "Branch to cut this task's worktree from and open its pull request against. Set it only when the work builds on a branch that is not merged into the default branch yet (see coordinator_list_branches). Omit it to use the project's configured base.",
     ),
+  workspaceId: z
+    .string()
+    .trim()
+    .min(1)
+    .optional()
+    .describe(
+      "Run this task in the human's existing Paseo workspace (see coordinator_list_workspaces) instead of a new worktree, on the branch checked out there. Use it when the work belongs to what the human is doing in that workspace: a feature on a branch that is not merged yet, an app to run from that worktree. Unless the human chose it (humanWorkspaces), ask the human first with coordinator_ask_human, writing the workspace directory word for word. Code tasks there commit on that branch and do not push or open a pull request. Tasks in one workspace must run one after another (chain them with dependsOn). Omit baseBranch when you set this.",
+    ),
 });
 
 function newTask(request: CoordinatorRequest, task: z.infer<typeof taskInput>): Task {
   return {
     ...task,
     baseBranch: request.baseBranches[task.projectId] ?? task.baseBranch ?? null,
+    existingWorkspaceId: request.workspaces[task.projectId] ?? task.workspaceId ?? null,
+    startCommit: null,
     status: "waiting" as const,
     workspaceId: null,
     agentId: null,
@@ -1487,9 +1575,12 @@ export function humanGateProblems(
   tasks: readonly { kind: "code" | "operation"; targets?: readonly string[] }[],
   grade: CoordinatorRequest["grade"],
   since: string | null,
+  /** 코디네이터가 고른 기존 워크스페이스의 경로. 사람의 작업 공간에 워커를 들이므로 사람이 그 경로를 보고 답해야 한다. */
+  workspaceDirectories: readonly string[] = [],
 ): string[] {
   const answered = humanAnsweredSince(request, since);
   const problems: string[] = [];
+  const shown = request.lastQuestion && (!since || request.lastQuestion.answeredAt > since) ? questionText(request.lastQuestion) : null;
   if (grade === "A" && !answered) {
     problems.push(
       "Grade A: investigate first (readOnly with beforeChange), then ask the human with coordinator_ask_human which changes to make. The human's answer must come after the investigation report or previous answer, and be the latest feedback.",
@@ -1499,7 +1590,6 @@ export function humanGateProblems(
   if (operations.length > 0) {
     // 답한 질문 카드에 대상이 그대로 적혀 있어야 사람이 그 대상을 승인한 것이다. '무언가에 답했다'만 보면 대상을 보여 주지 않은
     // 질문의 답으로도 통과했다 (2026-11-26 최종 검사).
-    const shown = request.lastQuestion && (!since || request.lastQuestion.answeredAt > since) ? questionText(request.lastQuestion) : null;
     const missing = shown === null ? [] : operations.flatMap((task) => (task.targets ?? []).filter((target) => !shown.includes(normalize(target))));
     if (!answered || shown === null) {
       problems.push(
@@ -1509,6 +1599,16 @@ export function humanGateProblems(
       problems.push(
         `The question the human answered did not list these operation targets word for word: ${missing.map((target) => `"${target}"`).join(", ")}. Ask again with each target in the context.`,
       );
+    }
+  }
+  if (workspaceDirectories.length > 0) {
+    const missing = shown === null ? [] : workspaceDirectories.filter((directory) => !shown.includes(normalize(directory)));
+    if (!answered || shown === null) {
+      problems.push(
+        `Working in the human's existing workspace needs their approval: ask with coordinator_ask_human, writing each workspace directory word for word (${workspaceDirectories.join(", ")}), and plan after the answer.`,
+      );
+    } else if (missing.length > 0) {
+      problems.push(`The question the human answered did not show these workspace directories word for word: ${missing.join(", ")}. Ask again with each directory in the context.`);
     }
   }
   return problems;
@@ -1535,11 +1635,29 @@ function questionText(question: NonNullable<CoordinatorRequest["lastQuestion"]>)
 export function validatePlan(
   plan: {
     title: string;
-    tasks: readonly { number: number; name: string; projectId: string; dependsOn: readonly number[]; kind?: "code" | "operation"; targets?: readonly string[] }[];
+    readOnly?: boolean;
+    tasks: readonly {
+      number: number;
+      name: string;
+      projectId: string;
+      dependsOn: readonly number[];
+      kind?: "code" | "operation";
+      targets?: readonly string[];
+      workspaceId?: string;
+    }[];
   },
   language: "en" | "ko",
   usableProjects: ReadonlySet<string>,
-  existing: readonly { number: number; projectId: string; dependsOn: readonly number[]; kind?: "code" | "operation"; status?: string }[] = [],
+  existing: readonly {
+    number: number;
+    projectId: string;
+    dependsOn: readonly number[];
+    kind?: "code" | "operation";
+    status?: string;
+    existingWorkspaceId?: string | null;
+  }[] = [],
+  /** 사람이 새 요청 창에서 고른 기존 워크스페이스(projectId → workspaceId). */
+  humanWorkspaces: Readonly<Record<string, string>> = {},
 ): string[] {
   const problems: string[] = [];
   const numbers = plan.tasks.map((task) => task.number);
@@ -1598,6 +1716,75 @@ export function validatePlan(
       problems.push(
         `Task ${task.number} depends on tasks ${[from, ...missing].join(", ")} in the same project, but only continues task ${from}'s worktree, so the changes of task ${missing.join(", ")} would not be there. Chain them.`,
       );
+    }
+  }
+  problems.push(...existingWorkspaceProblems(plan, all, existing, continuesFrom, humanWorkspaces));
+  return problems;
+}
+
+type PlanTask = {
+  number: number;
+  projectId: string;
+  dependsOn: readonly number[];
+  kind?: "code" | "operation";
+  status?: string;
+  workspaceId?: string;
+  existingWorkspaceId?: string | null;
+};
+
+/**
+ * 기존 워크스페이스는 사람의 작업 트리 하나라 한 번에 한 워커만 쓴다. 두 워커가 동시에 고치면 서로의 변경이 커밋에 섞인다.
+ * 그래서 같은 워크스페이스의 작업은 의존으로 앞뒤가 정해져야 한다. 앞 작업의 worktree 를 이어 쓰는 작업은 그 워크스페이스를
+ * 물려받으므로 다른 워크스페이스를 적을 수 없다. 읽기 조사는 아무것도 바꾸지 않아 함께 돌아도 된다.
+ */
+function existingWorkspaceProblems(
+  plan: { readOnly?: boolean; tasks: readonly PlanTask[] },
+  all: readonly PlanTask[],
+  existing: readonly PlanTask[],
+  continuesFrom: (task: PlanTask) => number | null,
+  humanWorkspaces: Readonly<Record<string, string>>,
+): string[] {
+  const problems: string[] = [];
+  const byNumber = new Map(all.map((task) => [task.number, task]));
+  const explicit = (task: PlanTask) => task.existingWorkspaceId ?? task.workspaceId ?? humanWorkspaces[task.projectId] ?? null;
+  const effective = (task: PlanTask): string | null => {
+    const own = explicit(task);
+    if (own) return own;
+    const from = continuesFrom(task);
+    return from === null ? null : effective(byNumber.get(from)!);
+  };
+  for (const task of plan.tasks) {
+    const own = explicit(task);
+    const from = continuesFrom(task);
+    const inherited = from === null ? null : effective(byNumber.get(from)!);
+    if (own && from !== null && inherited !== own) {
+      problems.push(
+        `Task ${task.number} continues task ${from}'s ${inherited ? `workspace ${inherited}` : "new worktree"}, so it cannot run in workspace ${own}. Drop workspaceId, or do not make it depend on task ${from}.`,
+      );
+    }
+  }
+  if (plan.readOnly) return problems;
+  const reaches = (from: number, target: number, seen = new Set<number>()): boolean => {
+    if (seen.has(from)) return false;
+    seen.add(from);
+    const task = byNumber.get(from);
+    return Boolean(task?.dependsOn.some((dep) => dep === target || reaches(dep, target, seen)));
+  };
+  // 끝난 작업은 워크스페이스를 더 쓰지 않는다. 대기·실행·막힘인 작업과 새 작업만 순서를 본다.
+  const active = [...existing.filter((task) => ["waiting", "running", "blocked"].includes(task.status ?? "")), ...plan.tasks];
+  const groups = new Map<string, number[]>();
+  for (const task of active) {
+    const workspace = effective(task);
+    if (workspace) groups.set(workspace, [...(groups.get(workspace) ?? []), task.number]);
+  }
+  for (const [workspace, numbers] of groups) {
+    const sorted = [...new Set(numbers)].sort((a, b) => a - b);
+    for (let index = 1; index < sorted.length; index += 1) {
+      if (!reaches(sorted[index]!, sorted[index - 1]!)) {
+        problems.push(
+          `Tasks ${sorted[index - 1]} and ${sorted[index]} would both work in existing workspace ${workspace} at the same time. Make task ${sorted[index]} depend on task ${sorted[index - 1]}, or merge them.`,
+        );
+      }
     }
   }
   return problems;

@@ -1,12 +1,14 @@
-import type { ProjectRef } from "@getpaseo/plugin/client";
-import { useProject, useProjects, useRpc, useSettings } from "@getpaseo/plugin/client";
+import type { ProjectRef, WorkspaceRef } from "@getpaseo/plugin/client";
+import { useProject, useProjects, useRpc, useSettings, useWorkspace, useWorkspaces } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 import { Text, TextInput, View } from "react-native";
-import { createRequestRpc } from "../shared/model";
+import { createRequestRpc, pluginWorkspaceIds } from "../shared/model";
 import { coordinatorSettings } from "../shared/settings";
 import { BranchPicker } from "./branch-picker";
+import { useCoordinatorState } from "./coordinator-state";
 import { ChoiceBox, CtaButton, type ViewContext } from "./ui";
+import { shortPath } from "./workspace-place";
 
 function ProjectToggle({
   projectRef,
@@ -51,6 +53,66 @@ function BaseBranchField({
   );
 }
 
+function WorkspaceChoice({
+  workspaceRef,
+  selected,
+  onPress,
+  ctx,
+}: {
+  workspaceRef: WorkspaceRef;
+  selected: boolean;
+  onPress(): void;
+  ctx: ViewContext;
+}) {
+  const place = useWorkspace(workspaceRef, (w) => ({ name: w.title ?? w.name, branch: w.branch, directory: w.directory }));
+  if (!place) return null;
+  return (
+    <ChoiceBox
+      label={place.name}
+      detail={[place.branch, shortPath(place.directory)].filter(Boolean).join(" · ")}
+      selected={selected}
+      onPress={onPress}
+      theme={ctx.theme}
+    />
+  );
+}
+
+/**
+ * 고른 프로젝트마다 워커가 일할 곳을 고른다. 기본은 새 worktree 다. 내 워크스페이스를 고르면 워커가 그 안에서 새 세션으로
+ * 일한다 (2026-11-26 사용자 결정). 플러그인이 다른 작업에 만든 worktree 와 코디네이터 워크스페이스는 보이지 않는다.
+ */
+function WorkspaceField({
+  projectRef,
+  value,
+  onChange,
+  ctx,
+}: {
+  projectRef: ProjectRef;
+  value: string | null;
+  onChange(workspaceId: string | null): void;
+  ctx: ViewContext;
+}) {
+  const name = useProject(projectRef, (p) => p.displayName);
+  const { state } = useCoordinatorState();
+  const pluginIds = useMemo(() => (state ? pluginWorkspaceIds(state) : new Set<string>()), [state]);
+  const refs = useWorkspaces({
+    hosts: [ctx.hostId],
+    where: (w) => w.projectId === projectRef.id && w.kind !== "directory" && !w.archivingAt && !w.background && !pluginIds.has(w.id),
+    orderBy: ["lastPromptAt", "desc"],
+  });
+  if (refs.length === 0) return null;
+  return (
+    <Field label={ctx.t("request.workspace", { project: name ?? projectRef.id })} hint={ctx.t("request.workspaceHint")} ctx={ctx}>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+        <ChoiceBox label={ctx.t("request.workspaceNew")} selected={value === null} onPress={() => onChange(null)} theme={ctx.theme} />
+        {refs.map((ref) => (
+          <WorkspaceChoice key={ref.key} workspaceRef={ref} selected={value === ref.id} onPress={() => onChange(ref.id)} ctx={ctx} />
+        ))}
+      </View>
+    </Field>
+  );
+}
+
 function Field({ label, hint, children, ctx }: { label: string; hint?: string; children: ReactNode; ctx: ViewContext }) {
   return (
     <View style={{ gap: 6 }}>
@@ -72,6 +134,7 @@ export function NewRequestPanel({ ctx, locale, onClose }: { ctx: ViewContext; lo
   const [doneCriteria, setDoneCriteria] = useState("");
   const [projectIds, setProjectIds] = useState<string[]>([]);
   const [baseBranches, setBaseBranches] = useState<Record<string, string>>({});
+  const [workspaces, setWorkspaces] = useState<Record<string, string>>({});
   const submit = useMutation({
     mutationFn: () =>
       create({
@@ -79,7 +142,9 @@ export function NewRequestPanel({ ctx, locale, onClose }: { ctx: ViewContext; lo
         doneCriteria: doneCriteria.trim() || null,
         projectIds,
         // 고른 뒤 해제한 프로젝트의 브랜치는 보내지 않는다. server 는 요청에 없는 프로젝트의 브랜치를 거절한다.
-        baseBranches: Object.fromEntries(Object.entries(baseBranches).filter(([id]) => projectIds.includes(id))),
+        // 기존 워크스페이스를 고른 프로젝트는 그 워크스페이스의 브랜치에서 일하므로 기준 브랜치를 보내지 않는다.
+        baseBranches: Object.fromEntries(Object.entries(baseBranches).filter(([id]) => projectIds.includes(id) && !workspaces[id])),
+        workspaces: Object.fromEntries(Object.entries(workspaces).filter(([id]) => projectIds.includes(id))),
         locale,
       }),
     onSuccess: () => onClose(true),
@@ -148,18 +213,32 @@ export function NewRequestPanel({ ctx, locale, onClose }: { ctx: ViewContext; lo
       {allowedRefs
         .filter((ref) => projectIds.includes(ref.id))
         .map((ref) => (
-          <BaseBranchField
-            key={ref.key}
-            projectRef={ref}
-            value={baseBranches[ref.id] ?? null}
-            onChange={(branch) =>
-              setBaseBranches((current) => {
-                const { [ref.id]: _removed, ...rest } = current;
-                return branch ? { ...rest, [ref.id]: branch } : rest;
-              })
-            }
-            ctx={ctx}
-          />
+          <View key={ref.key} style={{ gap: 16 }}>
+            <WorkspaceField
+              projectRef={ref}
+              value={workspaces[ref.id] ?? null}
+              onChange={(workspaceId) =>
+                setWorkspaces((current) => {
+                  const { [ref.id]: _removed, ...rest } = current;
+                  return workspaceId ? { ...rest, [ref.id]: workspaceId } : rest;
+                })
+              }
+              ctx={ctx}
+            />
+            {workspaces[ref.id] ? null : (
+              <BaseBranchField
+                projectRef={ref}
+                value={baseBranches[ref.id] ?? null}
+                onChange={(branch) =>
+                  setBaseBranches((current) => {
+                    const { [ref.id]: _removed, ...rest } = current;
+                    return branch ? { ...rest, [ref.id]: branch } : rest;
+                  })
+                }
+                ctx={ctx}
+              />
+            )}
+          </View>
         ))}
       <Field label={ctx.t("request.doneCriteria")} ctx={ctx}>
         <TextInput

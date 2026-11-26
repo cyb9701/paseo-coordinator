@@ -9,6 +9,7 @@ import { COLUMN_KEYS, type ColumnKey, columnColor, columnRank } from "./agent-st
 import { useClassifier } from "./pending-store";
 import { formatAgo } from "./time";
 import { ProjectTag, type ViewContext } from "./ui";
+import { WorkspacePlace } from "./workspace-place";
 
 type Board = Map<string, Map<ColumnKey, readonly AgentRef[]>>;
 
@@ -51,8 +52,6 @@ function WorkspaceCell({ workspaceId, ctx }: { workspaceId: string; ctx: ViewCon
   const workspace = useWorkspace(workspaceId, (w) => ({
     project: w.projectDisplayName,
     name: w.title ?? w.name,
-    branch: w.branch,
-    diff: w.diffStat,
     enteredAt: w.statusEnteredAt ?? w.lastPromptAt,
   }));
   if (!workspace) return null;
@@ -62,12 +61,7 @@ function WorkspaceCell({ workspaceId, ctx }: { workspaceId: string; ctx: ViewCon
       <Text numberOfLines={2} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta }}>
         {workspace.name}
       </Text>
-      {workspace.branch ? (
-        <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
-          {workspace.branch}
-          {workspace.diff ? `  +${workspace.diff.additions} −${workspace.diff.deletions}` : ""}
-        </Text>
-      ) : null}
+      <WorkspacePlace workspaceId={workspaceId} showDiff ctx={ctx} />
       {workspace.enteredAt ? (
         <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
           {formatAgo(workspace.enteredAt, ctx.now, ctx.t)}

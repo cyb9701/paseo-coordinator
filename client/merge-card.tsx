@@ -2,12 +2,13 @@ import { openExternalUrl, useRpc } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Text, TextInput, View } from "react-native";
-import { type CoordinatorRequest, type Task, askCoordinatorRpc, closeCompletionRpc, completionNeedsDecision } from "../shared/model";
+import { type CoordinatorRequest, type Task, askCoordinatorRpc, chainEndingAt, closeCompletionRpc, completionNeedsDecision } from "../shared/model";
 import { columnColor } from "./agent-state";
 import { DecisionList } from "./decision-history";
 import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
 import { Chip, CtaButton, Decide, Fold, GradeBadge, Lines, Row, type ViewContext } from "./ui";
+import { WorkspacePlace } from "./workspace-place";
 
 /**
  * PR 머지 카드 (내 결정 필요, 7단계). PR 도 남은 변경도 없이 끝난 작업(운영 작업, 바뀐 것 없음)은 같은 카드로 '확인 필요'에 온다. 워커가 report_done 으로 완료를 보고했고, 사람의 마지막 결정인 머지만 남았다.
@@ -37,7 +38,11 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
   if (!completion) return null;
   const pr = completion.pr;
   // 같은 worktree 를 이어 쓴 앞 작업들도 이 PR 에 들어 있다. 그 작업들의 보고도 함께 보여준다.
-  const chain = request.tasks.filter((item) => item.workspaceId && item.workspaceId === task.workspaceId && item.completion);
+  // 사람의 기존 워크스페이스는 사슬 밖의 작업도 쓰므로 이어 쓰기 사슬로 묶는다.
+  const existing = Boolean(task.existingWorkspaceId);
+  const chain = existing
+    ? chainEndingAt(request, task).filter((item) => item.completion)
+    : request.tasks.filter((item) => item.workspaceId && item.workspaceId === task.workspaceId && item.completion);
   const busy = action.isPending;
   const accent = columnColor(completionNeedsDecision(task) ? "react" : "review", ctx.theme);
   const operation = task.kind === "operation";
@@ -69,7 +74,15 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
     >
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
         <Chip
-          label={pr ? ctx.t("mergeCard.kind") : operation ? ctx.t("mergeCard.kindOperation") : ctx.t("mergeCard.kindNoPr")}
+          label={
+            pr
+              ? ctx.t("mergeCard.kind")
+              : operation
+                ? ctx.t("mergeCard.kindOperation")
+                : completion.noPrSource === "existingWorkspace"
+                  ? ctx.t("mergeCard.kindExisting")
+                  : ctx.t("mergeCard.kindNoPr")
+          }
           color={accent}
           theme={ctx.theme}
         />
@@ -117,6 +130,8 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
                 <Text style={body}>{ctx.t("mergeCard.noPrOperation")}</Text>
                 <Lines items={task.targets} ctx={ctx} />
               </>
+            ) : completion.noPrSource === "existingWorkspace" ? (
+              <Text style={body}>{ctx.t("mergeCard.noPrExisting", { branch: task.branch ?? "" })}</Text>
             ) : completion.noPrSource === "localBase" ? (
               <Text style={body}>{ctx.t("mergeCard.noPrLocalBase")}</Text>
             ) : completion.noPrSource === "request" && completion.noPrReason ? (
@@ -129,6 +144,7 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
             ) : (
               <Text style={body}>{ctx.t("mergeCard.noPr")}</Text>
             )}
+            {existing && task.workspaceId ? <WorkspacePlace workspaceId={task.workspaceId} ctx={ctx} /> : null}
             {completion.unpublished ? (
               <>
                 <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>{ctx.t("mergeCard.unpublished")}</Text>
@@ -178,12 +194,28 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
       />
 
       <Decide
-        question={pr ? ctx.t("mergeCard.decide", { base: pr.baseRefName }) : completion.unpublished ? ctx.t("mergeCard.decideKeep") : ctx.t("mergeCard.decideNoPr")}
+        question={
+          pr
+            ? ctx.t("mergeCard.decide", { base: pr.baseRefName })
+            : existing
+              ? ctx.t("mergeCard.decideExisting")
+              : completion.unpublished
+                ? ctx.t("mergeCard.decideKeep")
+                : ctx.t("mergeCard.decideNoPr")
+        }
         ctx={ctx}
       />
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         <CtaButton
-          label={pr ? ctx.t("mergeCard.merge") : completion.unpublished ? ctx.t("mergeCard.confirmKeep") : ctx.t("mergeCard.confirm")}
+          label={
+            pr
+              ? ctx.t("mergeCard.merge")
+              : existing
+                ? ctx.t("mergeCard.confirmExisting")
+                : completion.unpublished
+                  ? ctx.t("mergeCard.confirmKeep")
+                  : ctx.t("mergeCard.confirm")
+          }
           tone="primary"
           disabled={busy || conflicting}
           theme={ctx.theme}

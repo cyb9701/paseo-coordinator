@@ -142,9 +142,10 @@ export const completionSchema = z.object({
    * PR 없이 끝난 이유의 출처. 플러그인이 정한다. 카드가 '요청대로 PR 을 만들지 않았어요'라고 말하려면 실제로 사람의 요청이어야 한다
    * (r15: 코디네이터가 쓴 작업 범위를 인용했는데 카드는 사람의 요청인 것처럼 보였다, 2026-11-26 전수 검사).
    * request: 사람의 요청 문장, operation: 운영 작업이라 PR 이 없음, localBase: 기준 브랜치가 이 컴퓨터에만 있음,
-   * noChanges: 바뀐 것이 없음.
+   * noChanges: 바뀐 것이 없음. existingWorkspace: 사람의 기존 워크스페이스에서 일해 그 브랜치에 커밋만 남김. 머지는 사람이
+   * 원래 하던 방식으로 한다 (2026-11-26 사용자 결정: 기존 워크스페이스의 코드 작업은 커밋까지만).
    */
-  noPrSource: z.enum(["request", "operation", "localBase", "noChanges"]).nullable().default(null),
+  noPrSource: z.enum(["request", "operation", "localBase", "noChanges", "existingWorkspace"]).nullable().default(null),
   /**
    * PR 에 담기지 않은 채 worktree 에 남은 변경 (플러그인이 git 으로 확인). 있으면 확인해도 워크스페이스를 지우지 않는다.
    * 지우면 커밋하지 않은 작업이 사라지기 때문이다.
@@ -187,6 +188,15 @@ export const taskSchema = z.object({
    * 브랜치에만 있을 때), 비어 있으면 배정할 때 플러그인이 정해 채운다 (server/branches.ts 의 우선순위).
    */
   baseBranch: z.string().nullable().default(null),
+  /**
+   * 새 worktree 를 만들지 않고 일할 사람의 기존 Paseo 워크스페이스. 사람이 새 요청 창에서 골랐거나, 코디네이터가 찾아 질문 카드로
+   * 승인받은 것이다. 같은 worktree 를 이어 쓰는 뒤 작업도 배정할 때 물려받는다. 이 값이 있으면 플러그인은 그 워크스페이스를
+   * archive 하지 않고 브랜치도 지우지 않는다. 사람의 것이기 때문이다 (2026-11-26 사용자 결정: r17 에서 앱 실행은 Orca worktree 에서
+   * 했는데 쓰지 않는 coord/* worktree 가 따로 생겼다).
+   */
+  existingWorkspaceId: z.string().nullable().default(null),
+  /** 기존 워크스페이스에서 워커를 시작할 때의 HEAD. 완료 때 워커가 만든 커밋을 이것부터 센다. */
+  startCommit: z.string().nullable().default(null),
   /** 막힌 이유나 배정 실패 이유. 사람이 카드에서 읽는다. */
   note: z.string().nullable().default(null),
   blocker: blockerSchema.nullable().default(null),
@@ -238,6 +248,11 @@ export const requestSchema = z.object({
   projectIds: z.array(z.string()),
   /** 사람이 새 요청 창에서 프로젝트별로 고른 기준 브랜치. 코디네이터가 바꿀 수 없다. 없으면 코디네이터와 설정이 정한다. */
   baseBranches: z.record(z.string(), z.string()).default({}),
+  /**
+   * 사람이 새 요청 창에서 프로젝트별로 고른 기존 워크스페이스(projectId → workspaceId). 그 프로젝트의 작업은 새 worktree 대신 이
+   * 워크스페이스에서 새 세션으로 일한다. 코디네이터가 바꿀 수 없다. 기준 브랜치와 함께 고를 수 없다.
+   */
+  workspaces: z.record(z.string(), z.string()).default({}),
   /** 코디네이터가 쓰는 워크스페이스 이름과 카드의 언어. 요청을 만들 때 정해진다. */
   language: z.enum(["en", "ko"]),
   createdAt: z.string(),
@@ -413,6 +428,33 @@ export function continuedBy(request: Pick<CoordinatorRequest, "tasks">, task: Pi
 }
 
 /**
+ * 플러그인이 만든 워커 worktree 의 워크스페이스. 그 작업이 끝나면 플러그인이 archive 하므로 다른 작업의 '기존 워크스페이스'가 될 수
+ * 없다. 코디네이터 워크스페이스도 사람의 작업 공간이 아니다.
+ */
+export function pluginWorkspaceIds(state: Pick<CoordinatorState, "coordinator" | "requests">): Set<string> {
+  const ids = new Set<string>();
+  if (state.coordinator?.workspaceId) ids.add(state.coordinator.workspaceId);
+  for (const request of state.requests) {
+    for (const task of request.tasks) {
+      if (task.workspaceId && !task.existingWorkspaceId) ids.add(task.workspaceId);
+    }
+  }
+  return ids;
+}
+
+/**
+ * 이 작업으로 이어지는 이어 쓰기 사슬: 이 작업과, 이 작업까지 worktree 를 넘겨준 앞 작업들. 한 카드가 사슬 전체의 결과를 보여 주고
+ * 함께 닫는다. 사람의 기존 워크스페이스는 사슬 밖의 작업(뒤에 오는 운영 작업 등)도 쓰므로 워크스페이스 id 로 묶으면 안 된다.
+ */
+export function chainEndingAt(request: Pick<CoordinatorRequest, "tasks">, task: Pick<Task, "number">): Task[] {
+  return request.tasks.filter((item) => {
+    if (item.number === task.number) return true;
+    for (let next = continuedBy(request, item); next; next = continuedBy(request, next)) if (next.number === task.number) return true;
+    return false;
+  });
+}
+
+/**
  * 코디네이터가 아직 처리하지 않은 사람의 마지막 지시(또는 답) 시각. 계획보다 앞선 지시는 그 계획이 반영했고, 코디네이터가
  * 그 뒤에 요청을 읽었으면 처리한 것으로 본다. 처리하지 않은 지시가 있는 요청은 끝내지 않고 다시 알린다.
  */
@@ -503,6 +545,8 @@ export const createRequestRpc = defineRpc({
     projectIds: z.array(z.string()),
     /** projectId → 기준 브랜치. 고른 프로젝트에만 쓸 수 있다. */
     baseBranches: z.record(z.string(), z.string().trim().min(1)).default({}),
+    /** projectId → 기존 워크스페이스 id. 고른 프로젝트에만, 기준 브랜치를 고르지 않은 프로젝트에만 쓸 수 있다. */
+    workspaces: z.record(z.string(), z.string().trim().min(1)).default({}),
     /** 요청을 보낸 앱의 언어. 출력 언어 설정이 auto 일 때 쓴다. */
     locale: z.string(),
   }),

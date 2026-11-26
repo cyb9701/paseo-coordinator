@@ -4,6 +4,7 @@ import { CompletionRunner, reportDoneTool } from "./server/completion";
 import { CoordinatorRuntime, answerCoordinatorPermission, isCoordinatorSession } from "./server/coordinator";
 import { listBranches, resolveBaseRef } from "./server/branches";
 import { Dispatcher } from "./server/dispatcher";
+import { listExistingWorkspaces, pluginWorkspaceIds, workspaceProblem } from "./server/existing-workspace";
 import { COORDINATOR_PROMPT } from "./server/prompt";
 import {
   acknowledge,
@@ -99,10 +100,24 @@ export default function contribute(server: PluginServerContext) {
     return listBranches(root);
   });
   server.handle(createRequestRpc, async (input, { paseo }) => {
-    const result = await createRequest(input, store, settings, async (projectId, branch) => {
-      const root = await projectRoot(paseo, projectId);
-      return Boolean(root && (await resolveBaseRef(root, branch)));
-    });
+    const result = await createRequest(
+      input,
+      store,
+      settings,
+      async (projectId, branch) => {
+        const root = await projectRoot(paseo, projectId);
+        return Boolean(root && (await resolveBaseRef(root, branch)));
+      },
+      async (projectId, workspaceId) => {
+        const [workspaces, state] = await Promise.all([listExistingWorkspaces(paseo, projectId), store.read()]);
+        return workspaceProblem(
+          workspaces.find((item) => item.id === workspaceId),
+          workspaceId,
+          projectId,
+          pluginWorkspaceIds(state),
+        );
+      },
+    );
     // 코디네이터 생성과 알림은 오래 걸릴 수 있어서 요청 저장과 떼어 놓는다. 실패하면 다음 턴 종료 때 다시 시도한다.
     coordinator.notify(paseo).catch(logFailure("notify"));
     return result;

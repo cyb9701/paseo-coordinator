@@ -3,7 +3,7 @@
 import type { PaseoApi } from "./paseo-api";
 import { defineAgentTool } from "@getpaseo/plugin/server";
 import { z } from "zod";
-import { type CoordinatorRequest, type Task, continuedBy, unreadInstructionAt } from "../shared/model";
+import { type CoordinatorRequest, type Task, chainEndingAt, continuedBy, unreadInstructionAt } from "../shared/model";
 import { answeredQa } from "./requests";
 import type { StateStore } from "./store";
 import { type WorkerChannel, queued } from "./worker-channel";
@@ -215,13 +215,40 @@ export async function recordCompletion(
       // 운영 작업은 worktree 의 파일을 바꾸지 않는다. worktree 밖 대상(다른 브랜치 checkout 포함)은 커밋 수로 판정하지 않는다.
       const dirty = await uncommittedChanges(agent.cwd);
       if (dirty) {
+        // 사람의 워크스페이스에서는 그 변경이 사람의 것일 수 있다. 무조건 되돌리라고 하면 사람의 일을 지운다.
         return {
-          text: `This is an operation task, but files in this worktree changed (${dirty}). Undo those changes, or report with report_blocker if they are needed.`,
+          text: task.existingWorkspaceId
+            ? `This is an operation task, but files in this workspace changed (${dirty}). If you changed them, undo only your own changes. If you did not, leave them as they are and report it with report_blocker.`
+            : `This is an operation task, but files in this worktree changed (${dirty}). Undo those changes, or report with report_blocker if they are needed.`,
           isError: true,
         };
       }
       noPrSource = "operation";
       noPrReason = input.noPullRequestReason;
+    } else if (task.existingWorkspaceId) {
+      // 사람의 기존 워크스페이스: 커밋까지만 한다 (2026-11-26 사용자 결정). push 와 PR 은 사람이 자기 방식대로 한다.
+      const dirty = await uncommittedChanges(agent.cwd);
+      if (dirty) {
+        return {
+          text: `Commit your changes on ${task.branch} before reporting (${dirty}). If some of them are not yours, do not commit, undo or stash them: report it with report_blocker.`,
+          isError: true,
+        };
+      }
+      const current = await run("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], agent.cwd).then((out) => out.trim(), () => null);
+      if (current !== task.branch) {
+        return {
+          text: `This workspace is on ${current ?? "a detached HEAD"}, not ${task.branch}. Do not switch branches in the human's workspace; report it with report_blocker.`,
+          isError: true,
+        };
+      }
+      if (!continuedBy(request, task)) {
+        // 같은 워크스페이스를 이어 쓴 앞 작업들의 커밋도 이 카드가 보여 준다. 가장 먼저 시작한 작업의 HEAD 부터 센다.
+        const start = request.tasks
+          .filter((item) => item.existingWorkspaceId === task.existingWorkspaceId && item.startCommit && item.status !== "canceled")
+          .sort((a, b) => a.number - b.number)[0]?.startCommit;
+        const commits = start ? Number((await run("git", ["rev-list", "--count", `${start}..HEAD`], agent.cwd)).trim()) : 0;
+        noPrSource = commits > 0 ? "existingWorkspace" : "noChanges";
+      }
     } else if (!continuedBy(request, task)) {
       pr = await findPullRequest(agent.cwd, task.branch);
       if (!pr) {
@@ -274,6 +301,8 @@ export async function recordCompletion(
   return {
     text: pr
       ? `Recorded with pull request #${pr.number}. End your turn now; the human decides the merge.`
+      : noPrSource === "existingWorkspace"
+        ? `Recorded. Your commits stay on ${task.branch} for the human to review; do not push. End your turn now.`
       : continuedBy(request, task) && task.kind !== "operation"
         ? "Recorded. The next task continues on this branch and opens the pull request. End your turn now."
         : noPrSource === "operation"
@@ -371,9 +400,14 @@ export class CompletionRunner {
     }
     // 이 브랜치를 같이 쓴 작업(앞 작업들)도 함께 끝낸다. 워크스페이스는 하나다.
     // 취소된 작업은 취소로 남긴다. 완료로 바꾸면 하지 않은 일이 끝난 것처럼 보인다.
-    const sharing = request.tasks
-      .filter((item) => item.workspaceId && item.workspaceId === task.workspaceId && item.status !== "canceled")
-      .map((item) => item.number);
+    // 사람의 기존 워크스페이스는 이 요청의 다른 작업(뒤에 올 운영 작업 등)도 쓰므로, 이 작업으로 이어진 사슬만 끝낸다.
+    const sharing = task.existingWorkspaceId
+      ? chainEndingAt(request, task)
+          .filter((item) => item.status === "done")
+          .map((item) => item.number)
+      : request.tasks
+          .filter((item) => item.workspaceId && item.workspaceId === task.workspaceId && item.status !== "canceled")
+          .map((item) => item.number);
     const numbers = [...new Set([task.number, ...sharing])];
     const at = new Date().toISOString();
     await this.store.update((current) => ({
@@ -391,6 +425,8 @@ export class CompletionRunner {
                   {
                     summary: completion.pr
                       ? `Merged #${completion.pr.number} (squash)`
+                      : completion.noPrSource === "existingWorkspace"
+                        ? `Confirmed the commits on ${task.branch}`
                       : completion.noPrSource === "operation"
                         ? "Confirmed the finished operation task"
                         : completion.noPrReason
@@ -406,8 +442,13 @@ export class CompletionRunner {
       },
       result: undefined,
     }));
+    // 사람의 기존 워크스페이스와 그 브랜치는 사람의 것이다. 워커 세션만 닫는다.
+    if (task.existingWorkspaceId) {
+      const agentIds = request.tasks.filter((item) => numbers.includes(item.number) && item.agentId).map((item) => item.agentId!);
+      for (const agentId of agentIds) await paseo.agents.ref(agentId).archive().catch(() => undefined);
+    }
     // PR 에 담기지 않은 변경이 남았으면 워크스페이스를 지우지 않는다. 지우면 그 변경이 사라진다.
-    if (task.workspaceId && !completion.unpublished) {
+    else if (task.workspaceId && !completion.unpublished) {
       const archived = await paseo.workspaces
         .ref(task.workspaceId)
         .archive()
@@ -435,6 +476,8 @@ export class CompletionRunner {
     const source = task.completion?.noPrSource;
     const finish = task.completion?.pr
       ? "Make the change on the same branch, verify it, push, and call report_done again."
+      : task.existingWorkspaceId && task.kind !== "operation"
+        ? `Make the change on ${task.branch}, verify it, commit, and call report_done again. Do not push or open a pull request.`
       : source === "operation"
         ? "Do it within the approved targets of this operation task, verify it, and call report_done again. Do not change files in the worktree."
         : source === "request"

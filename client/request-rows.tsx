@@ -9,6 +9,7 @@ import { requestNeedsReaction } from "./coordinator-state";
 import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
 import { CtaButton, GradeBadge, type ViewContext } from "./ui";
+import { WorkspacePlace } from "./workspace-place";
 
 export type RequestItem = { kind: "planning" } | { kind: "question" } | { kind: "answer" } | { kind: "stall" } | { kind: "task"; task: Task };
 
@@ -108,6 +109,13 @@ function TaskCard({ task, column, ctx }: { task: Task; column: ColumnKey; ctx: V
         </Text>
         <Text style={{ color: columnColor(column, ctx.theme), fontSize: ctx.fonts.meta }}>{ctx.t(`taskStatus.${task.status}`)}</Text>
       </View>
+      {task.existingWorkspaceId ? (
+        <Text style={{ color: ctx.theme.colors.accent, fontSize: ctx.fonts.meta }}>{ctx.t("requestRow.existingWorkspace")}</Text>
+      ) : null}
+      {/* 기존 워크스페이스에서 일할 작업은 시작 전(대기)에도 어디서 일할지 보인다. */}
+      {task.workspaceId || task.existingWorkspaceId ? (
+        <WorkspacePlace workspaceId={(task.workspaceId ?? task.existingWorkspaceId)!} ctx={ctx} />
+      ) : null}
       {task.kind === "operation" ? (
         <Text numberOfLines={2} style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>
           {`${ctx.t("requestRow.operation")} · ${task.targets.join(", ")}`}

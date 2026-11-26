@@ -26,6 +26,8 @@ export async function createRequest(
   settings: Settings,
   /** 사람이 고른 기준 브랜치가 그 프로젝트 저장소에 있는지. 없는 이름을 받아 두면 배정할 때야 막힌다. */
   branchExists: (projectId: string, branch: string) => Promise<boolean> = async () => true,
+  /** 사람이 고른 기존 워크스페이스에서 워커를 띄울 수 없는 이유. 띄울 수 있으면 null. */
+  workspaceProblem: (projectId: string, workspaceId: string) => Promise<string | null> = async () => null,
 ): Promise<{ id: string }> {
   const values = await readSettings(settings);
   // 허용 목록 밖 프로젝트는 여기서 막는다. 화면은 허용된 프로젝트만 보여 주지만, RPC 는 다른 경로로도 불릴 수 있다.
@@ -45,6 +47,19 @@ export async function createRequest(
       throw new Error(say(language, `Branch ${branch} does not exist in project ${projectId}.`, `프로젝트 ${projectId} 에 ${branch} 브랜치가 없어요.`));
     }
   }
+  for (const [projectId, workspaceId] of Object.entries(input.workspaces)) {
+    if (!input.projectIds.includes(projectId)) {
+      throw new Error(say(language, `A workspace was chosen for ${projectId}, which is not in this request.`, `요청에 없는 프로젝트 ${projectId} 에 워크스페이스를 골랐어요.`));
+    }
+    // 기존 워크스페이스는 이미 브랜치가 정해져 있다. 둘 다 받으면 어느 쪽을 따를지 사람이 모른다.
+    if (input.baseBranches[projectId]) {
+      throw new Error(
+        say(language, `Choose either a base branch or an existing workspace for ${projectId}, not both.`, `프로젝트 ${projectId} 에는 기준 브랜치와 기존 워크스페이스 중 하나만 고를 수 있어요.`),
+      );
+    }
+    const problem = await workspaceProblem(projectId, workspaceId);
+    if (problem) throw new Error(say(language, `Cannot work in that workspace: ${problem}.`, `그 워크스페이스에서는 일할 수 없어요: ${problem}.`));
+  }
   return store.update((state) => {
     const used = state.requests.map((request) => Number(request.id.slice(1))).filter(Number.isFinite);
     const id = `r${(used.length > 0 ? Math.max(...used) : 0) + 1}`;
@@ -54,6 +69,7 @@ export async function createRequest(
       doneCriteria: input.doneCriteria || null,
       projectIds: input.projectIds,
       baseBranches: input.baseBranches,
+      workspaces: input.workspaces,
       language,
       createdAt: new Date().toISOString(),
       status: "planning" as const,
@@ -324,7 +340,7 @@ export async function retryTask(
           { ...task, status: "running" as const, note: null, doneNudgedAt: null, decisions },
           `[From the human] ${text ?? "Continue your task from where you stopped."}\nWhen it is finished and verified, call report_done; if you need a decision, call report_blocker.`,
         )
-      : { ...task, status: "waiting" as const, note: null, branch: null, workspaceId: null, decisions };
+      : { ...task, status: "waiting" as const, note: null, branch: null, workspaceId: null, startCommit: null, decisions };
     return {
       state: {
         ...state,
@@ -334,11 +350,13 @@ export async function retryTask(
       },
       // 워커를 만들기 전에 실패한 작업은 워크스페이스만 남았을 수 있다. 새로 배정하면 새 worktree 를 만들므로 옛것은 정리한다.
       // 앞 작업의 worktree 를 이어 쓰던 작업이면 그 워크스페이스는 앞 작업의 것이다. 지우면 앞 작업의 변경이 사라진다
-      // (2026-11-26 최종 검사).
+      // (2026-11-26 최종 검사). 사람의 기존 워크스페이스는 지우지 않는다.
       result: {
         hasWorker: Boolean(task.agentId),
         orphanWorkspaceId:
-          task.agentId || request.tasks.some((other) => other.number !== task.number && other.workspaceId === task.workspaceId)
+          task.agentId ||
+          task.existingWorkspaceId ||
+          request.tasks.some((other) => other.number !== task.number && other.workspaceId === task.workspaceId)
             ? null
             : task.workspaceId,
       },

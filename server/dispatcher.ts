@@ -12,9 +12,12 @@ import { type BaseRef, remoteDefaultBranch, resolveBaseRef } from "./branches";
 import { preapprovedOptions } from "./preapprove";
 import { say } from "./say";
 import { REPORT_BLOCKER_TOOL, recordBlocker, reportBlockerInput } from "./worker-tools";
+import { type ExistingWorkspace, busyReason, listExistingWorkspaces, pluginWorkspaceIds, readCheckout, workspaceProblem } from "./existing-workspace";
 
 type Settings = PluginSettings<typeof settingsSchema>;
-type TaskPatch = Partial<Pick<Task, "status" | "workspaceId" | "agentId" | "branch" | "baseBranch" | "note" | "poteto" | "doneNudgedAt">>;
+type TaskPatch = Partial<
+  Pick<Task, "status" | "workspaceId" | "agentId" | "branch" | "baseBranch" | "note" | "poteto" | "doneNudgedAt" | "existingWorkspaceId" | "startCommit">
+>;
 
 /** 이 라벨로 워커를 알아본다. 코디네이터 라벨과 같은 키를 쓴다. */
 const ROLE_LABEL = "paseo-coordinator.role";
@@ -63,7 +66,9 @@ function nudge(task: Task): string {
   const finish =
     task.kind === "operation"
       ? "call report_done now; operation tasks need no pull request"
-      : "call report_done now, after pushing and opening the pull request if your kickoff told you to (if the human's request says not to, quote it as noPullRequestReason)";
+      : task.existingWorkspaceId
+        ? `call report_done now, after committing your changes on ${task.branch}; do not push or open a pull request`
+        : "call report_done now, after pushing and opening the pull request if your kickoff told you to (if the human's request says not to, quote it as noPullRequestReason)";
   return `[From the coordinator plugin] Your turn ended without report_done. If the task is finished and verified, ${finish}. If you are blocked, call report_blocker instead.`;
 }
 
@@ -119,10 +124,13 @@ function branchFor(request: CoordinatorRequest, task: Task): string {
  * poteto 의 worker.md 는 킥오프가 명시적으로 말할 때만 규칙을 덮어쓴다 (RULES.md §11 등급별 덮어쓰기).
  * poteto 의 Always pause 목록과 H2 의 차이(PR 머지, DB 쓰기, worktree 밖 쓰기, 비밀 파일)를 여기서 막는다.
  */
-function potetoOverride(grade: CoordinatorRequest["grade"], branch: string): string[] {
+function potetoOverride(grade: CoordinatorRequest["grade"], branch: string, existing: boolean): string[] {
+  const reach = existing
+    ? "Go as far as committing on this branch. Do not push it or open a pull request: it is the human's branch."
+    : "Go as far as pushing this branch and opening a pull request from it.";
   return [
     "",
-    `This kickoff overrides worker.md as follows. Your working branch is ${branch}. Go as far as pushing this branch and opening a pull request from it. Do not merge pull requests (including stacked ones or auto-merge), push to any other branch, write to any database in any environment, deploy, send external messages, write outside this worktree, or access secret files. If you need any of those, report it with the report_blocker tool and stop. Make reversible implementation choices yourself and list what you chose and why in report_done.`,
+    `This kickoff overrides worker.md as follows. Your working branch is ${branch}. ${reach} Do not merge pull requests (including stacked ones or auto-merge), push to any other branch, write to any database in any environment, deploy, send external messages, write outside this worktree, or access secret files. If you need any of those, report it with the report_blocker tool and stop. Make reversible implementation choices yourself and list what you chose and why in report_done.`,
     ...(grade === "B"
       ? ["If you must choose a data structure, a public API or a library, do not choose: report the options and your recommendation with report_blocker."]
       : []),
@@ -140,6 +148,8 @@ function kickoff(
   continuesFrom: Task | null,
   poteto: boolean,
   base: BaseRef | null,
+  /** 사람의 기존 워크스페이스에서 일하면 그 폴더. 새 worktree 면 null. */
+  existing: ExistingWorkspace | null = null,
 ): string {
   const readOnly = request.kind === "read";
   const operation = !readOnly && task.kind === "operation";
@@ -171,7 +181,13 @@ function kickoff(
     operation
       ? `- This is an operation task: the human approved these targets outside this worktree, and only these: ${task.targets.map((target) => `"${target}"`).join("; ")}. Do not touch anything else outside this worktree; if you need to, report it with report_blocker. Do not edit, commit or push files of this repository and do not open a pull request.`
       : `- Work only inside this worktree, on branch ${branch}. Do not read or change other worktrees, and do not check out other branches or commits. If the code you need is not in this worktree, report it with report_blocker.`,
-    ...(base && !continuesFrom ? [`- This worktree was cut from ${base.branch}.`] : []),
+    // 사람의 작업 트리다. 사람이 하던 변경이나 다른 세션의 결과를 워커가 정리하거나 되돌리면 사람의 일이 사라진다.
+    ...(existing
+      ? [
+          `- This is the human's own workspace "${existing.name}" (${existing.directory}), not a worktree made for you. The human may use it too: do not switch branches, and do not reset, stash, discard, rebase or amend anything you did not make in this task.`,
+        ]
+      : []),
+    ...(base && !continuesFrom && !existing ? [`- This worktree was cut from ${base.branch}.`] : []),
     ...(continuesFrom
       ? [
           `- Task ${continuesFrom.number} (${continuesFrom.name}) ran before you in this same worktree. Its changes, committed or not, are already here; build on them.`,
@@ -182,7 +198,9 @@ function kickoff(
       : operation
         ? "- Before acting on each target, check that it is still in the state the plan describes. If it is not, do not act on it: report it with report_blocker."
         : successor
-        ? `- You may edit files here, run local builds, tests and linters, and commit. Do not push or open a pull request: task ${successor.number} (${successor.name}) continues in this worktree and opens it.`
+        ? `- You may edit files here, run local builds, tests and linters, and commit. Do not push or open a pull request: task ${successor.number} (${successor.name}) continues in this worktree${existing ? "" : " and opens it"}.`
+        : existing
+          ? `- You may edit files here, run local builds, tests and linters, and commit on ${branch}. Do not push and do not open a pull request: the human reviews these commits and merges ${branch} their own way.`
         : base && !base.remote
           ? `- You may edit files here, run local builds, tests and linters, and commit on ${branch}. Do not push or open a pull request: the base branch ${base.branch} exists only on this machine, so there is nothing on GitHub to open it against. When done, call report_done with noPullRequestReason saying the base branch ${base.branch} is local only.`
           : `- You may edit files here, run local builds, tests and linters, commit, push this branch, and open a pull request from it against ${base ? `${base.branch} (gh pr create --base ${base.branch})` : "the default branch"}.`,
@@ -194,8 +212,10 @@ function kickoff(
       ? `- Finish with a short report in ${language}: what you found, where you found it, and what is left unknown.`
       : operation
         ? `- When every target is done and checked, call the report_done tool as your last action, written in ${language}. In verification, list each target with what you did and how you checked it. No pull request is needed.`
-        : `- When the task is done and verified${successor ? " and committed" : ", pushed, with the pull request open"}, call the report_done tool as your last action, written in ${language}. Done means your verification passed${successor ? "" : " and the pull request exists"}. Never merge it: the human merges from a card. If the human's request says not to commit, push or open a pull request, follow the request and quote it as noPullRequestReason in report_done.`,
-    ...(poteto && !operation ? potetoOverride(request.grade, branch) : []),
+        : existing
+          ? `- When the task is done, verified and committed on ${branch}, call the report_done tool as your last action, written in ${language}. Done means your verification passed and nothing you changed is left uncommitted.`
+          : `- When the task is done and verified${successor ? " and committed" : ", pushed, with the pull request open"}, call the report_done tool as your last action, written in ${language}. Done means your verification passed${successor ? "" : " and the pull request exists"}. Never merge it: the human merges from a card. If the human's request says not to commit, push or open a pull request, follow the request and quote it as noPullRequestReason in report_done.`,
+    ...(poteto && !operation ? potetoOverride(request.grade, branch, Boolean(existing)) : []),
   ].join("\n");
 }
 
@@ -541,8 +561,12 @@ export class Dispatcher {
         ),
       );
     }
-    const branch = continuesFrom?.branch ?? branchFor(request, task);
-    const base = await this.baseFor(request, continuesFrom ?? task, values, project.projectRootPath);
+    // 사람의 기존 워크스페이스에서 일하는 작업. 앞 작업이 그 워크스페이스에서 일했으면 이어 쓰는 뒤 작업도 거기서 일한다.
+    const existingId = continuesFrom ? continuesFrom.existingWorkspaceId : task.existingWorkspaceId;
+    const existing = existingId ? await this.existingFor(paseo, request, task, existingId) : null;
+    if (existing === "busy") return;
+    const branch = existing ? existing.branch : (continuesFrom?.branch ?? branchFor(request, task));
+    const base = existing ? null : await this.baseFor(request, continuesFrom ?? task, values, project.projectRootPath);
     // 두 번 배정되지 않게 워커를 만들기 전에 먼저 실행 중으로 표시한다. 저장하는 순간에 요청과 작업이 그대로인지 확인한다
     // (취소되거나 다시 계획됐으면 시작하지 않는다). 이후 기록은 이 브랜치로 표시한 작업에만 한다.
     const claimed = await this.store.update((state) => {
@@ -550,13 +574,22 @@ export class Dispatcher {
       const target = current?.tasks.find((item) => item.number === task.number);
       if (current?.status !== "running" || target?.status !== "waiting") return { state, result: false };
       return {
-        state: patch(state, request.id, task.number, { status: "running", branch, baseBranch: base?.branch ?? null, note: null }),
+        state: patch(state, request.id, task.number, {
+          status: "running",
+          branch,
+          baseBranch: base?.branch ?? null,
+          note: null,
+          existingWorkspaceId: existingId ?? null,
+          startCommit: existing ? existing.head : null,
+        }),
         result: true,
       };
     });
     if (!claimed) return;
     const title = workspaceTitle(request.title ?? request.id, task);
-    const workspace = continuesFrom?.workspaceId
+    const workspace = existing
+      ? paseo.workspaces.ref(existing.workspace.id)
+      : continuesFrom?.workspaceId
       ? paseo.workspaces.ref(continuesFrom.workspaceId)
       : await paseo.workspaces.create({
           title,
@@ -571,12 +604,12 @@ export class Dispatcher {
             worktreeSlug: branch.replace(/\//g, "-"),
           },
         });
-    if (continuesFrom?.workspaceId) {
-      // 이어 쓰는 워크스페이스는 지금 하는 작업이 보이도록 제목을 바꾼다.
+    if (continuesFrom?.workspaceId && !existing) {
+      // 이어 쓰는 워크스페이스는 지금 하는 작업이 보이도록 제목을 바꾼다. 사람의 워크스페이스 제목은 바꾸지 않는다.
       await workspace.setTitle(title).catch(() => undefined);
     }
     if (!(await this.patchClaimed(request.id, task.number, branch, { workspaceId: workspace.id }))) {
-      if (!continuesFrom) await workspace.archive().catch(() => undefined);
+      if (!continuesFrom && !existing) await workspace.archive().catch(() => undefined);
       return;
     }
     const provider = values.worker.model.split("/")[0]!;
@@ -596,7 +629,8 @@ export class Dispatcher {
         thinkingOptionId: values.worker.effort,
         options: preapprovedOptions(values.worker.model, [REPORT_BLOCKER_TOOL, REPORT_DONE_TOOL]),
       },
-      title: `${task.number} ${task.name}`,
+      // 사람의 워크스페이스에서는 다른 세션 사이에 섞이므로 어느 요청의 워커인지 제목에 남긴다.
+      title: existing ? title : `${task.number} ${task.name}`,
       labels: {
         [ROLE_LABEL]: "worker",
         "paseo-coordinator.request": request.id,
@@ -605,7 +639,7 @@ export class Dispatcher {
     });
     // 운영 작업은 코드를 바꾸지 않아 poteto 의 구현 흐름이 맞지 않는다.
     const poteto = values.poteto && task.kind !== "operation" ? await this.potetoFor(paseo, request, provider, agent.id) : { use: false, note: null };
-    await paseo.agents.ref(agent.id).send(kickoff(request, task, branch, continuesFrom, poteto.use, base));
+    await paseo.agents.ref(agent.id).send(kickoff(request, task, branch, continuesFrom, poteto.use, base, existing?.workspace ?? null));
     // 킥오프를 보낸 뒤에 기록한다. 먼저 기록하면 보정 검사(reconcile)가 프롬프트 전의 쉬는 워커를 끝난 것으로 본다.
     // 그사이 요청이 취소됐거나 다시 계획됐으면 이 워커는 맡을 작업이 없다. 정리한다.
     if (!(await this.patchClaimed(request.id, task.number, branch, { agentId: agent.id, poteto: poteto.use, note: poteto.note }))) {
@@ -613,6 +647,49 @@ export class Dispatcher {
       return;
     }
     console.log(`[coordinator] started ${request.id} task ${task.number} as ${agent.id} on ${branch}${poteto.use ? " with /poteto-mode" : ""}`);
+  }
+
+  /**
+   * 사람의 기존 워크스페이스를 확인한다. 쓸 수 없으면(닫혔거나 다른 프로젝트, 브랜치가 아님) 막힘이 되도록 던진다. 다른 에이전트가
+   * 일하거나 커밋하지 않은 변경이 있으면 작업을 대기로 두고 이유를 카드에 적은 뒤 "busy" 를 돌려준다. 주기 검사가 다시 시도한다.
+   * 읽기 조사는 아무것도 바꾸지 않으므로 기다리지 않는다.
+   */
+  private async existingFor(
+    paseo: PaseoApi,
+    request: CoordinatorRequest,
+    task: Task,
+    workspaceId: string,
+  ): Promise<{ workspace: ExistingWorkspace; branch: string; head: string } | "busy"> {
+    const [workspaces, state] = await Promise.all([listExistingWorkspaces(paseo, task.projectId), this.store.read()]);
+    const workspace = workspaces.find((item) => item.id === workspaceId);
+    const problem = workspaceProblem(workspace, workspaceId, task.projectId, pluginWorkspaceIds(state));
+    if (problem || !workspace) {
+      throw new Error(
+        say(
+          request.language,
+          `Cannot start in the chosen workspace: ${problem}. Open it in Paseo again and restart the task, or cancel it.`,
+          `고른 워크스페이스에서 시작할 수 없어요: ${problem}. Paseo 에서 다시 연 뒤 작업을 다시 시작하거나 취소해 주세요.`,
+        ),
+      );
+    }
+    if (request.kind !== "read") {
+      const busy = await busyReason(paseo, workspace, request.language);
+      if (busy) {
+        if (task.note !== busy) await this.patchTask(request.id, task.number, { note: busy });
+        return "busy";
+      }
+    }
+    const checkout = await readCheckout(workspace.directory);
+    if (!checkout.branch) {
+      throw new Error(
+        say(
+          request.language,
+          `${workspace.name} is not on a branch (detached HEAD). Check out a branch there and restart the task.`,
+          `${workspace.name} 이 브랜치에 있지 않아요(detached HEAD). 브랜치를 checkout 한 뒤 작업을 다시 시작해 주세요.`,
+        ),
+      );
+    }
+    return { workspace, branch: checkout.branch, head: checkout.head };
   }
 
   /**

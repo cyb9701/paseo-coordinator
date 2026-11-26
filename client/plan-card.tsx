@@ -1,5 +1,5 @@
 import type { ProjectRef } from "@getpaseo/plugin/client";
-import { useProject, useProjects, useRpc } from "@getpaseo/plugin/client";
+import { useProject, useProjects, useRpc, useWorkspace } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Text, TextInput, View } from "react-native";
@@ -8,6 +8,7 @@ import { columnColor } from "./agent-state";
 import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
 import { Chip, CtaButton, Decide, Fold, GradeBadge, Lines, Row, type ViewContext } from "./ui";
+import { shortPath } from "./workspace-place";
 
 function ProjectName({ projectRef }: { projectRef: ProjectRef }) {
   const name = useProject(projectRef, (project) => project.displayName);
@@ -25,6 +26,7 @@ function TaskLine({ task, ctx }: { task: Task; ctx: ViewContext }) {
         <Text style={muted}>{projects[0] ? <ProjectName projectRef={projects[0]} /> : task.projectId}</Text>
         {task.dependsOn.length > 0 ? <Text style={muted}>{ctx.t("planCard.dependsOn", { list: task.dependsOn.join(", ") })}</Text> : null}
       </View>
+      {task.existingWorkspaceId ? <ExistingWorkspaceLine workspaceId={task.existingWorkspaceId} ctx={ctx} /> : null}
       {task.kind === "operation" ? (
         // 운영 작업은 worktree 밖을 건드린다. 사람이 승인한 대상이 무엇인지 접지 않고 계획에서 바로 보이게 한다 (RULES.md §2.0).
         <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>
@@ -32,6 +34,16 @@ function TaskLine({ task, ctx }: { task: Task; ctx: ViewContext }) {
         </Text>
       ) : null}
     </View>
+  );
+}
+
+/** 사람의 워크스페이스에 워커가 들어간다는 것을 접지 않고 보인다. 새 worktree 와 달리 사람의 작업 트리와 브랜치에 커밋이 남는다. */
+function ExistingWorkspaceLine({ workspaceId, ctx }: { workspaceId: string; ctx: ViewContext }) {
+  const place = useWorkspace(workspaceId, (w) => ({ name: w.title ?? w.name, directory: w.directory }));
+  return (
+    <Text style={{ color: ctx.theme.colors.accent, fontSize: ctx.fonts.meta }}>
+      {ctx.t("planCard.existingWorkspace", { name: place?.name ?? workspaceId, path: place?.directory ? shortPath(place.directory) : "?" })}
+    </Text>
   );
 }
 

@@ -18,7 +18,7 @@ You write a request
       ├─ investigates first when it must; the report comes back to the coordinator,
       │     which asks you what to change (grade A) or plans it (grades B–D)
       └─ splits a change into tasks, grades it A (high risk) to D (simple), and starts workers
-  → Each worker runs in its own git worktree and branch
+  → Each worker runs in its own git worktree and branch, or in a workspace of yours that you chose
       ├─ needs a decision → report_blocker
       │     ├─ settled by your request or the repo's conventions → coordinator proposes an answer,
       │     │     2–3 fresh read-only reviewer agents check it, all must pass → sent to the worker
@@ -93,6 +93,8 @@ Go to **Settings** (top right):
 <img src="assets/settings.png" alt="Settings: coordinator model and effort, worker model and effort, the /poteto-mode switch, and reviewer models" width="60%">
 
 Then press **+ New request**, describe what you want, and optionally pick projects and a done criterion. Leave projects empty to let the coordinator choose among the allowed ones. For each project you pick you can also choose the base branch: workers branch off it and open pull requests against it. Pick the feature branch when the request builds on work that is not merged yet; otherwise the coordinator decides, then the per-project base in settings, then the remote default branch.
+
+Instead of a new worktree you can pick one of your open workspaces for a project. Workers then continue there in a new session, on the branch checked out there: code tasks commit and do not push or open a pull request, and you merge that branch your own way. A task waits while the workspace has uncommitted changes or another agent is working in it. The coordinator can also propose one of your workspaces, but only after you approve it on a question card. Closing the card closes the worker's session and leaves your workspace and branch alone. The progress board shows each task's branch and worktree path.
 
 <img src="assets/new-request.png" alt="New request panel: a text box for the request, project choices limited to the allowed projects, and an optional done criterion" width="60%">
 

@@ -12,6 +12,11 @@ export async function cleanupTaskWorkspaces(paseo: PaseoApi, tasks: readonly Tas
   const projects = (await paseo.projects.list().catch(() => null))?.projects ?? [];
   const seen = new Set<string>();
   for (const task of tasks) {
+    // 사람의 기존 워크스페이스에서 조사했으면 워크스페이스와 브랜치는 사람의 것이다. 조사 워커 세션만 닫는다.
+    if (task.existingWorkspaceId) {
+      if (task.agentId) await paseo.agents.ref(task.agentId).archive().catch(() => undefined);
+      continue;
+    }
     if (!task.workspaceId || seen.has(task.workspaceId)) continue;
     seen.add(task.workspaceId);
     const archived = await paseo.workspaces
