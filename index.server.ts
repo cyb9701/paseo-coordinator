@@ -1,4 +1,5 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { CompletionRunner, reportDoneTool } from "./server/completion";
 import { COORDINATOR_TOOL_PREFIX, CoordinatorRuntime, isCoordinatorSession } from "./server/coordinator";
 import { Dispatcher } from "./server/dispatcher";
 import { COORDINATOR_PROMPT } from "./server/prompt";
@@ -17,6 +18,7 @@ import { WorkerChannel } from "./server/worker-channel";
 import { isWorkerSession, reportBlockerTool } from "./server/worker-tools";
 import { StateStore } from "./server/store";
 import {
+  closeCompletionRpc,
   enableRuleRpc,
   reviewAutoDecisionRpc,
   acknowledgeRpc,
@@ -37,7 +39,12 @@ export default function contribute(server: PluginServerContext) {
   const store = new StateStore();
   const logFailure = (what: string) => (error: unknown) => console.error(`[coordinator] ${what} failed`, error);
   const channel = new WorkerChannel(store);
-  const dispatcher = new Dispatcher(store, settings, channel);
+  // 변경 요청은 마지막 PR 이 머지되면 끝난다. 그 요청의 코디네이터도 정리한다.
+  const onRequestDone = (paseo: Parameters<typeof coordinator.retire>[0], requestId: string) => {
+    coordinator.retire(paseo, requestId).catch(logFailure("retire coordinator"));
+  };
+  const dispatcher = new Dispatcher(store, settings, channel, onRequestDone);
+  const completions = new CompletionRunner(store, channel, onRequestDone);
   const coordinator = new CoordinatorRuntime(
     store,
     settings,
@@ -50,6 +57,7 @@ export default function contribute(server: PluginServerContext) {
     coordinator.notify(paseo).catch(logFailure("notify"));
   };
   const blockerTool = reportBlockerTool(store, tellCoordinator);
+  const doneTool = reportDoneTool(store);
   const reviews = new ReviewRunner(store, settings, channel);
   coordinator.setReviewRunner(reviews);
   const reviewerTools = reviews.tools((paseo, requestId, taskNumber) => {
@@ -101,6 +109,10 @@ export default function contribute(server: PluginServerContext) {
     await channel.deliver(paseo, input.requestId, input.taskNumber, message);
     return {};
   });
+  server.handle(closeCompletionRpc, async (input, { paseo }) => {
+    await completions.close(paseo, input);
+    return {};
+  });
   server.handle(askCoordinatorRpc, async (input, { paseo }) => {
     const result = await askCoordinator(input, store);
     tellCoordinator(paseo);
@@ -126,8 +138,8 @@ export default function contribute(server: PluginServerContext) {
 
   // 코디네이터 세션에만 전용 도구와 지침을 붙인다. 지침은 세션마다 붙고 에이전트에 저장되지 않는다.
   server.addHook("agent.open.before", async ({ request }) => {
-    // 워커에게는 막혔을 때 보고하는 도구 하나만, 검토자에게는 검토 도구 두 개만 붙인다.
-    if (isWorkerSession(request.labels)) return { ...request, tools: [...request.tools, blockerTool] };
+    // 워커에게는 막힘·완료 보고 도구만, 검토자에게는 검토 도구 두 개만 붙인다.
+    if (isWorkerSession(request.labels)) return { ...request, tools: [...request.tools, blockerTool, doneTool] };
     if (isReviewerSession(request.labels)) return { ...request, tools: [...request.tools, ...reviewerTools] };
     if (!isCoordinatorSession(request.labels)) return request;
     return {
@@ -167,8 +179,12 @@ export default function contribute(server: PluginServerContext) {
         .catch(logFailure("answer reviewer permission"));
       return;
     }
-    // 워커가 report_blocker 를 부를 때 권한 확인이 뜨면 허용한다. 막힘을 보고하는 일 자체가 사람을 기다리면 안 된다.
-    if (request.kind === "tool" && request.name.includes("report_blocker") && (await dispatcher.findWorker(agent.id))) {
+    // 워커가 보고 도구를 부를 때 권한 확인이 뜨면 허용한다. 보고하는 일 자체가 사람을 기다리면 안 된다.
+    if (
+      request.kind === "tool" &&
+      (request.name.includes("report_blocker") || request.name.includes("report_done")) &&
+      (await dispatcher.findWorker(agent.id))
+    ) {
       await paseo.agents
         .ref(agent.id)
         .respondToPermission({ requestId: request.id, response: { behavior: "allow" } })

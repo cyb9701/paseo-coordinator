@@ -5,6 +5,7 @@ import { Text, TextInput, View } from "react-native";
 import { type CoordinatorRequest, type Task, askCoordinatorRpc, resolveBlockerRpc } from "../shared/model";
 import { columnColor } from "./agent-state";
 import { Lines, Row } from "./plan-card";
+import { DecisionHistory } from "./decision-history";
 import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
 import { Chip, ChoiceBox, CtaButton, type ViewContext } from "./ui";
@@ -78,6 +79,7 @@ export function BlockerCard({ request, task, ctx }: { request: CoordinatorReques
       <Row label={ctx.t("blockerCard.task")} ctx={ctx}>
         <Text style={{ ...body, fontWeight: "600" }}>{`${task.number} ${task.name}`}</Text>
         {task.scope ? <Text style={muted}>{`${ctx.t("blockerCard.scope")}: ${task.scope}`}</Text> : null}
+        <DecisionHistory task={task} ctx={ctx} />
       </Row>
       <Row label={ctx.t("blockerCard.report")} ctx={ctx}>
         <Text selectable style={{ ...body, fontWeight: "600" }}>{blocker.summary}</Text>

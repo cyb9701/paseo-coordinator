@@ -58,7 +58,7 @@ function packet(request: CoordinatorRequest, task: Task): string {
     `Task ${task.number}: ${task.name}`,
     `Scope: ${task.scope}`,
     `Done when: ${task.doneCriteria}`,
-    ...(task.decisions.length ? ["Earlier decisions on this task:", ...task.decisions.map((item) => `- ${item.summary}`)] : []),
+    ...(task.decisions.length ? ["Earlier decisions on this task:", ...task.decisions.flatMap((item) => [`- ${item.summary}`, ...item.qa.map((qa) => `  Q: ${qa.question} / A: ${qa.answer}`)])] : []),
     "",
     "The worker stopped and reported:",
     `- Summary: ${blocker.summary}`,
@@ -233,7 +233,7 @@ export class ReviewRunner {
                           status: "running" as const,
                           note: null,
                           blocker: null,
-                          decisions: [...task.decisions, { summary: `${blocker.summary} → ${proposal.answer}`, by: "coordinator" as const, at }],
+                          decisions: [...task.decisions, { summary: `${blocker.summary} → ${proposal.answer}`, by: "coordinator" as const, at, qa: [] }],
                           autoDecisions: [
                             ...task.autoDecisions,
                             {
@@ -376,7 +376,7 @@ export class ReviewRunner {
                         item.id === input.id ? { ...item, reviewedAt: at, reverted: item.reverted || revert } : item,
                       ),
                       decisions: revert
-                        ? [...task.decisions, { summary: `Reverted: ${decision.answer} → ${input.revertText}`, by: "human" as const, at }]
+                        ? [...task.decisions, { summary: `Reverted: ${decision.answer} → ${input.revertText}`, by: "human" as const, at, qa: [] }]
                         : task.decisions,
                     },
               ),

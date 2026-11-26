@@ -4,12 +4,13 @@ import type { PaseoApi } from "@getpaseo/client";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { CoordinatorRequest, Task } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
+import { continuedBy, finishRequestIfDone } from "./completion";
 import { workspaceTitle } from "./coordinator";
 import type { StateStore } from "./store";
 import type { WorkerChannel } from "./worker-channel";
 
 type Settings = PluginSettings<typeof settingsSchema>;
-type TaskPatch = Partial<Pick<Task, "status" | "workspaceId" | "agentId" | "branch" | "note">>;
+type TaskPatch = Partial<Pick<Task, "status" | "workspaceId" | "agentId" | "branch" | "note" | "poteto" | "doneNudgedAt">>;
 
 /** 이 라벨로 워커를 알아본다. 코디네이터 라벨과 같은 키를 쓴다. */
 const ROLE_LABEL = "paseo-coordinator.role";
@@ -30,16 +31,32 @@ function branchFor(request: CoordinatorRequest, task: Task): string {
 }
 
 /**
- * 워커 첫 프롬프트. 플러그인이 보내므로 Paseo 가 감싸지 않는다 (RULES.md §13). 7단계에서 /poteto-mode 를 앞에 붙인다.
- * 금지 사항은 RULES.md H2 와 같다. 실행 단계의 기계 차단(5단계)이 생기기 전까지는 이 문장이 유일한 방어선이다.
+ * poteto 의 worker.md 는 킥오프가 명시적으로 말할 때만 규칙을 덮어쓴다 (RULES.md §11 등급별 덮어쓰기).
+ * poteto 의 Always pause 목록과 H2 의 차이(PR 머지, DB 쓰기, worktree 밖 쓰기, 비밀 파일)를 여기서 막는다.
  */
-function kickoff(request: CoordinatorRequest, task: Task, branch: string, continuesFrom: Task | null): string {
+function potetoOverride(grade: CoordinatorRequest["grade"], branch: string): string[] {
+  return [
+    "",
+    `This kickoff overrides worker.md as follows. Your working branch is ${branch}. Go as far as pushing this branch and opening a pull request from it. Do not merge pull requests (including stacked ones or auto-merge), push to any other branch, write to any database in any environment, deploy, send external messages, write outside this worktree, or access secret files. If you need any of those, report it with the report_blocker tool and stop. Make reversible implementation choices yourself and list what you chose and why in report_done.`,
+    ...(grade === "B"
+      ? ["If you must choose a data structure, a public API or a library, do not choose: report the options and your recommendation with report_blocker."]
+      : []),
+  ];
+}
+
+/**
+ * 워커 첫 프롬프트. 플러그인이 보내므로 Paseo 가 감싸지 않는다 (RULES.md §13). A·B·C 등급 Claude 워커는 /poteto-mode 로 시작한다.
+ * 금지 사항은 RULES.md H2 와 같다. 명령 단위 차단은 Claude auto 모드와 사용자 권한 규칙(ask: gh pr merge 등)이 맡는다.
+ */
+function kickoff(request: CoordinatorRequest, task: Task, branch: string, continuesFrom: Task | null, poteto: boolean): string {
   const readOnly = request.kind === "read";
   const others = request.tasks
     .filter((other) => other.number !== task.number)
     .map((other) => `- ${other.number} ${other.name}${other.dependsOn.length ? ` (after ${other.dependsOn.join(", ")})` : ""}`);
   const language = request.language === "ko" ? "Korean" : "English";
+  const successor = readOnly ? null : continuedBy(request, task);
   return [
+    ...(poteto ? ["/poteto-mode", ""] : []),
     `You are a worker started by the Paseo Coordinator for request ${request.id}, task ${task.number} of ${request.tasks.length}.`,
     "",
     "The human's request, verbatim:",
@@ -63,10 +80,15 @@ function kickoff(request: CoordinatorRequest, task: Task, branch: string, contin
       : []),
     readOnly
       ? "- This is a read-only investigation. Do not change, create or delete any file. Investigate and report."
-      : "- You may edit files here, run local builds, tests and linters, commit, push this branch, and open a pull request from it.",
+      : successor
+        ? `- You may edit files here, run local builds, tests and linters, and commit. Do not push or open a pull request: task ${successor.number} (${successor.name}) continues in this worktree and opens it.`
+        : "- You may edit files here, run local builds, tests and linters, commit, push this branch, and open a pull request from it against the default branch.",
     "- Never merge pull requests, push to any other branch, force push, write to any database (any environment), deploy, send messages to people, or read or write secret files (.env, keys, credentials).",
     "- If you need a decision the request and scope do not settle, a change to your scope or approach, or you are stuck, call the report_blocker tool with the facts, the options and your recommendation, then end your turn and wait. Do not ask in plain text: only report_blocker reaches the human as a decision card.",
-    `- Finish with a short report in ${language}: what you did, how you verified it, and what is left.`,
+    readOnly
+      ? `- Finish with a short report in ${language}: what you found, where you found it, and what is left unknown.`
+      : `- When the task is done and verified${successor ? " and committed" : ", pushed, with the pull request open"}, call the report_done tool as your last action, written in ${language}. Done means your verification passed${successor ? "" : " and the pull request exists"}. Never merge it: the human merges from a card.`,
+    ...(poteto ? potetoOverride(request.grade, branch) : []),
   ].join("\n");
 }
 
@@ -82,6 +104,7 @@ export class Dispatcher {
     private readonly store: StateStore,
     private readonly settings: Settings,
     private readonly channel: WorkerChannel,
+    private readonly onRequestDone: (paseo: PaseoApi, requestId: string) => void,
   ) {}
 
   async run(paseo: PaseoApi): Promise<void> {
@@ -131,12 +154,41 @@ export class Dispatcher {
     if (outcome.kind === "failed") {
       await this.patchTask(request.id, task.number, { status: "blocked", note: outcome.error.message });
     } else if (outcome.kind === "completed") {
-      await this.patchTask(request.id, task.number, { status: request.kind === "read" ? "done" : "review", note: null });
+      if (request.kind === "read") {
+        await this.patchTask(request.id, task.number, { status: "done", note: null });
+      } else if (!(await this.settleChange(paseo, request, task))) {
+        return;
+      }
     } else {
       return;
     }
     if (request.kind === "read") await this.compileAnswer(paseo, request.id);
+    else if (await finishRequestIfDone(this.store, request.id)) this.onRequestDone(paseo, request.id);
     if (dispatchNext) await this.run(paseo);
+  }
+
+  /**
+   * 변경 작업 워커의 턴이 끝났다 (7단계). report_done 으로 보고했으면 PR 머지 카드로(review), 다음 작업이 같은 브랜치를
+   * 이어 쓰면 끝(done)으로 둔다. 보고 없이 끝났으면 한 번 다시 요청하고, 그래도 없으면 막힌 것으로 둔다.
+   * 상태를 바꿨으면 true, 워커에게 다시 요청해서 아직 진행 중이면 false.
+   */
+  private async settleChange(paseo: PaseoApi, request: CoordinatorRequest, task: Task): Promise<boolean> {
+    if (task.completion) {
+      await this.patchTask(request.id, task.number, { status: continuedBy(request, task) ? "done" : "review", note: null });
+      return true;
+    }
+    if (!task.doneNudgedAt) {
+      await this.patchTask(request.id, task.number, { doneNudgedAt: new Date().toISOString() });
+      await this.channel.deliver(
+        paseo,
+        request.id,
+        task.number,
+        "[From the coordinator plugin] Your turn ended without report_done. If the task is finished and verified, call report_done now (after pushing and opening the pull request if you are the last task on the branch). If you are blocked, call report_blocker instead.",
+      );
+      return false;
+    }
+    await this.patchTask(request.id, task.number, { status: "blocked", note: "The worker ended twice without report_done. Open the worker to see where it stopped." });
+    return true;
   }
 
   /**
@@ -241,6 +293,7 @@ export class Dispatcher {
     // 인박스에 올라온다 (RULES.md §9).
     const modeId =
       request.kind === "read" ? (has("plan") ? "plan" : undefined) : has("auto") ? "auto" : has("acceptEdits") ? "acceptEdits" : undefined;
+    // 킥오프를 보내기 전에 세션이 /poteto-mode 를 실제로 불러왔는지 본다. 그래서 프롬프트 없이 먼저 만든다.
     const agent = await workspace.agents.create({
       config: { provider: values.worker.model, modeId, thinkingOptionId: values.worker.effort },
       title: `${task.number} ${task.name}`,
@@ -249,10 +302,32 @@ export class Dispatcher {
         "paseo-coordinator.request": request.id,
         "paseo-coordinator.task": String(task.number),
       },
-      prompt: kickoff(request, task, branch, continuesFrom),
     });
-    await this.patchTask(request.id, task.number, { agentId: agent.id });
-    console.log(`[coordinator] started ${request.id} task ${task.number} as ${agent.id} on ${branch}`);
+    const poteto = await this.potetoFor(paseo, request, provider, agent.id);
+    await paseo.agents.ref(agent.id).send(kickoff(request, task, branch, continuesFrom, poteto.use));
+    // 킥오프를 보낸 뒤에 기록한다. 먼저 기록하면 보정 검사(reconcile)가 프롬프트 전의 쉬는 워커를 끝난 것으로 본다.
+    await this.patchTask(request.id, task.number, { agentId: agent.id, poteto: poteto.use, note: poteto.note });
+    console.log(`[coordinator] started ${request.id} task ${task.number} as ${agent.id} on ${branch}${poteto.use ? " with /poteto-mode" : ""}`);
+  }
+
+  /**
+   * /poteto-mode 를 쓸지 (RULES.md §11). A·B·C 등급 변경 작업의 Claude 워커만 쓴다. D 는 하위 에이전트 비용이 작업보다 크다.
+   * 읽기 조사는 쓰지 않는다: 플러그인이 A 등급 조사와 일반 읽기 요청을 구분할 수 없고, plan 모드라 poteto 흐름이 맞지 않는다.
+   * pstack 이 설치되지 않았으면 쓰지 않고 이유를 작업 메모에 남긴다.
+   */
+  private async potetoFor(
+    paseo: PaseoApi,
+    request: CoordinatorRequest,
+    provider: string,
+    agentId: string,
+  ): Promise<{ use: boolean; note: string | null }> {
+    if (request.kind !== "change" || !request.grade || request.grade === "D" || provider !== "claude") return { use: false, note: null };
+    const result = await paseo.agents.ref(agentId).commands().catch((error: unknown) => ({
+      commands: [] as { name: string }[],
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    if (result.commands.some((command) => /(^|:)poteto-mode$/.test(command.name.replace(/^\//, "")))) return { use: true, note: null };
+    return { use: false, note: `Started without /poteto-mode: ${result.error ?? "pstack is not loaded in the worker session"}.` };
   }
 
   /** 읽기 조사가 모두 끝났으면 워커들의 마지막 보고를 모아 답변으로 만든다. */

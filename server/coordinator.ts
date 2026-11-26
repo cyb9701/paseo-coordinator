@@ -578,7 +578,7 @@ export class CoordinatorRuntime {
         await this.patchTask(input.requestId, input.taskNumber, (task) => ({
           ...task,
           status: task.status === "review" || task.status === "done" ? ("running" as const) : task.status,
-          decisions: [...task.decisions, { summary: `Coordinator → worker: ${input.message}`, by: "coordinator" as const, at }],
+          decisions: [...task.decisions, { summary: `Coordinator → worker: ${input.message}`, by: "coordinator" as const, at, qa: [] }],
         }));
         return { text: result === "sent" ? "Delivered to the worker." : "The worker is busy; it will receive this after its current turn." };
       },
@@ -900,6 +900,9 @@ export class CoordinatorRuntime {
                       outbox: [],
                       decisions: [],
                       autoDecisions: [],
+                      poteto: false,
+                      completion: null,
+                      doneNudgedAt: null,
                     })),
                   }
                 : item,

@@ -164,6 +164,11 @@ export async function acknowledge({ id }: { id: string }, store: StateStore) {
   return {};
 }
 
+/** 답이 달린 문답만 결정 기록으로 옮긴다. 답을 기다리던 질문은 카드가 닫히면 의미가 없다. */
+export function answeredQa(qa: readonly { question: string; answer: string | null }[]) {
+  return qa.flatMap((item) => (item.answer ? [{ question: item.question, answer: item.answer }] : []));
+}
+
 /**
  * 워커 질문 카드에서 사람이 결정했다. 고른 선택지(또는 직접 쓴 지시)를 워커에게 보낼 문장으로 돌려주고,
  * 카드를 닫고 결정을 기록한다. 보내는 일은 호출한 쪽이 워커 통로로 한다.
@@ -197,7 +202,7 @@ export async function resolveBlocker(
                 tasks: item.tasks.map((t) =>
                   t.number !== task.number
                     ? t
-                    : { ...t, status: "running" as const, note: null, blocker: null, decisions: [...t.decisions, { summary, by: "human" as const, at }] },
+                    : { ...t, status: "running" as const, note: null, blocker: null, decisions: [...t.decisions, { summary, by: "human" as const, at, qa: answeredQa(blocker.qa) }] },
                 ),
               },
         ),

@@ -106,6 +106,40 @@ export const blockerSchema = z.object({
   objections: z.array(z.string()).default([]),
 });
 
+/** PR 정보. 플러그인이 gh 로 직접 읽은 값이다. 워커가 쓴 값을 믿지 않는다. */
+export const pullRequestSchema = z.object({
+  number: z.number().int(),
+  url: z.string(),
+  title: z.string(),
+  state: z.string(),
+  baseRefName: z.string(),
+  headRefName: z.string(),
+  additions: z.number().int(),
+  deletions: z.number().int(),
+  changedFiles: z.number().int(),
+  /** MERGEABLE, CONFLICTING, UNKNOWN */
+  mergeable: z.string(),
+  /** 체크 요약. 'passed 3, failed 1, pending 0' 처럼 플러그인이 만든다. 체크가 없으면 null. */
+  checks: z.string().nullable(),
+  readAt: z.string(),
+});
+
+/**
+ * 워커의 완료 보고 (7단계). 워커가 report_done 으로 보내고, PR 은 플러그인이 gh 로 확인해서 채운다.
+ * 완료 = 검증 통과 + PR 생성 (RULES.md §11). 같은 worktree 를 다음 작업이 이어 쓰면 PR 은 마지막 작업이 만든다.
+ */
+export const completionSchema = z.object({
+  summary: z.string(),
+  verification: z.array(z.string()),
+  /** 워커가 스스로 고른 되돌릴 수 있는 구현 선택. 사람은 머지 카드에서 본다. */
+  choices: z.array(z.object({ choice: z.string(), why: z.string() })),
+  left: z.array(z.string()),
+  pr: pullRequestSchema.nullable(),
+  at: z.string(),
+  /** 머지했거나(PR 있음) 확인한(PR 없음) 시각. */
+  closedAt: z.string().nullable().default(null),
+});
+
 export const taskSchema = z.object({
   number: z.number().int().positive(),
   /** 작업 이름. 워크스페이스 제목 '<요청 이름> · <번호> <작업 이름>'에 그대로 쓴다 (DESIGN.md 이름 규칙). */
@@ -128,7 +162,22 @@ export const taskSchema = z.object({
   /** 워커가 일하는 중이라 아직 보내지 못한 메시지. 워커의 턴이 끝나면 보낸다 (send 는 진행 중인 턴을 끊는다). */
   outbox: z.array(z.object({ text: z.string(), at: z.string() })).default([]),
   /** 이 작업에서 내려진 결정 기록. 관련 결정과 자동 정지(RULES.md §5)에 쓴다. */
-  decisions: z.array(z.object({ summary: z.string(), by: z.enum(["human", "coordinator"]), at: z.string() })).default([]),
+  decisions: z
+    .array(
+      z.object({
+        summary: z.string(),
+        by: z.enum(["human", "coordinator"]),
+        at: z.string(),
+        /** 결정 카드에서 사람이 코디네이터에게 물은 것과 답. 카드가 닫혀도 남도록 결정과 함께 옮긴다. */
+        qa: z.array(z.object({ question: z.string(), answer: z.string() })).default([]),
+      }),
+    )
+    .default([]),
+  /** 워커 킥오프에 /poteto-mode 를 붙였는지. 붙이지 못한 이유는 note 에 남긴다. */
+  poteto: z.boolean().default(false),
+  completion: completionSchema.nullable().default(null),
+  /** report_done 없이 턴을 끝낸 워커에게 다시 요청한 시각. 두 번째도 없으면 막힌 것으로 본다. */
+  doneNudgedAt: z.string().nullable().default(null),
   /** 검토를 통과해 자동으로 워커에게 간 결정. 사람은 확인 필요의 자동 결정 카드로 본다. */
   autoDecisions: z
     .array(
@@ -345,3 +394,18 @@ export function requestProjectIds(request: CoordinatorRequest): string[] {
     ]),
   ];
 }
+
+/**
+ * PR 머지 카드의 결정 (7단계). merge: PR 이 있으면 squash 머지하고 원격 브랜치와 워크스페이스를 정리한다.
+ * PR 이 없는 완료(바뀐 것 없음)는 확인만 한다. revise: 지시를 워커에게 보내고 작업을 다시 실행 중으로 둔다.
+ */
+export const closeCompletionRpc = defineRpc({
+  name: "completions.close",
+  input: z.object({
+    requestId: z.string(),
+    taskNumber: z.number().int().positive(),
+    action: z.enum(["merge", "revise"]),
+    instruction: z.string().trim().nullable(),
+  }),
+  output: z.object({}),
+});

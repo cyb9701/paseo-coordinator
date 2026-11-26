@@ -95,3 +95,23 @@ export function autoDecisionCards(requests: readonly CoordinatorRequest[]) {
     )
     .sort((a, b) => b.decision.at.localeCompare(a.decision.at));
 }
+
+/**
+ * 반응 필요: 워커가 완료를 보고했고 머지(또는 변경 없음 확인)를 기다리는 작업 (7단계). 오래 기다린 순서.
+ * 모든 등급에서 PR 머지는 사람이 한다 (RULES.md H2). A·B 의 완료 판정도 이 카드에서 함께 한다.
+ */
+export function completionCards(requests: readonly CoordinatorRequest[]): { request: CoordinatorRequest; task: Task }[] {
+  return requests
+    .filter((request) => request.status === "running")
+    .flatMap((request) =>
+      request.tasks
+        .filter((task) => task.status === "review" && task.completion && !task.completion.closedAt && !task.blocker)
+        .map((task) => ({ request, task })),
+    )
+    .sort((a, b) => a.task.completion!.at.localeCompare(b.task.completion!.at));
+}
+
+/** 반응 필요에 들어가는 요청 카드 수 (질문, 워커 질문, PR 머지). 사이드바, 탭, 인박스가 같은 수를 보여야 한다. */
+export function requestReactionCount(requests: readonly CoordinatorRequest[]): number {
+  return requests.filter(requestNeedsReaction).length + blockerCards(requests).length + completionCards(requests).length;
+}

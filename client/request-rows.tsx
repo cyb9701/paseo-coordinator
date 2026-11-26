@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { type CoordinatorRequest, type Task, cancelRequestRpc, requestProjectIds } from "../shared/model";
 import { COLUMN_KEYS, type ColumnKey, columnColor } from "./agent-state";
+import { DecisionHistory } from "./decision-history";
 import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
 import { CtaButton, GradeBadge, type ViewContext } from "./ui";
@@ -12,10 +13,12 @@ export type RequestItem = { kind: "planning" } | { kind: "question" } | { kind: 
 
 /**
  * 작업이 놓일 컬럼. 워커가 막힘을 보고했으면, 코디네이터가 판단하는 동안은 '코디네이터 처리 중',
- * 결정 카드가 나오면 '내 결정 필요'다.
+ * 결정 카드가 나오면 '내 결정 필요'다. 완료를 보고하고 머지를 기다리는 작업도 '내 결정 필요'다.
  */
 function taskColumn(task: Task): ColumnKey | null {
   if (task.blocker) return task.blocker.coordinator ? "react" : "auto";
+  // 완료를 보고한 작업은 사람의 머지를 기다린다 (PR 머지 카드).
+  if (task.status === "review" && task.completion && !task.completion.closedAt) return "react";
   return TASK_COLUMNS[task.status];
 }
 
@@ -114,6 +117,7 @@ function TaskCard({ task, column, ctx }: { task: Task; column: ColumnKey; ctx: V
           {task.note}
         </Text>
       ) : null}
+      <DecisionHistory task={task} ctx={ctx} />
       {task.agentId && ctx.navigation ? (
         <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
           <CtaButton
