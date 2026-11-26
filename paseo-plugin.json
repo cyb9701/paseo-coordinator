@@ -1,7 +1,11 @@
 {
   "id": "paseo-coordinator",
   "name": "Coordinator",
-  "media": [],
+  "description": "Turns one request into coordinated coding-agent work across your projects and brings you only the decisions that need a person.",
+  "media": [
+    "assets/merge-card.png",
+    "assets/worker-question-card.png"
+  ],
   "requirements": {
     "paseo": ">=0.17.4"
   }
