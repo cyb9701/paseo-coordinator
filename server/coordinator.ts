@@ -6,7 +6,7 @@ import type { PaseoApi } from "@getpaseo/client";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import { type AgentToolDefinition, defineAgentTool } from "@getpaseo/plugin/server";
 import { z } from "zod";
-import { AUTO_RULES, type CoordinatorRequest, type CoordinatorState, GRADES, type Task } from "../shared/model";
+import { AUTO_RULES, type CoordinatorRequest, type CoordinatorState, GRADES, type Task, cardQa, withCardQa } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
 import { type StateStore, dataDirectory } from "./store";
 import type { ReviewRunner } from "./review";
@@ -110,15 +110,15 @@ function collectDue(state: CoordinatorState, now: number): DueItem[] {
     if (request.status !== "running") continue;
     for (const task of request.tasks) {
       const blocker = task.blocker;
-      if (!blocker) continue;
       // 결정 카드도 검토 중인 제안도 없는 보고만 코디네이터의 일이다.
-      if (!blocker.coordinator && !blocker.proposal) {
+      if (blocker && !blocker.coordinator && !blocker.proposal) {
         const fresh = freshness(blocker.notifiedAt, null, now);
         if (fresh) {
           items.push({ key: `blk:${request.id}:${task.number}:${blocker.at}`, kind: "blocker", requestId: request.id, taskNumber: task.number, freshness: fresh });
         }
       }
-      blocker.qa.forEach((qa, index) => {
+      // 워커 질문 카드와 머지 카드의 질문하기.
+      cardQa(task).forEach((qa, index) => {
         if (qa.answer !== null) return;
         const fresh = freshness(qa.notifiedAt, null, now);
         if (fresh) {
@@ -139,7 +139,7 @@ function describe(items: readonly DueItem[]): string {
   const blockers = of("blocker");
   if (blockers.length) lines.push(`- Worker blockers: ${blockers.join(", ")}. Read them with coordinator_get_request (and coordinator_read_worker if needed). If you can answer under W1, W5 or W7 with none of H1-H6, propose it with coordinator_propose_answer; otherwise write the decision card with coordinator_prepare_decision.`);
   const questions = of("qa");
-  if (questions.length) lines.push(`- Human questions on decision cards: ${questions.join(", ")}. Answer with coordinator_answer_question.`);
+  if (questions.length) lines.push(`- Human questions on decision or merge cards: ${questions.join(", ")}. Answer with coordinator_answer_question. For a merge card, the task's completion report and pull request are in coordinator_get_request, and coordinator_read_worker shows what the worker did.`);
   const feedback = of("feedback");
   if (feedback.length) lines.push(`- New instructions on running requests: ${feedback.join(", ")}. Read them with coordinator_get_request and pass what each affected worker must change with coordinator_message_worker, or ask the human if unclear.`);
   return lines.join("\n");
@@ -320,17 +320,12 @@ export class CoordinatorRuntime {
             notifiedAt: touchesRequest ? now : request.notifiedAt,
             tasks: request.tasks.map((task) => {
               const forTask = mine.filter((item) => item.taskNumber === task.number);
-              if (forTask.length === 0 || !task.blocker) return task;
-              return {
-                ...task,
-                blocker: {
-                  ...task.blocker,
-                  notifiedAt: forTask.some((item) => item.kind === "blocker") ? now : task.blocker.notifiedAt,
-                  qa: task.blocker.qa.map((qa, index) =>
-                    forTask.some((item) => item.kind === "qa" && item.qaIndex === index) ? { ...qa, notifiedAt: now } : qa,
-                  ),
-                },
-              };
+              if (forTask.length === 0) return task;
+              const marked = withCardQa(task, (qa) =>
+                qa.map((entry, index) => (forTask.some((item) => item.kind === "qa" && item.qaIndex === index) ? { ...entry, notifiedAt: now } : entry)),
+              );
+              if (!marked.blocker || !forTask.some((item) => item.kind === "blocker")) return marked;
+              return { ...marked, blocker: { ...marked.blocker, notifiedAt: now } };
             }),
           };
         }),
@@ -536,19 +531,16 @@ export class CoordinatorRuntime {
     return defineAgentTool({
       name: "coordinator_answer_question",
       title: "Answer the human's question",
-      description: "Answer the oldest unanswered question the human asked on a task's decision card. Base it on facts you can cite.",
+      description: "Answer the oldest unanswered question the human asked on a task's decision card or merge card. Base it on facts you can cite.",
       input: z.object({ requestId: z.string(), taskNumber: z.number().int().positive(), answer: z.string().trim().min(1) }),
       execute: async (input) => {
         const found = await this.findTask(input.requestId, input.taskNumber);
-        const index = found?.task.blocker?.qa.findIndex((qa) => qa.answer === null) ?? -1;
-        if (!found?.task.blocker || index < 0) return { text: "There is no unanswered question on this card.", isError: true };
+        const index = found ? cardQa(found.task).findIndex((qa) => qa.answer === null) : -1;
+        if (index < 0) return { text: "There is no unanswered question on this card.", isError: true };
         const at = new Date().toISOString();
-        await this.patchTask(input.requestId, input.taskNumber, (task) => ({
-          ...task,
-          blocker: task.blocker
-            ? { ...task.blocker, qa: task.blocker.qa.map((qa, i) => (i === index ? { ...qa, answer: input.answer, answeredAt: at } : qa)) }
-            : task.blocker,
-        }));
+        await this.patchTask(input.requestId, input.taskNumber, (task) =>
+          withCardQa(task, (qa) => qa.map((entry, i) => (i === index ? { ...entry, answer: input.answer, answeredAt: at } : entry))),
+        );
         return { text: "Answer added to the card." };
       },
     });

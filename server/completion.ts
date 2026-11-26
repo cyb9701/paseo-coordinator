@@ -5,6 +5,7 @@ import type { PaseoApi } from "@getpaseo/client";
 import { defineAgentTool } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import type { CoordinatorRequest, Task } from "../shared/model";
+import { answeredQa } from "./requests";
 import type { StateStore } from "./store";
 import type { WorkerChannel } from "./worker-channel";
 
@@ -180,7 +181,7 @@ export function reportDoneTool(store: StateStore) {
           ...current,
           requests: patchTask(current, request.id, [task.number], (item) => ({
             ...item,
-            completion: { ...report, pr, noPrReason: pr ? null : noPullRequestReason, unpublished, at, closedAt: null },
+            completion: { ...report, pr, noPrReason: pr ? null : noPullRequestReason, unpublished, qa: [], at, closedAt: null },
           })),
         },
         result: undefined,
@@ -259,7 +260,7 @@ export class CompletionRunner {
                         : "Confirmed: finished without changes",
                     by: "human" as const,
                     at,
-                    qa: [],
+                    qa: answeredQa(completion.qa),
                   },
                 ]
               : item.decisions,
@@ -269,10 +270,18 @@ export class CompletionRunner {
     }));
     // PR 에 담기지 않은 변경이 남았으면 워크스페이스를 지우지 않는다. 지우면 그 변경이 사라진다.
     if (task.workspaceId && !completion.unpublished) {
-      await paseo.workspaces
+      const archived = await paseo.workspaces
         .ref(task.workspaceId)
         .archive()
-        .catch((error: unknown) => console.error(`[coordinator] could not archive workspace ${task.workspaceId}`, error));
+        .then(() => true)
+        .catch((error: unknown) => (console.error(`[coordinator] could not archive workspace ${task.workspaceId}`, error), false));
+      // 머지된 브랜치는 로컬에도 남길 이유가 없다. worktree 가 지워진 뒤에만 지울 수 있다.
+      // squash 머지라 git 은 머지된 것으로 알아보지 못하므로 -D 로 지운다. 내용은 기준 브랜치의 squash 커밋에 있다.
+      if (archived && completion.pr && task.branch) {
+        await run("git", ["branch", "-D", task.branch], root).catch((error: unknown) =>
+          console.error(`[coordinator] could not delete local branch ${task.branch}`, error),
+        );
+      }
     }
     if (await finishRequestIfDone(this.store, request.id)) this.onRequestDone(paseo, request.id);
   }
@@ -289,7 +298,10 @@ export class CompletionRunner {
           status: "running" as const,
           completion: null,
           doneNudgedAt: null,
-          decisions: [...item.decisions, { summary: `Asked for changes before merge: ${text}`, by: "human" as const, at, qa: [] }],
+          decisions: [
+            ...item.decisions,
+            { summary: `Asked for changes before merge: ${text}`, by: "human" as const, at, qa: answeredQa(item.completion?.qa ?? []) },
+          ],
         })),
       },
       result: undefined,

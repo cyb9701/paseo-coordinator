@@ -1,6 +1,7 @@
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { RpcInput } from "@getpaseo/plugin";
 import type { cancelRequestRpc, createRequestRpc, recordInstructionRpc } from "../shared/model";
+import { openCard, withCardQa } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
 import type { StateStore } from "./store";
 
@@ -217,7 +218,7 @@ export async function askCoordinator(input: { requestId: string; taskNumber: num
   await store.update((state) => {
     const request = state.requests.find((item) => item.id === input.requestId);
     const task = request?.tasks.find((item) => item.number === input.taskNumber);
-    if (!task?.blocker) throw new Error("This decision card is no longer open.");
+    if (!task || !openCard(task)) throw new Error("This card is no longer open.");
     const entry = { question: input.question, answer: null, at: new Date().toISOString(), answeredAt: null, notifiedAt: null };
     return {
       state: {
@@ -227,9 +228,7 @@ export async function askCoordinator(input: { requestId: string; taskNumber: num
             ? item
             : {
                 ...item,
-                tasks: item.tasks.map((t) =>
-                  t.number === input.taskNumber && t.blocker ? { ...t, blocker: { ...t.blocker, qa: [...t.blocker.qa, entry] } } : t,
-                ),
+                tasks: item.tasks.map((t) => (t.number === input.taskNumber ? withCardQa(t, (qa) => [...qa, entry]) : t)),
               },
         ),
       },

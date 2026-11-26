@@ -6,7 +6,7 @@ Coordinator turns one written request into work done by coding agents across you
 2. A coordinator agent reads the request and the allowed projects. It answers questions about the code directly, asks you when the request can be read more than one way, or splits a change into tasks and grades it from A (high risk) to D (simple).
 3. Each task gets a worker agent in its own git worktree and branch. Workers that need a decision report it with a tool instead of asking in chat.
 4. When the answer is already settled by your request or the repository's conventions, the coordinator proposes it and two or three fresh reviewer agents check it independently. The answer goes to the worker only if every reviewer passes it; you can review and revert it later. Anything else becomes a card for you.
-5. A worker finishes by verifying its work, pushing its branch and opening a pull request. You get a merge card with the report, the choices the worker made on its own and the pull request. Merging from the card squash-merges it, deletes the remote branch and archives the workspace.
+5. A worker finishes by verifying its work, pushing its branch and opening a pull request. You get a merge card with the report, the choices the worker made on its own and the pull request. Merging from the card squash-merges it, deletes the branch and archives the workspace. You can also ask the coordinator about the result or send the worker back with changes.
 
 ## Inbox
 
@@ -33,6 +33,4 @@ Every card reads top to bottom: your request, the task, what was found, the reco
 ## Limits
 
 - Tested on macOS with Paseo 0.17.4.
-- Local `coord/...` branches stay after merging.
-- The merge card has no ask button yet; open the worker to ask it directly.
 - Grade A changes always wait for you, and automatic decisions stop for a rule after you revert two of its last ten.

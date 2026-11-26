@@ -2,7 +2,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Linking, Text, TextInput, View } from "react-native";
-import { type CoordinatorRequest, type Task, closeCompletionRpc } from "../shared/model";
+import { type CoordinatorRequest, type Task, askCoordinatorRpc, closeCompletionRpc } from "../shared/model";
 import { columnColor } from "./agent-state";
 import { DecisionHistory } from "./decision-history";
 import { Lines, Row } from "./plan-card";
@@ -13,18 +13,22 @@ import { Chip, CtaButton, GradeBadge, type ViewContext } from "./ui";
 /**
  * PR 머지 카드 (반응 필요, 7단계). 워커가 report_done 으로 완료를 보고했고, 사람의 마지막 결정인 머지만 남았다.
  * 모든 등급에서 머지는 사람이 한다 (RULES.md H2). A·B 의 완료 판정도 이 카드가 맡는다. 워커가 스스로 고른 것도 여기서 본다.
- * 읽는 순서: 내 요청 → 이 PR 의 작업 → 워커 보고(검증, 고른 것, 남은 것) → PR → 결정할 것 → 버튼.
+ * 읽는 순서: 내 요청 → 이 PR 의 작업 → 워커 보고(검증, 고른 것, 남은 것) → PR → 문답 → 결정할 것 → 버튼.
+ * 질문하기는 그 요청의 코디네이터에게만 묻는다. 워커는 건드리지 않는다.
  */
 export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest; task: Task; ctx: ViewContext }) {
   const close = useRpc(closeCompletionRpc);
-  const [revising, setRevising] = useState(false);
+  const ask = useRpc(askCoordinatorRpc);
+  const [panel, setPanel] = useState<"none" | "revise" | "ask">("none");
   const [text, setText] = useState("");
   const action = useMutation({
-    mutationFn: (kind: "merge" | "revise") =>
-      close({ requestId: request.id, taskNumber: task.number, action: kind, instruction: kind === "revise" ? text : null }),
+    mutationFn: (kind: "merge" | "revise" | "ask") =>
+      kind === "ask"
+        ? ask({ requestId: request.id, taskNumber: task.number, question: text })
+        : close({ requestId: request.id, taskNumber: task.number, action: kind, instruction: kind === "revise" ? text : null }),
     onSuccess: () => {
       setText("");
-      setRevising(false);
+      setPanel("none");
     },
   });
   const completion = task.completion;
@@ -121,6 +125,17 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
         )}
       </Row>
 
+      {completion.qa.length > 0 ? (
+        <Row label={ctx.t("blockerCard.qa")} ctx={ctx}>
+          {completion.qa.map((qa) => (
+            <View key={qa.at} style={{ gap: 2 }}>
+              <Text style={{ ...body, fontWeight: "600" }}>{`Q. ${qa.question}`}</Text>
+              <Text selectable style={qa.answer ? body : muted}>{qa.answer ? `A. ${qa.answer}` : ctx.t("blockerCard.waitingAnswer")}</Text>
+            </View>
+          ))}
+        </Row>
+      ) : null}
+
       <View style={{ borderTopWidth: 1, borderColor: ctx.theme.colors.border, paddingTop: 12 }}>
         <Row label={ctx.t("inbox.decide")} ctx={ctx}>
           <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>
@@ -141,10 +156,16 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
           onPress={() => action.mutate("merge")}
         />
         <CtaButton
-          label={revising ? ctx.t("mergeCard.closeRevise") : ctx.t("mergeCard.revise")}
+          label={panel === "revise" ? ctx.t("mergeCard.closeRevise") : ctx.t("mergeCard.revise")}
           disabled={busy}
           theme={ctx.theme}
-          onPress={() => setRevising((value) => !value)}
+          onPress={() => setPanel((value) => (value === "revise" ? "none" : "revise"))}
+        />
+        <CtaButton
+          label={panel === "ask" ? ctx.t("blockerCard.closeAsk") : ctx.t("blockerCard.ask")}
+          disabled={busy}
+          theme={ctx.theme}
+          onPress={() => setPanel((value) => (value === "ask" ? "none" : "ask"))}
         />
         {pr ? <CtaButton label={ctx.t("mergeCard.openPr")} theme={ctx.theme} onPress={() => void Linking.openURL(pr.url)} /> : null}
         {task.agentId && ctx.navigation ? (
@@ -155,15 +176,15 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
           />
         ) : null}
       </View>
-      {revising ? (
+      {panel !== "none" ? (
         <View style={{ gap: 8 }}>
           <TextInput
             value={text}
             onChangeText={setText}
             multiline
-            placeholder={ctx.t("mergeCard.revisePlaceholder")}
+            placeholder={panel === "ask" ? ctx.t("mergeCard.askPlaceholder") : ctx.t("mergeCard.revisePlaceholder")}
             placeholderTextColor={ctx.theme.colors.foregroundMuted}
-            accessibilityLabel={ctx.t("mergeCard.revisePlaceholder")}
+            accessibilityLabel={panel === "ask" ? ctx.t("mergeCard.askPlaceholder") : ctx.t("mergeCard.revisePlaceholder")}
             style={{
               minHeight: 72,
               padding: 10,
@@ -178,11 +199,11 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
           />
           <View style={{ flexDirection: "row" }}>
             <CtaButton
-              label={ctx.t("mergeCard.sendRevise")}
+              label={panel === "ask" ? ctx.t("blockerCard.sendAsk") : ctx.t("mergeCard.sendRevise")}
               tone="primary"
               disabled={busy || text.trim().length === 0}
               theme={ctx.theme}
-              onPress={() => action.mutate("revise")}
+              onPress={() => action.mutate(panel === "ask" ? "ask" : "revise")}
             />
           </View>
         </View>

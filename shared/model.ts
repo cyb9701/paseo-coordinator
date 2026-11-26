@@ -142,6 +142,8 @@ export const completionSchema = z.object({
    * 지우면 커밋하지 않은 작업이 사라지기 때문이다.
    */
   unpublished: z.string().nullable().default(null),
+  /** 머지 카드에서 사람이 코디네이터에게 물은 것과 그 답. 닫으면 결정 기록으로 옮긴다. */
+  qa: z.array(qaSchema).default([]),
   at: z.string(),
   /** 머지했거나(PR 있음) 확인한(PR 없음) 시각. */
   closedAt: z.string().nullable().default(null),
@@ -294,6 +296,29 @@ export const stateSchema = z.object({
 });
 
 export type Task = z.infer<typeof taskSchema>;
+type CardQa = z.infer<typeof qaSchema>;
+
+/**
+ * 지금 열린 카드(워커 질문 카드 또는 머지 카드)의 문답이 어디 있는지. 질문하기는 두 카드에서 같은 길로 코디네이터에게 간다.
+ * 막힘이 있으면 워커 질문 카드가 먼저다. 머지 카드는 완료를 보고했고 아직 닫히지 않은 작업이다.
+ */
+export function openCard(task: Task): "blocker" | "completion" | null {
+  if (task.blocker) return "blocker";
+  if (task.status === "review" && task.completion && !task.completion.closedAt) return "completion";
+  return null;
+}
+
+export function cardQa(task: Task): readonly CardQa[] {
+  const card = openCard(task);
+  return card === "blocker" ? task.blocker!.qa : card === "completion" ? task.completion!.qa : [];
+}
+
+export function withCardQa(task: Task, change: (qa: CardQa[]) => CardQa[]): Task {
+  const card = openCard(task);
+  if (card === "blocker") return { ...task, blocker: { ...task.blocker!, qa: change(task.blocker!.qa) } };
+  if (card === "completion") return { ...task, completion: { ...task.completion!, qa: change(task.completion!.qa) } };
+  return task;
+}
 export type Question = z.infer<typeof questionSchema>;
 export type Blocker = z.infer<typeof blockerSchema>;
 export type CoordinatorRequest = z.infer<typeof requestSchema>;
