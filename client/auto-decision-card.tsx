@@ -2,7 +2,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Text, TextInput, View } from "react-native";
-import { type CoordinatorRequest, type Task, reviewAutoDecisionRpc } from "../shared/model";
+import { type CoordinatorRequest, type Task, revertRoute, reviewAutoDecisionRpc } from "../shared/model";
 import { columnColor } from "./agent-state";
 import { Lines, Row } from "./plan-card";
 import { ProjectChips } from "./project-chip";
@@ -14,6 +14,8 @@ type AutoDecision = Task["autoDecisions"][number];
 /**
  * 자동 결정 카드 (확인 필요, 6단계). 검토자 전원이 통과시켜 사람 없이 워커에게 간 결정이다.
  * 사람은 나중에 보고 확인하거나, 되돌리고 다른 지시를 보낸다. 되돌린 기록이 쌓이면 그 규칙이 꺼진다 (RULES.md §5).
+ * 작업이 끝나 지시를 보낼 워커가 없으면 되돌리기 대신 '잘못된 결정으로 표시'만 보인다. 되돌린 것처럼 보이면 안 된다
+ * (2026-11-26 전수 검사: 머지한 작업의 되돌리기가 정리된 워커에게 가고 카드는 닫혔다). 서버와 같은 revertRoute 로 판단한다.
  * 읽는 순서: 내 요청 → 이 작업 → 워커 질문 → 코디네이터 답 → 근거 → 검토 → 되돌리는 법 → 결정할 것 → 버튼.
  */
 export function AutoDecisionCard({
@@ -38,6 +40,16 @@ export function AutoDecisionCard({
   const accent = columnColor("review", ctx.theme);
   const body = { color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body } as const;
   const passed = decision.verdicts.filter((item) => item.verdict === "PASS").length;
+  const route = revertRoute(request, task);
+  const markOnly = route.kind === "markOnly";
+  const routeNote =
+    route.kind === "markOnly"
+      ? ctx.t("autoCard.markOnly", { reason: ctx.t(`autoCard.reasons.${route.reason}`) })
+      : route.waitsForDecision
+        ? ctx.t("autoCard.waitsForDecision")
+        : route.kind === "successor"
+          ? ctx.t("autoCard.toSuccessor", { task: route.taskNumber })
+          : null;
   return (
     <View
       style={{
@@ -95,7 +107,7 @@ export function AutoDecisionCard({
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         <CtaButton label={ctx.t("autoCard.acknowledge")} tone="primary" disabled={busy} theme={ctx.theme} onPress={() => action.mutate(null)} />
         <CtaButton
-          label={reverting ? ctx.t("autoCard.closeRevert") : ctx.t("autoCard.revert")}
+          label={reverting ? ctx.t("autoCard.closeRevert") : markOnly ? ctx.t("autoCard.markWrong") : ctx.t("autoCard.revert")}
           disabled={busy}
           theme={ctx.theme}
           onPress={() => setReverting((value) => !value)}
@@ -108,15 +120,16 @@ export function AutoDecisionCard({
           />
         ) : null}
       </View>
+      {routeNote ? <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{routeNote}</Text> : null}
       {reverting ? (
         <View style={{ gap: 8 }}>
           <TextInput
             value={text}
             onChangeText={setText}
             multiline
-            placeholder={ctx.t("autoCard.revertPlaceholder")}
+            placeholder={markOnly ? ctx.t("autoCard.markWrongPlaceholder") : ctx.t("autoCard.revertPlaceholder")}
             placeholderTextColor={ctx.theme.colors.foregroundMuted}
-            accessibilityLabel={ctx.t("autoCard.revertPlaceholder")}
+            accessibilityLabel={markOnly ? ctx.t("autoCard.markWrongPlaceholder") : ctx.t("autoCard.revertPlaceholder")}
             style={{
               minHeight: 72,
               padding: 10,
@@ -131,7 +144,7 @@ export function AutoDecisionCard({
           />
           <View style={{ flexDirection: "row" }}>
             <CtaButton
-              label={ctx.t("autoCard.sendRevert")}
+              label={markOnly ? ctx.t("autoCard.sendMarkWrong") : ctx.t("autoCard.sendRevert")}
               tone="primary"
               disabled={busy || text.trim().length === 0}
               theme={ctx.theme}

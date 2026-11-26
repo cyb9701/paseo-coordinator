@@ -2,7 +2,7 @@ import { openExternalUrl, useRpc } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Text, TextInput, View } from "react-native";
-import { type CoordinatorRequest, type Task, askCoordinatorRpc, closeCompletionRpc } from "../shared/model";
+import { type CoordinatorRequest, type Task, askCoordinatorRpc, closeCompletionRpc, completionNeedsDecision } from "../shared/model";
 import { columnColor } from "./agent-state";
 import { DecisionHistory } from "./decision-history";
 import { Lines, Row } from "./plan-card";
@@ -11,7 +11,7 @@ import { formatAgo } from "./time";
 import { Chip, CtaButton, GradeBadge, type ViewContext } from "./ui";
 
 /**
- * PR 머지 카드 (반응 필요, 7단계). 워커가 report_done 으로 완료를 보고했고, 사람의 마지막 결정인 머지만 남았다.
+ * PR 머지 카드 (내 결정 필요, 7단계). PR 도 남은 변경도 없이 끝난 작업(운영 작업, 바뀐 것 없음)은 같은 카드로 '확인 필요'에 온다. 워커가 report_done 으로 완료를 보고했고, 사람의 마지막 결정인 머지만 남았다.
  * 모든 등급에서 머지는 사람이 한다 (RULES.md H2). A·B 의 완료 판정도 이 카드가 맡는다. 워커가 스스로 고른 것도 여기서 본다.
  * 읽는 순서: 내 요청 → 이 PR 의 작업 → 워커 보고(검증, 고른 것, 남은 것) → PR → 문답 → 결정할 것 → 버튼.
  * 질문하기는 그 요청의 코디네이터에게만 묻는다. 워커는 건드리지 않는다.
@@ -38,7 +38,8 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
   // 같은 worktree 를 이어 쓴 앞 작업들도 이 PR 에 들어 있다. 그 작업들의 보고도 함께 보여준다.
   const chain = request.tasks.filter((item) => item.workspaceId && item.workspaceId === task.workspaceId && item.completion);
   const busy = action.isPending;
-  const accent = columnColor("react", ctx.theme);
+  const accent = columnColor(completionNeedsDecision(task) ? "react" : "review", ctx.theme);
+  const operation = task.kind === "operation";
   const muted = { color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta } as const;
   const body = { color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body } as const;
   const conflicting = pr?.mergeable === "CONFLICTING";
@@ -56,7 +57,11 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
       }}
     >
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
-        <Chip label={pr ? ctx.t("mergeCard.kind") : ctx.t("mergeCard.kindNoPr")} color={accent} theme={ctx.theme} />
+        <Chip
+          label={pr ? ctx.t("mergeCard.kind") : operation ? ctx.t("mergeCard.kindOperation") : ctx.t("mergeCard.kindNoPr")}
+          color={accent}
+          theme={ctx.theme}
+        />
         {request.grade ? <GradeBadge grade={request.grade} label={ctx.t("card.grade", { grade: request.grade })} theme={ctx.theme} /> : null}
         <ProjectChips projectIds={[task.projectId]} ctx={ctx} />
         <Text numberOfLines={1} style={{ ...body, fontWeight: "600", flexShrink: 1 }}>
@@ -113,9 +118,24 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
           </>
         ) : (
           <>
-            <Text style={body}>
-              {completion.noPrReason ? ctx.t("mergeCard.noPrByRequest", { reason: completion.noPrReason }) : ctx.t("mergeCard.noPr")}
-            </Text>
+            {/* 이유의 출처를 구분한다. 코디네이터가 쓴 범위를 '요청대로'라고 보이면 사람이 하지 않은 말을 한 것처럼 된다 (r15). */}
+            {completion.noPrSource === "operation" || operation ? (
+              <>
+                <Text style={body}>{ctx.t("mergeCard.noPrOperation")}</Text>
+                <Lines items={task.targets} ctx={ctx} />
+              </>
+            ) : completion.noPrSource === "localBase" ? (
+              <Text style={body}>{ctx.t("mergeCard.noPrLocalBase")}</Text>
+            ) : completion.noPrSource === "request" && completion.noPrReason ? (
+              <Text style={body}>{ctx.t("mergeCard.noPrByRequest", { reason: completion.noPrReason })}</Text>
+            ) : completion.noPrReason ? (
+              <Text style={body}>{ctx.t("mergeCard.noPrWithReason", { reason: completion.noPrReason })}</Text>
+            ) : completion.unpublished ? (
+              // 이어 쓰던 뒤 작업이 취소돼 PR 을 기다리던 커밋이 남은 경우. '아무것도 바꾸지 않았다'와 함께 보이면 모순이다.
+              <Text style={body}>{ctx.t("mergeCard.noPrYet")}</Text>
+            ) : (
+              <Text style={body}>{ctx.t("mergeCard.noPr")}</Text>
+            )}
             {completion.unpublished ? (
               <>
                 <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>{ctx.t("mergeCard.unpublished")}</Text>
@@ -150,7 +170,7 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
       </View>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         <CtaButton
-          label={pr ? ctx.t("mergeCard.merge") : ctx.t("mergeCard.confirm")}
+          label={pr ? ctx.t("mergeCard.merge") : completion.unpublished ? ctx.t("mergeCard.confirmKeep") : ctx.t("mergeCard.confirm")}
           tone="primary"
           disabled={busy || conflicting}
           theme={ctx.theme}
@@ -189,9 +209,9 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
             value={text}
             onChangeText={setText}
             multiline
-            placeholder={panel === "ask" ? ctx.t("mergeCard.askPlaceholder") : ctx.t("mergeCard.revisePlaceholder")}
+            placeholder={panel === "ask" ? ctx.t("mergeCard.askPlaceholder") : pr ? ctx.t("mergeCard.revisePlaceholder") : ctx.t("mergeCard.revisePlaceholderNoPr")}
             placeholderTextColor={ctx.theme.colors.foregroundMuted}
-            accessibilityLabel={panel === "ask" ? ctx.t("mergeCard.askPlaceholder") : ctx.t("mergeCard.revisePlaceholder")}
+            accessibilityLabel={panel === "ask" ? ctx.t("mergeCard.askPlaceholder") : pr ? ctx.t("mergeCard.revisePlaceholder") : ctx.t("mergeCard.revisePlaceholderNoPr")}
             style={{
               minHeight: 72,
               padding: 10,

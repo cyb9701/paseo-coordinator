@@ -136,8 +136,15 @@ export const completionSchema = z.object({
   choices: z.array(z.object({ choice: z.string(), why: z.string() })),
   left: z.array(z.string()),
   pr: pullRequestSchema.nullable(),
-  /** 요청이 커밋·PR 을 하지 말라고 해서 PR 없이 끝낸 이유. 워커가 쓴다. */
+  /** PR 없이 끝낸 이유. 워커가 쓰고, 출처가 사람의 요청이면 플러그인이 요청 원문에 있는 문장인지 확인한다. */
   noPrReason: z.string().nullable().default(null),
+  /**
+   * PR 없이 끝난 이유의 출처. 플러그인이 정한다. 카드가 '요청대로 PR 을 만들지 않았어요'라고 말하려면 실제로 사람의 요청이어야 한다
+   * (r15: 코디네이터가 쓴 작업 범위를 인용했는데 카드는 사람의 요청인 것처럼 보였다, 2026-11-26 전수 검사).
+   * request: 사람의 요청 문장, operation: 운영 작업이라 PR 이 없음, localBase: 기준 브랜치가 이 컴퓨터에만 있음,
+   * noChanges: 바뀐 것이 없음.
+   */
+  noPrSource: z.enum(["request", "operation", "localBase", "noChanges"]).nullable().default(null),
   /**
    * PR 에 담기지 않은 채 worktree 에 남은 변경 (플러그인이 git 으로 확인). 있으면 확인해도 워크스페이스를 지우지 않는다.
    * 지우면 커밋하지 않은 작업이 사라지기 때문이다.
@@ -155,6 +162,15 @@ export const taskSchema = z.object({
   /** 작업 이름. 워크스페이스 제목 '<요청 이름> · <번호> <작업 이름>'에 그대로 쓴다 (DESIGN.md 이름 규칙). */
   name: z.string(),
   projectId: z.string(),
+  /**
+   * code: 자기 worktree 에서 코드를 바꾸고 PR 을 낸다. operation: worktree 밖의 정해진 대상(브랜치·worktree 정리, 원격 브랜치
+   * 삭제, 앱 실행 등)에 작업하고 PR 없이 끝난다. 운영 작업은 사람이 질문 카드에서 targets 를 승인한 뒤에만 시작한다.
+   * 이 구분이 없을 때 코디네이터가 쓴 범위와 워커 킥오프 규칙(worktree 밖 금지, 다른 브랜치 push 금지)이 부딪혀, 워커가
+   * 범위를 따라 원격 브랜치를 권한 요청 없이 지웠다 (r15, 2026-11-26 사용자 결정으로 운영 작업 종류를 만들었다).
+   */
+  kind: z.enum(["code", "operation"]).default("code"),
+  /** 운영 작업이 건드리는 worktree 밖 대상. 경로, 브랜치, 원격 동작, 실행할 앱처럼 사람이 읽고 승인할 수 있게 적는다. */
+  targets: z.array(z.string()).default([]),
   dependsOn: z.array(z.number().int().positive()),
   /** 이 작업이 하는 일과 하지 않는 일. 워커 킥오프에 그대로 들어간다. */
   scope: z.string().default(""),
@@ -228,6 +244,15 @@ export const requestSchema = z.object({
   status: requestStatus,
   /** 코디네이터가 분류한 뒤 채운다. */
   kind: z.enum(REQUEST_KINDS).nullable().default(null),
+  /**
+   * 이 읽기 조사가 A 등급 변경의 첫 단계인지. 그렇다면 조사가 끝나도 답변 카드로 끝내지 않고 코디네이터에게 돌려준다.
+   * 코디네이터는 조사 결과로 질문 카드를 만들고, 사람이 답하면 실제 변경을 계획한다 (RULES.md §2.0).
+   * 이 표시가 없을 때 '브랜치를 정리해줘' 요청이 조사 답변 카드로 끝났고, 확인을 누르면 아무것도 지우지 않은 채
+   * 요청이 끝났다 (2026-11-26 사용자 피드백, r13~r15).
+   */
+  beforeChange: z.boolean().default(false),
+  /** A 등급 변경 전 조사의 보고. 워커들의 마지막 보고를 모은 것이다. 코디네이터가 질문 카드를 쓸 때 읽고, 질문 카드에도 보인다. */
+  investigation: z.object({ text: z.string(), at: z.string() }).nullable().default(null),
   /** 코디네이터가 계획을 세운 뒤 채운다. */
   title: z.string().nullable(),
   grade: z.enum(GRADES).nullable(),
@@ -252,6 +277,14 @@ export const requestSchema = z.object({
   notifiedAt: z.string().nullable().default(null),
   /** 계획을 마지막으로 제출받은 시각. */
   plannedAt: z.string().nullable().default(null),
+  /**
+   * 사람이 마지막으로 답한 질문 카드. 운영 작업은 이 질문에 그 대상이 그대로 적혀 있어야 시작한다. 관문이 '무언가에 답했다'만
+   * 보면, 대상을 보여 주지 않은 질문의 답으로도 운영 작업이 통과했다 (2026-11-26 최종 검사).
+   */
+  lastQuestion: z
+    .object({ context: z.string(), questions: z.array(questionSchema), answeredAt: z.string() })
+    .nullable()
+    .default(null),
   /** 코디네이터가 사람에게 묻는 질문 카드. 답을 받으면 비운다. */
   question: z
     .object({
@@ -270,6 +303,16 @@ export const requestSchema = z.object({
   coordinatorAgentId: z.string().nullable().default(null),
   /** 사람이 시작 카드나 답변 카드를 확인한 시각. 그 뒤에 새 계획이나 답이 오면 다시 확인 필요가 된다. */
   reviewedAt: z.string().nullable().default(null),
+  /**
+   * 코디네이터가 coordinator_get_request 로 이 요청을 마지막으로 읽은 시각. 실행 중 요청에 온 지시를 코디네이터가 읽었는지
+   * 이것으로 판단해, 알림이 유실되면 다시 알린다 (알림만 기록하면 세션이 다시 열릴 때 메시지가 사라져도 알 수 없었다).
+   */
+  coordinatorReadAt: z.string().nullable().default(null),
+  /**
+   * 코디네이터가 일을 이어 가지 못하는 이유. 만들기 실패, 에러, 다시 알려도 처리하지 않음. 코디네이터는 사람에게 보이지
+   * 않는 에이전트라, 기록하지 않으면 보드에 '계획 세우는 중'만 계속 보인다 (2026-11-26 전수 검사). 내 결정 필요 카드로 보인다.
+   */
+  stall: z.object({ reason: z.string(), at: z.string() }).nullable().default(null),
   /** 읽기 요청에 코디네이터가 직접 쓴 답. */
   answer: z
     .object({
@@ -338,6 +381,117 @@ export type CoordinatorRequest = z.infer<typeof requestSchema>;
 export function hasStarted(request: CoordinatorRequest): boolean {
   return request.tasks.some((task) => task.status !== "waiting" || task.workspaceId !== null || task.agentId !== null);
 }
+
+/**
+ * 시작했고 아직 끝나지 않은 작업이 있는가. 계획 단계의 요청에 끝난 작업이 남는 경우는 읽기 조사뿐이다
+ * (답변 카드의 추가 질문, A 등급 변경 전 조사). 그 작업은 새 답이나 계획으로 바꿔도 잃을 일이 없다.
+ */
+export function hasLiveTasks(request: CoordinatorRequest): boolean {
+  return request.tasks.some(
+    (task) => task.status !== "done" && task.status !== "canceled" && (task.status !== "waiting" || task.workspaceId !== null || task.agentId !== null),
+  );
+}
+/**
+ * 같은 프로젝트의 다음 작업이 이 작업의 worktree 를 이어 쓰는지 (배정기의 continuesFrom 과 같은 규칙).
+ * 이어 쓰면 PR 은 마지막 작업이 만든다. 취소된 뒤 작업은 이어 쓰지 않으므로 세지 않는다. 세면 앞 작업이 '뒤 작업이 PR 을
+ * 낸다'는 이유로 계속 PR 없이 끝난다.
+ */
+export function continuedBy(request: Pick<CoordinatorRequest, "tasks">, task: Pick<Task, "number" | "projectId" | "kind">): Task | null {
+  // 운영 작업은 코드 worktree 를 이어 쓰지도, 넘겨주지도 않는다. 코드 작업 뒤의 운영 작업(예: 머지 뒤 브랜치 정리)이 그 worktree 를
+  // 이어 쓰면 앞 작업이 PR 을 내지 않은 채 끝난다.
+  if (task.kind === "operation") return null;
+  return (
+    request.tasks.find((other) => {
+      if (other.status === "canceled" || other.kind === "operation") return false;
+      if (other.projectId !== task.projectId || !other.dependsOn.includes(task.number)) return false;
+      const sameProject = request.tasks.filter(
+        (dep) => other.dependsOn.includes(dep.number) && dep.projectId === task.projectId && dep.kind !== "operation",
+      );
+      return Math.max(...sameProject.map((dep) => dep.number)) === task.number;
+    }) ?? null
+  );
+}
+
+/**
+ * 코디네이터가 아직 처리하지 않은 사람의 마지막 지시(또는 답) 시각. 계획보다 앞선 지시는 그 계획이 반영했고, 코디네이터가
+ * 그 뒤에 요청을 읽었으면 처리한 것으로 본다. 처리하지 않은 지시가 있는 요청은 끝내지 않고 다시 알린다.
+ */
+export function unreadInstructionAt(
+  request: Pick<CoordinatorRequest, "feedback" | "plannedAt" | "coordinatorReadAt" | "notifiedAt">,
+): string | null {
+  const last = request.feedback.at(-1)?.at;
+  if (!last) return null;
+  // 읽은 시각을 기록하기 전에 저장된 요청은 예전처럼 '알렸으면 처리한 것'으로 본다. 아니면 이미 처리한 지시를 다시 알려
+  // 작업이 두 번 더해질 수 있다.
+  const read = request.coordinatorReadAt ?? request.notifiedAt;
+  const handled = [request.plannedAt, read].filter((value): value is string => Boolean(value)).sort().at(-1);
+  return handled && handled >= last ? null : last;
+}
+
+/**
+ * 사람이 since 뒤에 질문 카드에 답했는가(직접 지시 포함). A 등급 실제 변경과 운영 작업은 이 답이 있어야 시작한다 (RULES.md H4).
+ * 마지막 피드백이 답이어야 한다. 답 뒤에 다른 지시가 왔으면 그 지시를 반영해 다시 물어야 한다.
+ */
+export function humanAnsweredSince(request: Pick<CoordinatorRequest, "feedback">, since: string | null): boolean {
+  const last = request.feedback.at(-1);
+  return last?.kind === "answer" && (!since || last.at > since);
+}
+
+/**
+ * 사람의 답이 무엇보다 늦어야 하는가. 조사 보고나 이전 답이 있으면 그것을 본 뒤의 답이어야 한다.
+ * 조사 전에 받은 해석 질문의 답으로 A 등급 변경이 통과하던 구멍을 막는다 (2026-11-26 전수 검사).
+ */
+export function decisionBasisAt(request: Pick<CoordinatorRequest, "investigation" | "answer">): string | null {
+  const times = [request.investigation?.at, request.answer?.at].filter((value): value is string => Boolean(value));
+  return times.length ? times.sort().at(-1)! : null;
+}
+
+/**
+ * 자동 결정을 되돌리면 지시가 어디로 가는가. 작업이 끝났으면 되돌릴 워커가 없다. 그때는 지시를 보내지 않고
+ * '잘못된 결정'으로만 표시해 자동 정지 집계에 넣는다. 되돌렸다고 믿게 하면 안 된다 (2026-11-26 전수 검사: 머지한 작업의
+ * 되돌리기가 정리된 워커에게 가고 카드는 '되돌림'으로 닫혔다).
+ * - worker: 이 작업의 워커에게 보낸다.
+ * - successor: 같은 worktree 를 이어 쓰는 뒤 작업의 워커에게 보낸다 (앞 워커를 깨우면 두 워커가 한 worktree 에서 일한다).
+ * - markOnly: 보낼 곳이 없다. reason 은 화면과 오류에 쓴다.
+ */
+export type RevertRoute =
+  | { kind: "worker"; taskNumber: number; waitsForDecision: boolean }
+  | { kind: "successor"; taskNumber: number; waitsForDecision: boolean }
+  | { kind: "markOnly"; reason: "requestClosed" | "merged" | "canceled" | "readFinished" };
+
+export function revertRoute(request: CoordinatorRequest, task: Task): RevertRoute {
+  if (request.status === "done" || request.status === "canceled") return { kind: "markOnly", reason: "requestClosed" };
+  if (request.kind === "read") {
+    return request.status === "running" && (task.status === "running" || task.status === "blocked")
+      ? { kind: "worker", taskNumber: task.number, waitsForDecision: Boolean(task.blocker) }
+      : { kind: "markOnly", reason: "readFinished" };
+  }
+  if (request.status !== "running") return { kind: "markOnly", reason: "requestClosed" };
+  if (task.status === "canceled") return { kind: "markOnly", reason: "canceled" };
+  if (task.completion?.closedAt) return { kind: "markOnly", reason: "merged" };
+  if (task.status === "done") {
+    // 이어 쓰기로 끝난 작업이다. 그 worktree 를 지금 쓰는 작업을 찾아간다.
+    let current: Task | null = continuedBy(request, task);
+    while (current && current.status === "done") current = continuedBy(request, current);
+    if (!current || current.status === "canceled") return { kind: "markOnly", reason: "canceled" };
+    if (current.completion?.closedAt) return { kind: "markOnly", reason: "merged" };
+    if (current.status === "waiting") return { kind: "successor", taskNumber: current.number, waitsForDecision: false };
+    return { kind: "successor", taskNumber: current.number, waitsForDecision: Boolean(current.blocker) };
+  }
+  return { kind: "worker", taskNumber: task.number, waitsForDecision: Boolean(task.blocker) };
+}
+
+/**
+ * 완료 카드가 사람의 결정을 기다리는가(내 결정 필요), 아니면 끝난 일을 나중에 확인하면 되는가(확인 필요).
+ * PR 머지는 사람만 하므로 결정이다 (H2). PR 에 없는 변경이 worktree 에 남았으면 사람이 그 변경을 어떻게 할지 정해야 한다.
+ * 그 밖(운영 작업, 바뀐 것 없음)은 이미 끝난 일이라 확인이다. r15 에서 끝난 삭제 작업 8개가 '내 결정 필요'에 쌓여
+ * 66초 동안 확인만 눌렀다 (2026-11-26).
+ */
+export function completionNeedsDecision(task: Task): boolean {
+  const completion = task.completion;
+  return Boolean(completion && (completion.pr || completion.unpublished));
+}
+
 export type SentInstruction = z.infer<typeof sentInstructionSchema>;
 export type CoordinatorState = z.infer<typeof stateSchema>;
 
@@ -361,9 +515,13 @@ export const cancelRequestRpc = defineRpc({
   output: z.object({}),
 });
 
+/**
+ * 사람의 지시. answersQuestion 은 질문 카드의 '직접 지시'에서만 true 다. 보드나 시작 카드에서 보낸 지시가 열린 질문의 답으로
+ * 기록되면 질문 카드가 조용히 닫히고 A 등급·운영 작업 관문이 열렸다 (2026-11-26 최종 검사).
+ */
 export const revisePlanRpc = defineRpc({
   name: "plans.revise",
-  input: z.object({ id: z.string(), text: z.string().trim().min(1) }),
+  input: z.object({ id: z.string(), text: z.string().trim().min(1), answersQuestion: z.boolean().default(false) }),
   output: z.object({}),
 });
 
@@ -373,6 +531,13 @@ export const answerQuestionsRpc = defineRpc({
     id: z.string(),
     answers: z.array(z.object({ question: z.string(), answer: z.string().trim().min(1) })).min(1),
   }),
+  output: z.object({}),
+});
+
+/** 멈춘 코디네이터를 다시 시도한다. 멈춤 기록을 지우고 다시 알린다. */
+export const retryCoordinatorRpc = defineRpc({
+  name: "coordinator.retry",
+  input: z.object({ id: z.string() }),
   output: z.object({}),
 });
 

@@ -11,7 +11,7 @@ import { formatAgo } from "./time";
 import { Chip, ChoiceBox, CtaButton, type ViewContext } from "./ui";
 
 /**
- * 워커 질문 카드 (반응 필요, 4단계). 워커가 report_blocker 로 멈췄고 코디네이터가 판단을 채웠다.
+ * 워커 질문 카드 (내 결정 필요, 4단계). 워커가 report_blocker 로 멈췄고 코디네이터가 판단을 채웠다.
  * 읽는 순서: 내 요청 → 이 작업 → 워커가 보고한 상황 → 코디네이터 판단 → 선택지 → 문답 → 결정할 것 → 버튼.
  * 사람이 고르면 플러그인이 선택지의 지시문을 워커에게 보낸다. 질문하기는 코디네이터에게만 묻고 워커는 건드리지 않는다.
  */

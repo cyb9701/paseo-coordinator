@@ -1,7 +1,7 @@
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { RpcInput } from "@getpaseo/plugin";
-import type { cancelRequestRpc, createRequestRpc, recordInstructionRpc } from "../shared/model";
-import { dependentsOf, hasStarted, openCard, withCardQa } from "../shared/model";
+import type { CoordinatorRequest, cancelRequestRpc, createRequestRpc, recordInstructionRpc } from "../shared/model";
+import { continuedBy, dependentsOf, hasStarted, openCard, withCardQa } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
 import type { StateStore } from "./store";
 import { queued } from "./worker-channel";
@@ -68,10 +68,15 @@ export async function createRequest(
       notifiedAt: null,
       plannedAt: null,
       kind: null,
+      beforeChange: false,
+      investigation: null,
       answer: null,
       question: null,
       reviewedAt: null,
       coordinatorAgentId: null,
+      coordinatorReadAt: null,
+      stall: null,
+      lastQuestion: null,
     };
     return { state: { ...state, requests: [...state.requests, request] }, result: { id } };
   });
@@ -102,26 +107,45 @@ export async function recordInstruction({ agentId, text }: RpcInput<typeof recor
 }
 
 /**
- * 사람의 추가 지시(시작 카드의 수정 지시, 답변 카드의 추가 질문, 질문 카드의 직접 지시).
- * 요청에 남기고 다시 계획 단계로 돌린다. 코디네이터에게는 호출한 쪽이 알린다.
- * 이미 일하는 워커에게 바뀐 내용을 전하는 일은 3e 배정 단계에서 코디네이터가 맡는다.
+ * 사람의 추가 지시(시작 카드·보드의 수정 지시, 답변 카드의 추가 질문, 질문 카드의 직접 지시).
+ * 요청에 남기고, 워커가 아직 일하지 않으면 다시 계획 단계로 돌린다. 코디네이터에게는 호출한 쪽이 알린다.
+ * 워커가 일하는 요청은 진행 중인 채로 두고, 코디네이터가 워커에게 전하거나 작업을 더하거나 뺀다.
+ * 질문 카드의 직접 지시(answersQuestion)는 그 질문에 대한 사람의 답이다. 답으로 기록해야 A 등급 관문이 같은 질문을 다시 묻지
+ * 않는다. 다른 곳에서 보낸 지시는 열린 질문을 닫지 않는다. 계획 전 요청에 질문이 열려 있으면 질문 카드에서 답하게 한다
+ * (보드의 지시가 질문의 답이 되어 카드가 조용히 닫히고 관문이 열렸다, 2026-11-26 최종 검사).
  */
-export async function revisePlan({ id, text }: { id: string; text: string }, store: StateStore) {
+export async function revisePlan(
+  { id, text, answersQuestion = false }: { id: string; text: string; answersQuestion?: boolean },
+  store: StateStore,
+) {
   await store.update((state) => {
     const request = state.requests.find((item) => item.id === id);
     if (!request) throw new Error(`Unknown request ${id}`);
     if (request.status === "done" || request.status === "canceled") {
       throw new Error(say(request.language, `Request ${id} is ${request.status}; it does not take instructions now.`, `요청 ${id} 은 이미 끝나서 지시를 받지 않아요.`));
     }
-    const entry = { text, at: new Date().toISOString(), kind: "instruction" as const };
+    if (answersQuestion && !request.question) {
+      throw new Error(say(request.language, "This question card is no longer open.", "이 질문 카드는 이미 닫혔어요."));
+    }
+    if (!answersQuestion && request.question && request.status === "needs_input") {
+      throw new Error(
+        say(
+          request.language,
+          "The coordinator is waiting for your answer. Answer the question card, or use its instruction field.",
+          "코디네이터가 내 답을 기다리고 있어요. 질문 카드에서 답하거나, 질문 카드의 직접 지시를 써 주세요.",
+        ),
+      );
+    }
+    const at = new Date().toISOString();
+    const entry = { text, at, kind: answersQuestion ? ("answer" as const) : ("instruction" as const) };
+    const answered = answersQuestion ? { question: null, lastQuestion: answeredQuestion(request.question!, at) } : {};
     // 이미 워커가 일하는 요청은 다시 계획하지 않는다(같은 작업이 또 배정된다). 요청은 진행 중인 채로 지시만 남기고,
-    // 코디네이터가 읽어서 관련 워커에게 전한다 (coordinator_message_worker).
-    // 질문 카드의 '직접 지시'로 왔으면 질문은 이 지시로 대신한다.
+    // 코디네이터가 읽어서 워커에게 전하거나 작업을 더하거나 뺀다.
     if (request.status === "running" && hasStarted(request)) {
       return {
         state: {
           ...state,
-          requests: state.requests.map((item) => (item.id === id ? { ...item, question: null, feedback: [...item.feedback, entry] } : item)),
+          requests: state.requests.map((item) => (item.id === id ? { ...item, ...answered, feedback: [...item.feedback, entry] } : item)),
         },
         result: undefined,
       };
@@ -130,13 +154,18 @@ export async function revisePlan({ id, text }: { id: string; text: string }, sto
       state: {
         ...state,
         requests: state.requests.map((item) =>
-          item.id === id ? { ...item, status: "planning" as const, question: null, feedback: [...item.feedback, entry] } : item,
+          item.id === id ? { ...item, ...answered, status: "planning" as const, feedback: [...item.feedback, entry] } : item,
         ),
       },
       result: undefined,
     };
   });
   return {};
+}
+
+/** 답한 질문 카드를 남긴다. 운영 작업 관문이 그 질문에 대상이 적혀 있었는지 본다. */
+function answeredQuestion(question: NonNullable<CoordinatorRequest["question"]>, at: string): NonNullable<CoordinatorRequest["lastQuestion"]> {
+  return { context: question.context, questions: question.questions, answeredAt: at };
 }
 
 /**
@@ -151,17 +180,18 @@ export async function answerQuestions(
     const request = state.requests.find((item) => item.id === id);
     if (!request) throw new Error(`Unknown request ${id}`);
     const running = request.status === "running" && request.question !== null;
-    if (request.status !== "needs_input" && !running) {
+    if ((request.status !== "needs_input" && !running) || !request.question) {
       throw new Error(say(request.language, `Request ${id} is ${request.status}, not waiting for answers.`, `요청 ${id} 은 답을 기다리고 있지 않아요.`));
     }
     const at = new Date().toISOString();
     const entries = answers.map(({ question, answer }) => ({ text: `${question} → ${answer}`, at, kind: "answer" as const }));
+    const lastQuestion = answeredQuestion(request.question, at);
     return {
       state: {
         ...state,
         requests: state.requests.map((item) =>
           item.id === id
-            ? { ...item, status: running ? item.status : ("planning" as const), question: null, feedback: [...item.feedback, ...entries] }
+            ? { ...item, status: running ? item.status : ("planning" as const), question: null, lastQuestion, feedback: [...item.feedback, ...entries] }
             : item,
         ),
       },
@@ -279,7 +309,7 @@ export async function askCoordinator(input: { requestId: string; taskNumber: num
 export async function retryTask(
   input: { requestId: string; taskNumber: number; instruction: string | null },
   store: StateStore,
-): Promise<{ hasWorker: boolean }> {
+): Promise<{ hasWorker: boolean; orphanWorkspaceId: string | null }> {
   return store.update((state) => {
     const request = state.requests.find((item) => item.id === input.requestId);
     const task = request?.tasks.find((item) => item.number === input.taskNumber);
@@ -302,15 +332,101 @@ export async function retryTask(
           item.id !== request.id ? item : { ...item, tasks: item.tasks.map((t) => (t.number === task.number ? next : t)) },
         ),
       },
-      result: { hasWorker: Boolean(task.agentId) },
+      // 워커를 만들기 전에 실패한 작업은 워크스페이스만 남았을 수 있다. 새로 배정하면 새 worktree 를 만들므로 옛것은 정리한다.
+      // 앞 작업의 worktree 를 이어 쓰던 작업이면 그 워크스페이스는 앞 작업의 것이다. 지우면 앞 작업의 변경이 사라진다
+      // (2026-11-26 최종 검사).
+      result: {
+        hasWorker: Boolean(task.agentId),
+        orphanWorkspaceId:
+          task.agentId || request.tasks.some((other) => other.number !== task.number && other.workspaceId === task.workspaceId)
+            ? null
+            : task.workspaceId,
+      },
     };
   });
 }
 
 /**
- * 멈춘 작업(워커 질문 카드가 없는 것)을 진행하지 않고 취소한다. 이 작업에 기대는 작업도 함께 취소한다. 기대는 작업은
- * 앞 작업의 결과 위에서 일하도록 계획됐으므로, 혼자 돌면 계획과 다른 일을 한다.
- * 모든 작업이 취소되면 요청도 취소한다. 워커를 멈추는 일은 호출한 쪽이 돌려받은 agentIds 로 한다.
+ * 요청에서 작업들을 취소한 결과를 만든다(저장하지 않는다). 그 작업에 기대는 작업도 함께 취소한다. 기대는 작업은
+ * 앞 작업의 결과 위에서 일하도록 계획됐으므로, 혼자 돌면 계획과 다른 일을 한다. 모든 작업이 취소되면 요청도 취소한다.
+ * 멈춘 작업 카드의 취소(사람)와 코디네이터의 작업 취소가 같이 쓴다.
+ */
+export function cancelTasksIn(
+  request: CoordinatorRequest,
+  numbers: readonly number[],
+  by: "human" | "coordinator",
+  reason: string | null,
+): { request: CoordinatorRequest; agentIds: string[]; reviewerIds: string[]; requestCanceled: boolean; canceled: number[] } {
+  const canceled = new Set<number>();
+  for (const number of numbers) {
+    canceled.add(number);
+    for (const dependent of dependentsOf(request, number)) canceled.add(dependent);
+  }
+  // 끝나서 사람의 카드를 기다리는 작업은 취소하지 않는다. 취소하면 PR 이 GitHub 에 열린 채 카드가 사라진다.
+  const finished = request.tasks.filter((item) => canceled.has(item.number) && item.status === "review").map((item) => item.number);
+  if (finished.length > 0) {
+    throw new Error(
+      say(
+        request.language,
+        `Task ${finished.join(", ")} has finished work waiting on your card and would be canceled with this. Decide that card first.`,
+        `작업 ${finished.join(", ")} 의 끝난 결과가 카드에서 내 결정을 기다리는데, 함께 취소돼요. 그 카드를 먼저 정해 주세요.`,
+      ),
+    );
+  }
+  const at = new Date().toISOString();
+  const first = Math.min(...numbers);
+  const tasks = request.tasks.map((item) => {
+    if (!canceled.has(item.number)) return item;
+    const summary = numbers.includes(item.number)
+      ? `Canceled by the ${by}${reason ? `: ${reason}` : ""}`
+      : `Canceled with task ${first}, which it depends on`;
+    return {
+      ...item,
+      status: "canceled" as const,
+      note: null,
+      outbox: [],
+      blocker: null,
+      decisions: [...item.decisions, { summary, by, at, qa: [] }],
+    };
+  });
+  // 취소한 작업이 앞 작업의 worktree 를 이어 쓰고 있었다면, 앞 작업은 '뒤 작업이 PR 을 낸다'는 이유로 PR 없이 done 이 됐다.
+  // 그대로 두면 앞 작업의 커밋이 카드도 PR 도 없이 worktree 에만 남고 요청은 완료가 된다 (2026-11-26 전수 검사).
+  // 앞 작업을 완료 카드로 되돌려 사람이 그 커밋을 어떻게 할지 정하게 한다. continuedBy 는 취소된 뒤 작업을 세지 않으므로
+  // 원래 계획의 뒤 작업을 직접 찾는다.
+  const reopened = tasks.map((item) => {
+    if (item.status !== "done" || !item.completion || item.completion.closedAt || item.kind === "operation") return item;
+    const next = continuedBy({ tasks: request.tasks }, item);
+    if (!next || !canceled.has(next.number)) return item;
+    return {
+      ...item,
+      status: "review" as const,
+      completion: {
+        ...item.completion,
+        unpublished: say(
+          request.language,
+          `Task ${next.number}, which was to continue this work and open the pull request, was canceled. The commits of this task are only in its worktree.`,
+          `이 작업을 이어서 PR 을 낼 작업 ${next.number} 가 취소됐어요. 이 작업의 커밋은 worktree 에만 있어요.`,
+        ),
+      },
+    };
+  });
+  const requestCanceled = reopened.every((item) => item.status === "canceled");
+  const agentIds = request.tasks.filter((item) => canceled.has(item.number) && item.agentId).map((item) => item.agentId!);
+  const reviewerIds = request.tasks.flatMap((item) =>
+    canceled.has(item.number) && item.blocker?.review?.status === "running" ? item.blocker.review.reviewers.map((reviewer) => reviewer.agentId) : [],
+  );
+  return {
+    request: { ...request, tasks: reopened, status: requestCanceled ? ("canceled" as const) : request.status },
+    agentIds,
+    reviewerIds,
+    requestCanceled,
+    canceled: [...canceled].sort((a, b) => a - b),
+  };
+}
+
+/**
+ * 멈춘 작업(워커 질문 카드가 없는 것)을 진행하지 않고 취소한다 (멈춘 작업 카드). 워커를 멈추는 일은 호출한 쪽이
+ * 돌려받은 agentIds 로 한다.
  */
 export async function cancelTask(
   input: { requestId: string; taskNumber: number },
@@ -322,30 +438,10 @@ export async function cancelTask(
     if (!request || request.status !== "running" || !task || task.status !== "blocked" || task.blocker) {
       throw new Error(say(request?.language, "This task cannot be canceled now.", "이 작업은 지금 취소할 수 없어요."));
     }
-    const dependents = dependentsOf(request, task.number);
-    const canceled = new Set([task.number, ...dependents]);
-    const at = new Date().toISOString();
-    const tasks = request.tasks.map((item) => {
-      if (!canceled.has(item.number)) return item;
-      const summary = item.number === task.number ? "Canceled by the human" : `Canceled with task ${task.number}, which it depends on`;
-      return {
-        ...item,
-        status: "canceled" as const,
-        note: null,
-        outbox: [],
-        decisions: [...item.decisions, { summary, by: "human" as const, at, qa: [] }],
-      };
-    });
-    const requestCanceled = tasks.every((item) => item.status === "canceled");
-    const agentIds = request.tasks.filter((item) => canceled.has(item.number) && item.agentId).map((item) => item.agentId!);
+    const result = cancelTasksIn(request, [task.number], "human", null);
     return {
-      state: {
-        ...state,
-        requests: state.requests.map((item) =>
-          item.id !== request.id ? item : { ...item, tasks, status: requestCanceled ? ("canceled" as const) : item.status },
-        ),
-      },
-      result: { agentIds, requestCanceled },
+      state: { ...state, requests: state.requests.map((item) => (item.id === request.id ? result.request : item)) },
+      result: { agentIds: result.agentIds, requestCanceled: result.requestCanceled },
     };
   });
 }

@@ -29,6 +29,11 @@ export const settingsSchema = z.object({
    * poteto 는 하위 에이전트를 높은 effort 로 띄워 비용과 시간이 늘어서, 끌 수 있게 둔다.
    */
   poteto: z.boolean().default(true),
+  /**
+   * 코디네이터가 W 규칙으로 워커 질문에 자동으로 답할지 (RULES.md §8 '자동 처리 끄기'). 끄면 모든 워커 질문이 사람 카드가 된다.
+   * 문서에는 있었지만 설정이 없어 끌 방법이 없었다 (2026-11-26 전수 검사).
+   */
+  autoDecisions: z.boolean().default(true),
   reviewers: reviewersSchema.default({ models: DEFAULT_REVIEWER_MODELS, effort: "high" }),
   /** 코디네이터가 워커를 만들 수 있는 프로젝트. 비어 있으면 어디에도 만들지 않는다. */
   allowedProjectIds: z.array(z.string()).default([]),

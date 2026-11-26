@@ -27,15 +27,18 @@ export class WorkerChannel {
   /**
    * 쌓인 메시지를 워커가 쉬고 있으면 한 번에 보낸다. 보냈으면 true.
    * 꺼내기와 비우기를 한 번의 update 로 해서 그 사이에 더해진 메시지를 잃지 않고, 보내기가 실패하면 되돌려 넣는다.
+   * 결정 카드가 열린 작업(blocker)에는 보내지 않는다. 보내면 카드가 열린 채 워커가 다시 일하고, 그사이 끝내도 머지 카드가
+   * 뜨지 않으며, 사람이 나중에 고른 결정이 또 간다 (2026-11-26 전수 검사). 쌓인 메시지는 사람의 결정과 함께 나간다.
+   * 취소된 작업에도 보내지 않는다. 그 워커는 정리됐다.
    */
   async flush(paseo: PaseoApi, requestId: string, taskNumber: number): Promise<boolean> {
     const before = await this.task(requestId, taskNumber);
-    if (!before?.agentId || before.outbox.length === 0) return false;
+    if (!before?.agentId || before.outbox.length === 0 || before.blocker || before.status === "canceled") return false;
     const snapshot = await paseo.agents.ref(before.agentId).refresh().catch(() => null);
     if (!snapshot || snapshot.agent.status === "running" || (snapshot.agent.pendingPermissions?.length ?? 0) > 0) return false;
     const taken = await this.store.update((state) => {
       const task = findTask(state, requestId, taskNumber);
-      if (!task?.agentId || task.outbox.length === 0) return { state, result: null };
+      if (!task?.agentId || task.outbox.length === 0 || task.blocker || task.status === "canceled") return { state, result: null };
       return { state: patchTask(state, requestId, taskNumber, (current) => ({ ...current, outbox: [] })), result: { agentId: task.agentId, outbox: task.outbox } };
     });
     if (!taken) return false;

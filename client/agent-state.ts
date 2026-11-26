@@ -14,7 +14,7 @@ export type AgentStateKey =
 
 /**
  * 진행 현황 컬럼. 왼쪽일수록 사람을 더 기다린다.
- * - react: 작업이 멈춰서 나를 기다린다 (RULES.md §12 반응 필요)
+ * - react: 작업이 멈춰서 나를 기다린다 (RULES.md §12 내 결정 필요)
  * - review: 작업은 계속되고, 나중에 봐도 된다 (RULES.md §12 확인 필요)
  * - auto: 코디네이터와 검토자가 대신 판단하는 중이다 (RULES.md §2 ④~⑥). 3·6단계부터 채워진다
  * - running: 워커가 일하는 중이다

@@ -6,7 +6,23 @@ import type { PaseoApi } from "./paseo-api";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import { type AgentToolDefinition, defineAgentTool } from "@getpaseo/plugin/server";
 import { z } from "zod";
-import { AUTO_RULES, type CoordinatorRequest, type CoordinatorState, GRADES, type Task, cardQa, hasStarted, withCardQa } from "../shared/model";
+import {
+  AUTO_RULES,
+  type CoordinatorRequest,
+  type CoordinatorState,
+  GRADES,
+  type Task,
+  cardQa,
+  decisionBasisAt,
+  dependentsOf,
+  hasLiveTasks,
+  hasStarted,
+  humanAnsweredSince,
+  unreadInstructionAt,
+  withCardQa,
+} from "../shared/model";
+import { cleanupTaskWorkspaces } from "./cleanup";
+import { cancelTasksIn } from "./requests";
 import type { settingsSchema } from "../shared/settings";
 import { type StateStore, dataDirectory } from "./store";
 import type { ReviewRunner } from "./review";
@@ -96,6 +112,28 @@ async function allowedProjects(paseo: PaseoApi, settings: Settings) {
 // 알린 뒤 이만큼 지났는데 코디네이터가 쉬고 있고 요청이 아직 planning 이면 알림이 유실된 것으로 본다.
 const RENOTIFY_AFTER_MS = 60_000;
 const MAX_RENOTIFY = 3;
+const MAX_FAILURES = 3;
+
+/**
+ * 코디네이터의 권한 요청에 답한다. 코디네이터 전용 도구는 허용하고, 그 밖은 거절한다. 코디네이터는 사람 화면에 보이지 않아서
+ * 그 권한 요청은 아무도 볼 수 없는 곳에서 요청을 멈춰 세웠다 (2026-11-26 전수 검사). 권한 hook 과 알림이 같이 쓴다.
+ */
+export async function answerCoordinatorPermission(
+  paseo: PaseoApi,
+  agentId: string,
+  permission: { id: string; kind: string; name: string },
+): Promise<void> {
+  const allowed = permission.kind === "tool" && permission.name.includes(COORDINATOR_TOOL_PREFIX);
+  await paseo.agents
+    .ref(agentId)
+    .respondToPermission({
+      requestId: permission.id,
+      response: allowed
+        ? { behavior: "allow" }
+        : { behavior: "deny", message: "Coordinators use only the coordinator_* tools. Continue with those, or ask the human with coordinator_ask_human." },
+    })
+    .catch((error: unknown) => console.error(`[coordinator] could not answer the coordinator permission ${permission.id}`, error));
+}
 
 type Freshness = "new" | "reminder" | null;
 
@@ -113,7 +151,7 @@ function freshness(notifiedAt: string | null, triggerAt: string | null | undefin
 
 interface DueItem {
   key: string;
-  kind: "request" | "feedback" | "blocker" | "qa";
+  kind: "request" | "investigated" | "feedback" | "blocker" | "qa";
   requestId: string;
   taskNumber?: number;
   qaIndex?: number;
@@ -124,14 +162,24 @@ interface DueItem {
 function collectDue(state: CoordinatorState, now: number): DueItem[] {
   const items: DueItem[] = [];
   for (const request of state.requests) {
+    // 멈춘 코디네이터에게는 다시 알리지 않는다. 사람이 '다시 시도'를 누르면 멈춤 기록이 지워지고 다시 알린다.
+    if (request.stall) continue;
     const lastInstruction = request.feedback.at(-1)?.at;
     if (request.status === "planning") {
-      const fresh = freshness(request.notifiedAt, lastInstruction, now);
-      if (fresh) items.push({ key: `req:${request.id}`, kind: "request", requestId: request.id, freshness: fresh });
+      // A 등급 변경 전 조사가 끝나 돌아온 요청은 사람의 새 지시가 없어도 다시 알린다. 조사 뒤에 지시가 왔으면 지시가 먼저다.
+      const investigatedAt = request.investigation?.at;
+      const investigated = Boolean(investigatedAt && (!lastInstruction || investigatedAt > lastInstruction));
+      const fresh = freshness(request.notifiedAt, investigated ? investigatedAt : lastInstruction, now);
+      if (fresh) {
+        items.push({ key: `req:${request.id}`, kind: investigated ? "investigated" : "request", requestId: request.id, freshness: fresh });
+      }
     }
-    // 실행 중인 요청에 사람이 새 지시를 보냈다. 처리 여부를 알 수 없으니 새 지시가 왔을 때만 알린다.
-    if (request.status === "running" && lastInstruction && (!request.notifiedAt || lastInstruction > request.notifiedAt)) {
-      items.push({ key: `fb:${request.id}`, kind: "feedback", requestId: request.id, freshness: "new" });
+    // 실행 중인 요청에 사람이 새 지시(또는 질문의 답)를 보냈다. 코디네이터가 그 뒤에 요청을 읽었으면 처리한 것으로 본다.
+    // 읽지 않았으면 알림이 유실됐을 수 있어 다시 알린다 (예전에는 새 지시가 왔을 때 한 번만 알려, 유실되면 지시가 버려졌다).
+    const unread = unreadInstructionAt(request);
+    if (request.status === "running" && unread) {
+      const fresh = freshness(request.notifiedAt, unread, now);
+      if (fresh) items.push({ key: `fb:${request.id}:${unread}`, kind: "feedback", requestId: request.id, freshness: fresh });
     }
     if (request.status !== "running") continue;
     for (const task of request.tasks) {
@@ -162,12 +210,14 @@ function describe(items: readonly DueItem[]): string {
   const lines = ["[paseo-coordinator] Work waiting for you:"];
   const requests = of("request");
   if (requests.length) lines.push(`- Requests: ${requests.join(", ")}. Call coordinator_get_request, classify, then answer (coordinator_submit_answer), plan (coordinator_submit_plan), or ask the human (coordinator_ask_human).`);
+  const investigated = of("investigated");
+  if (investigated.length) lines.push(`- Investigations came back to you: ${investigated.join(", ")}. Read the report in "investigation" and any later feedback with coordinator_get_request. If the request was marked beforeChange, the human asked for a change: do not end with a report. For grade A or operation tasks, ask the human with coordinator_ask_human which changes to make (each item with what it changes, the evidence, the risk and your recommendation; one option may be to change nothing), then plan exactly what they chose; for grades B-D you may plan the change directly. If it was a read request that came back because the human wrote while it ran: when they asked you to act, plan that change; when they only asked a question, answer with coordinator_submit_answer.`);
   const blockers = of("blocker");
   if (blockers.length) lines.push(`- Worker blockers: ${blockers.join(", ")}. Read them with coordinator_get_request (and coordinator_read_worker if needed). If you can answer under W1, W5 or W7 with none of H1-H6, propose it with coordinator_propose_answer; otherwise write the decision card with coordinator_prepare_decision.`);
   const questions = of("qa");
   if (questions.length) lines.push(`- Human questions on decision or merge cards: ${questions.join(", ")}. Answer with coordinator_answer_question. For a merge card, the task's completion report and pull request are in coordinator_get_request, and coordinator_read_worker shows what the worker did.`);
   const feedback = of("feedback");
-  if (feedback.length) lines.push(`- New instructions on running requests: ${feedback.join(", ")}. Read them with coordinator_get_request and pass what each affected worker must change with coordinator_message_worker, or ask the human if unclear.`);
+  if (feedback.length) lines.push(`- New instructions or answers on running requests: ${feedback.join(", ")}. Read them with coordinator_get_request. Pass what a working worker must change with coordinator_message_worker, add work with coordinator_add_tasks, drop work with coordinator_cancel_tasks, or ask the human if it is unclear or goes beyond the original request. On a read request still investigating, a request to act is handled when the investigation comes back to you.`);
   return lines.join("\n");
 }
 
@@ -183,6 +233,8 @@ export class CoordinatorRuntime {
   private again = false;
   /** 할 일마다 다시 알린 횟수. 플러그인 프로세스 동안만 센다. */
   private readonly renotified = new Map<string, number>();
+  /** 요청마다 연달아 알리지 못한 횟수. MAX_FAILURES 에 닿으면 멈춤으로 기록한다. */
+  private readonly failures = new Map<string, number>();
   private reviews: ReviewRunner | null = null;
 
   /** 독립 검토를 붙인다. 검토자가 없으면 자동 답은 받지 않는다. */
@@ -197,7 +249,42 @@ export class CoordinatorRuntime {
     private readonly onPlanStarted: (paseo: PaseoApi) => void,
     /** 코디네이터가 워커에게 지시를 보내는 길. */
     private readonly channel: WorkerChannel,
+    /** 코디네이터가 작업을 취소한 뒤 부른다. 워커를 정리하고 요청을 마무리한다 (Dispatcher.afterCancel). */
+    private readonly onTasksCanceled: (paseo: PaseoApi, requestId: string, agentIds: string[], requestCanceled: boolean) => void = () => {},
   ) {}
+
+  /**
+   * 코디네이터가 일을 이어 가지 못한다고 기록한다. 내 결정 필요에 카드로 보이고, 사람이 다시 시도할 때까지 알리지 않는다.
+   * 코디네이터는 사람 화면에 보이지 않는 에이전트라 기록하지 않으면 보드에 '계획 세우는 중'만 계속 보인다.
+   */
+  private async markStalled(requestId: string, reason: string): Promise<void> {
+    console.error(`[coordinator] ${requestId} stalled: ${reason}`);
+    await this.store.update((state) => ({
+      state: {
+        ...state,
+        requests: state.requests.map((item) =>
+          item.id === requestId && item.status !== "done" && item.status !== "canceled"
+            ? { ...item, stall: { reason, at: new Date().toISOString() } }
+            : item,
+        ),
+      },
+      result: undefined,
+    }));
+  }
+
+  /** 사람이 멈춘 코디네이터를 다시 시도한다. 멈춤 기록과 다시 알린 횟수를 지우고 알린다. */
+  async retry(paseo: PaseoApi, requestId: string): Promise<void> {
+    // 키는 '<종류>:<요청 id>[:…]' 이다. r1 을 지울 때 r12 까지 지우지 않게 자리로 비교한다.
+    for (const key of [...this.renotified.keys()]) if (key.split(":")[1] === requestId) this.renotified.delete(key);
+    await this.store.update((state) => ({
+      state: {
+        ...state,
+        requests: state.requests.map((item) => (item.id === requestId ? { ...item, stall: null, notifiedAt: null } : item)),
+      },
+      result: undefined,
+    }));
+    await this.notify(paseo);
+  }
 
   /** 이 에이전트가 맡은 요청 id. 코디네이터가 아니면 null. */
   async requestOf(agentId: string): Promise<string | null> {
@@ -328,8 +415,19 @@ export class CoordinatorRuntime {
     const requestIds = [...new Set(due.map((item) => item.requestId))];
     for (const requestId of requestIds) {
       // 한 요청의 실패(코디네이터 생성 실패 등)가 다른 요청의 알림을 막지 않게 요청마다 따로 처리한다.
-      await this.notifyRequest(paseo, requestId).catch((error: unknown) =>
-        console.error(`[coordinator] could not notify the coordinator of ${requestId}`, error),
+      // 일시 오류 한 번으로 멈춤을 기록하지 않는다. 멈춘 요청은 알림을 모두 건너뛰므로, 짧은 연결 오류가 사람이 누를 때까지
+      // 요청을 세웠다 (2026-11-26 최종 검사). 연달아 실패할 때만 멈춤으로 본다.
+      await this.notifyRequest(paseo, requestId).then(
+        () => this.failures.delete(requestId),
+        async (error: unknown) => {
+          console.error(`[coordinator] could not notify the coordinator of ${requestId}`, error);
+          const count = (this.failures.get(requestId) ?? 0) + 1;
+          this.failures.set(requestId, count);
+          if (count >= MAX_FAILURES) {
+            this.failures.delete(requestId);
+            await this.markStalled(requestId, `Could not start or reach the coordinator ${count} times in a row: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        },
       );
     }
   }
@@ -341,8 +439,17 @@ export class CoordinatorRuntime {
       const agentId = await this.agentFor(paseo, request);
       const snapshot = await paseo.agents.ref(agentId).refresh();
       if (!snapshot) return;
-      if (snapshot.agent.status === "running" || (snapshot.agent.pendingPermissions?.length ?? 0) > 0) return;
+      // 에러로 끝난 코디네이터도 새 메시지를 받으면 다시 일한다. 보내지 않고 멈춤으로 두면 '다시 시도'도 같은 이유로 다시 멈췄다
+      // (2026-11-26 최종 검사). 다시 알려도 처리하지 않으면 아래의 다시 알리기 한도가 멈춤으로 기록한다.
+      const pending = snapshot.agent.pendingPermissions ?? [];
+      if (pending.length > 0) {
+        // 권한 hook 이 유실돼 코디네이터가 기다리고 있다. hook 과 같은 규칙으로 답한다: 코디네이터 도구는 허용, 그 밖은 거절.
+        for (const permission of pending) await answerCoordinatorPermission(paseo, agentId, permission);
+        return;
+      }
+      if (snapshot.agent.status === "running") return;
       // 여기까지 왔으면 이 요청의 코디네이터는 쉬고 있다. 유실을 의심해 다시 알리는 것만 세고, 3번을 넘으면 멈춘다.
+      const gaveUp: string[] = [];
       const items = collectDue(await this.store.read(), Date.now()).filter((item) => {
         if (item.requestId !== requestId) return false;
         if (item.freshness === "new") {
@@ -351,12 +458,18 @@ export class CoordinatorRuntime {
         }
         const count = this.renotified.get(item.key) ?? 0;
         if (count >= MAX_RENOTIFY) {
-          console.error(`[coordinator] ${item.key} is still unhandled after ${count} reminders; not reminding again`);
+          gaveUp.push(item.key);
           return false;
         }
         this.renotified.set(item.key, count + 1);
         return true;
       });
+      if (gaveUp.length > 0) {
+        // 에러로 끝난 코디네이터면 그 에러를 함께 보여 준다. 사람이 원인(모델 설정 등)을 바로 알 수 있게 한다.
+        const error = snapshot.agent.status === "error" && snapshot.agent.lastError ? ` Last error: ${snapshot.agent.lastError}` : "";
+        await this.markStalled(requestId, `The coordinator did not handle ${gaveUp.join(", ")} after ${MAX_RENOTIFY} reminders.${error}`);
+        return;
+      }
       if (items.length === 0) return;
       // 보낸 뒤에 기록한다. 먼저 기록하고 보내기가 실패하면, 실행 중 요청의 새 지시처럼 다시 알리지 않는 항목이 묻힌다.
       // 시각은 보내기 전에 잡는다. 보내는 사이 새로 온 지시는 이 시각보다 늦어 다음에 다시 알린다.
@@ -373,7 +486,7 @@ export class CoordinatorRuntime {
         requests: current.requests.map((request) => {
           const mine = items.filter((item) => item.requestId === request.id);
           if (mine.length === 0) return request;
-          const touchesRequest = mine.some((item) => item.kind === "request" || item.kind === "feedback");
+          const touchesRequest = mine.some((item) => item.kind === "request" || item.kind === "investigated" || item.kind === "feedback");
           return {
             ...request,
             notifiedAt: touchesRequest ? now : request.notifiedAt,
@@ -423,6 +536,9 @@ export class CoordinatorRuntime {
   tools() {
     return [
       this.getRequestTool(),
+      this.readPastRequestTool(),
+      this.addTasksTool(),
+      this.cancelTasksTool(),
       this.projectOverviewTool(),
       this.listFilesTool(),
       this.readFileTool(),
@@ -501,6 +617,9 @@ export class CoordinatorRuntime {
       }),
       execute: async (input, { paseo }) => {
         if (!this.reviews) return { text: "Automatic answers are not available; use coordinator_prepare_decision.", isError: true };
+        if (!(await readSettings(this.settings)).autoDecisions) {
+          return { text: "The human switched automatic answers off in settings (RULES.md §8). Write the decision card with coordinator_prepare_decision.", isError: true };
+        }
         const state = await this.store.read();
         const request = state.requests.find((item) => item.id === input.requestId);
         const task = request?.tasks.find((item) => item.number === input.taskNumber);
@@ -620,9 +739,18 @@ export class CoordinatorRuntime {
       execute: async (input, { paseo }) => {
         const found = await this.findTask(input.requestId, input.taskNumber);
         if (!found?.task.agentId) return { text: `Task ${input.requestId}/${input.taskNumber} has no worker yet.`, isError: true };
-        // 머지했거나 끝난 작업의 워커는 정리됐다. 되살리면 요청이 끝나지 않는다. 새 작업이 필요하면 사람에게 묻는다.
+        // 머지했거나 끝난 작업의 워커는 정리됐다. 되살리면 요청이 끝나지 않는다. 새 작업이 필요하면 작업을 더하거나 사람에게 묻는다.
         if (found.task.status === "done" || found.task.completion?.closedAt) {
-          return { text: `Task ${input.requestId}/${input.taskNumber} is finished and its workspace may be gone. Ask the human if more work is needed.`, isError: true };
+          return { text: `Task ${input.requestId}/${input.taskNumber} is finished and its workspace may be gone. Add a task with coordinator_add_tasks, or ask the human.`, isError: true };
+        }
+        if (found.task.status === "canceled") {
+          return { text: `Task ${input.requestId}/${input.taskNumber} was canceled and its worker stopped.`, isError: true };
+        }
+        if (found.request.kind === "read") {
+          return {
+            text: "This is a read-only investigation; its worker cannot act on instructions. When the investigation comes back to you, plan what the human asked.",
+            isError: true,
+          };
         }
         const at = new Date().toISOString();
         await this.patchTask(input.requestId, input.taskNumber, (task) =>
@@ -637,8 +765,13 @@ export class CoordinatorRuntime {
           ),
         );
         const sent = await this.channel.flush(paseo, input.requestId, input.taskNumber);
-        const result = sent ? "sent" : "queued";
-        return { text: result === "sent" ? "Delivered to the worker." : "The worker is busy; it will receive this after its current turn." };
+        if (sent) return { text: "Delivered to the worker." };
+        // 결정 카드가 열린 작업에는 보내지 않는다(WorkerChannel.flush). 사람이 결정하면 그 결정과 함께 간다.
+        return {
+          text: found.task.blocker
+            ? "The worker is waiting for the human's decision card; this message goes out together with that decision."
+            : "The worker is busy; it will receive this after its current turn.",
+        };
       },
     });
   }
@@ -755,6 +888,16 @@ export class CoordinatorRuntime {
       execute: async ({ requestId }, { paseo }) => {
         const request = (await this.store.read()).requests.find((item) => item.id === requestId);
         if (!request) return { text: `Unknown request ${requestId}`, isError: true };
+        // 코디네이터가 읽었다는 기록. 실행 중 요청에 온 지시를 처리했는지 이것으로 본다 (collectDue).
+        // 코디네이터가 다시 일하므로 멈춤 기록도 지운다.
+        const readAt = new Date().toISOString();
+        await this.store.update((state) => ({
+          state: {
+            ...state,
+            requests: state.requests.map((item) => (item.id === requestId ? { ...item, coordinatorReadAt: readAt, stall: null } : item)),
+          },
+          result: undefined,
+        }));
         const projects = await allowedProjects(paseo, this.settings);
         const usable = request.projectIds.length > 0 ? projects.filter((p) => request.projectIds.includes(p.id)) : projects;
         return {
@@ -766,10 +909,65 @@ export class CoordinatorRuntime {
               text: request.text,
               doneCriteria: request.doneCriteria,
               feedback: request.feedback,
-              currentPlan: request.tasks.length > 0 ? { title: request.title, grade: request.grade, tasks: request.tasks } : null,
+              currentPlan: request.tasks.length > 0 ? { title: request.title, grade: request.grade, beforeChange: request.beforeChange, tasks: request.tasks } : null,
+              // A 등급 변경 전 조사의 보고. 이것으로 질문 카드를 만든다.
+              investigation: request.investigation,
+              // 읽기 요청에 이미 준 답. 그 뒤의 feedback 은 이 답에 대한 추가 질문이나 지시다.
+              previousAnswer: request.answer,
               projects: usable,
               // 사람이 고른 기준 브랜치. 있으면 그 프로젝트 작업은 이 브랜치에서 시작하고, 계획에서 바꿀 수 없다.
               humanBaseBranches: request.baseBranches,
+            },
+            null,
+            2,
+          ),
+        };
+      },
+    });
+  }
+
+  /**
+   * 끝났거나 다른 코디네이터가 맡은 이전 요청을 읽기만 한다. 사람이 'r13 결과를 토대로' 처럼 이전 요청을 가리키면 그 답과
+   * 조사 보고가 필요하다. 이 도구가 없을 때 r14·r15 는 r13 을 읽지 못해 같은 조사를 처음부터 다시 했다 (2026-11-26).
+   * 바꾸는 도구가 아니라서 소유 검사(requestId)를 받지 않도록 입력 이름을 pastRequestId 로 둔다.
+   */
+  private readPastRequestTool() {
+    return defineAgentTool({
+      name: "coordinator_read_past_request",
+      title: "Read a past request",
+      description:
+        "Read another request (for example one the human refers to, like \"based on r13\"): its text, status, answer or investigation report, tasks with their reports, and decisions. Read-only.",
+      input: z.object({ pastRequestId: z.string() }),
+      execute: async ({ pastRequestId }) => {
+        const past = (await this.store.read()).requests.find((item) => item.id === pastRequestId);
+        if (!past) return { text: `Unknown request ${pastRequestId}`, isError: true };
+        return {
+          text: JSON.stringify(
+            {
+              id: past.id,
+              status: past.status,
+              kind: past.kind,
+              text: past.text,
+              feedback: past.feedback,
+              title: past.title,
+              grade: past.grade,
+              answer: past.answer,
+              investigation: past.investigation,
+              unknowns: past.unknowns,
+              tasks: past.tasks.map((task) => ({
+                number: task.number,
+                name: task.name,
+                projectId: task.projectId,
+                kind: task.kind,
+                targets: task.targets,
+                status: task.status,
+                branch: task.branch,
+                scope: task.scope,
+                completion: task.completion
+                  ? { summary: task.completion.summary, verification: task.completion.verification, left: task.completion.left, pr: task.completion.pr?.url ?? null }
+                  : null,
+                decisions: task.decisions.map((item) => `${item.by}: ${item.summary}`),
+              })),
             },
             null,
             2,
@@ -899,13 +1097,17 @@ export class CoordinatorRuntime {
     });
   }
 
-  /** 읽기 요청에 직접 답한다. 등급도 계획 승인도 없다. 사람은 인박스 '확인 필요'의 답변 카드로 본다. */
+  /**
+   * 읽기 요청에 직접 답한다. 등급도 계획 승인도 없다. 사람은 인박스 '확인 필요'의 답변 카드로 본다.
+   * 변경을 위한 조사가 돌아온 요청은 사람이 그 결과를 보고 답하기 전에는 답변으로 끝낼 수 없다. 답변 카드의 확인은 요청을
+   * 끝내므로, 사람이 바란 변경이 조용히 사라진다 (r13~r15). 사람이 '바꾸지 않음'을 골랐으면 그 뒤에는 답변으로 끝낼 수 있다.
+   */
   private submitAnswerTool() {
     return defineAgentTool({
       name: "coordinator_submit_answer",
       title: "Submit answer",
       description:
-        "Answer a read request (one that changes nothing) directly. Use this when your read-only tools were enough to answer.",
+        "Answer a read request (one that changes nothing) directly. Use this when your read-only tools were enough to answer. Not for requests that ask you to change something: plan those.",
       input: z.object({
         requestId: z.string(),
         title: z.string().trim().min(1),
@@ -920,6 +1122,15 @@ export class CoordinatorRuntime {
         if (request.status !== "planning") {
           return { text: `Request ${request.id} is ${request.status}; it no longer takes an answer.`, isError: true };
         }
+        // 변경을 위한 조사(beforeChange)가 돌아온 요청만 막는다. 읽기 요청이 조사 중 지시 때문에 돌아왔으면, 그 지시가 질문이었는지
+        // 코디네이터가 판단해 답할 수 있어야 한다 (2026-11-26 최종 검사).
+        // 조사가 시작되기 전에 지시가 와서 계획 단계로 돌아온 경우에도 막는다. 조사 보고가 없으면 계획 시각을 기준으로 본다.
+        if (request.beforeChange && !humanAnsweredSince(request, request.investigation?.at ?? request.plannedAt)) {
+          return {
+            text: "This request asked for a change, and its investigation came back to you. Do not end it with an answer: ask the human with coordinator_ask_human which changes to make (one option may be to change nothing), or plan the change.",
+            isError: true,
+          };
+        }
         if (request.language === "ko" && !HANGUL.test(input.title)) {
           return { text: "title must be written in Korean (language is ko).", isError: true };
         }
@@ -927,59 +1138,72 @@ export class CoordinatorRuntime {
         const projectIds = await this.knownProjects(paseo, input.projectIds);
         const saved = await this.store.update((current) => {
           const latest = current.requests.find((entry) => entry.id === request.id);
-          if (latest?.status !== "planning" || hasStarted(latest)) return { state: current, result: false };
+          if (latest?.status !== "planning" || hasLiveTasks(latest)) return { state: current, result: null };
           return {
-          state: {
-            ...current,
-            requests: current.requests.map((item) =>
-              item.id === request.id
-                ? {
-                    ...item,
-                    kind: "read" as const,
-                    status: "answered" as const,
-                    title: input.title,
-                    grade: null,
-                    tasks: [],
-                    answer: { text: input.answer, sources: input.sources, unknowns: input.unknowns, projectIds, at: now },
-                  }
-                : item,
-            ),
-          },
-          result: true,
+            state: {
+              ...current,
+              requests: current.requests.map((item) =>
+                item.id === request.id
+                  ? {
+                      ...item,
+                      kind: "read" as const,
+                      beforeChange: false,
+                      status: "answered" as const,
+                      title: input.title,
+                      grade: null,
+                      tasks: [],
+                      answer: { text: input.answer, sources: input.sources, unknowns: input.unknowns, projectIds, at: now },
+                    }
+                  : item,
+              ),
+            },
+            // 답이 대신하는 끝난 조사 작업. 기록에서 빠지면 워크스페이스를 찾을 길이 없어 아래에서 정리한다.
+            result: latest.tasks,
           };
         });
         if (!saved) return { text: `Request ${request.id} changed while you were answering; read it again with coordinator_get_request.`, isError: true };
+        await cleanupTaskWorkspaces(paseo, saved);
         return { text: `Answer stored for ${request.id}. The human reviews it in the inbox.` };
       },
     });
   }
 
+  /** 계획과 작업 추가가 같이 쓰는 검사: 허용된 프로젝트, 기준 브랜치, 사람의 답이 필요한 작업. */
+  private async taskProblems(
+    paseo: PaseoApi,
+    request: CoordinatorRequest,
+    tasks: readonly z.infer<typeof taskInput>[],
+    projects: Awaited<ReturnType<typeof allowedProjects>>,
+  ): Promise<string[]> {
+    const problems: string[] = [];
+    for (const task of tasks) {
+      // 사람이 새 요청 창에서 고른 기준 브랜치는 코디네이터가 바꾸지 못한다. 적은 브랜치는 저장소에 있어야 한다.
+      const chosen = request.baseBranches[task.projectId];
+      if (chosen && task.baseBranch && task.baseBranch !== chosen) {
+        problems.push(`Task ${task.number}: the human chose base branch ${chosen} for project ${task.projectId}; omit baseBranch or use ${chosen}.`);
+        continue;
+      }
+      const root = projects.find((project) => project.id === task.projectId)?.path;
+      if (!chosen && task.baseBranch && root && !(await resolveBaseRef(root, task.baseBranch))) {
+        problems.push(`Task ${task.number}: branch ${task.baseBranch} does not exist in project ${task.projectId}.`);
+      }
+    }
+    return problems;
+  }
+
   private submitPlanTool() {
-    const taskInput = z.object({
-      number: z.number().int().positive(),
-      name: z.string().trim().min(1),
-      projectId: z.string(),
-      dependsOn: z.array(z.number().int().positive()).default([]),
-      scope: z.string().trim().min(1),
-      doneCriteria: z.string().trim().min(1),
-      requestRefs: z.array(z.string().trim().min(1)).min(1),
-      baseBranch: z
-        .string()
-        .trim()
-        .min(1)
-        .optional()
-        .describe(
-          "Branch to cut this task's worktree from and open its pull request against. Set it only when the work builds on a branch that is not merged into the default branch yet (see coordinator_list_branches). Omit it to use the project's configured base.",
-        ),
-    });
     return defineAgentTool({
       name: "coordinator_submit_plan",
       title: "Submit plan",
       description:
-        "Submit or replace the plan for a request in the planning state. For a change request set readOnly false and a grade. For a read request too large to answer yourself, set readOnly true and omit grade: read-only investigation workers start without approval.",
+        "Submit or replace the plan for a request in the planning state. For a change request set readOnly false and a grade. For a read request too large to answer yourself, set readOnly true and omit grade: read-only investigation workers start without approval and their report becomes an answer. For an investigation that comes before a change the human asked for, set readOnly true, beforeChange true and the grade of the change: the report comes back to you instead of the human. Tasks that act outside their worktree (cleaning up branches or worktrees, deleting remote branches, running an app) are kind \"operation\" with targets, and start only after the human approved those targets on a question card.",
       input: z.object({
         requestId: z.string(),
         readOnly: z.boolean().default(false),
+        beforeChange: z
+          .boolean()
+          .default(false)
+          .describe("readOnly only: this investigation is the first step of a change the human asked for, not an answer to a question. Give the grade of that change."),
         title: z.string().trim().min(1),
         grade: z.enum(GRADES).optional(),
         gradeReasons: z.array(z.string().trim().min(1)).min(1),
@@ -999,80 +1223,70 @@ export class CoordinatorRuntime {
         const usable = new Set(
           (request.projectIds.length > 0 ? projects.filter((p) => request.projectIds.includes(p.id)) : projects).map((p) => p.id),
         );
-        const problems = validatePlan(input, request.language, usable);
-        // 사람이 새 요청 창에서 고른 기준 브랜치는 코디네이터가 바꾸지 못한다. 적은 브랜치는 저장소에 있어야 한다.
-        for (const task of input.tasks) {
-          const chosen = request.baseBranches[task.projectId];
-          if (chosen && task.baseBranch && task.baseBranch !== chosen) {
-            problems.push(`Task ${task.number}: the human chose base branch ${chosen} for project ${task.projectId}; omit baseBranch or use ${chosen}.`);
-            continue;
-          }
-          const root = projects.find((project) => project.id === task.projectId)?.path;
-          if (!chosen && task.baseBranch && root && !(await resolveBaseRef(root, task.baseBranch))) {
-            problems.push(`Task ${task.number}: branch ${task.baseBranch} does not exist in project ${task.projectId}.`);
-          }
-        }
+        const problems = [...validatePlan(input, request.language, usable), ...(await this.taskProblems(paseo, request, input.tasks, projects))];
         if (!input.readOnly && !input.grade) problems.push("A change request needs a grade.");
-        // A 등급의 실제 변경은 사람이 질문 카드에 답한 뒤에만 시작한다 (RULES.md §2.0, H4). 코드로 막는다.
-        if (!input.readOnly && input.grade === "A" && request.feedback.at(-1)?.kind !== "answer") {
-          problems.push(
-            "Grade A: start with a readOnly investigation plan, or ask the human with coordinator_ask_human before planning the real change.",
-          );
+        if (input.beforeChange && !input.readOnly) problems.push("beforeChange is only for a readOnly investigation.");
+        if (input.beforeChange && !input.grade) problems.push("beforeChange needs the grade of the change that follows the investigation.");
+        if (input.readOnly && !input.beforeChange && input.grade) {
+          problems.push("A read-only investigation has no grade. If it comes before a change, set beforeChange true.");
         }
+        if (input.readOnly && input.tasks.some((task) => task.kind === "operation")) {
+          problems.push("A read-only investigation cannot have operation tasks.");
+        }
+        // 변경을 위한 조사가 돌아온 요청을 다시 조사할 때도 변경 요청으로 남아야 한다. beforeChange 없이 다시 조사하면 그 보고가
+        // 답변 카드가 되어, 확인 한 번으로 아무것도 바꾸지 않은 채 끝난다 (2026-11-26 최종 검사).
+        if (
+          request.beforeChange &&
+          input.readOnly &&
+          !input.beforeChange &&
+          !humanAnsweredSince(request, request.investigation?.at ?? request.plannedAt)
+        ) {
+          problems.push("This request asked for a change. A further investigation must keep beforeChange true and the grade of the change.");
+        }
+        problems.push(...humanGateProblems(request, input.tasks, input.readOnly ? null : (input.grade ?? null), decisionBasisAt(request)));
         if (problems.length > 0) return { text: `Plan rejected:\n- ${problems.join("\n- ")}`, isError: true };
         // v3: 명확한 요청은 코디네이터 판단으로 바로 시작한다. 사람은 확인 필요의 시작 카드로 본다 (RULES.md §2.0).
         // 읽기 전용 조사 워커는 읽기 전용 모드로 띄운다 (3e).
-        const status = "running" as const;
-        const grade = input.readOnly ? null : (input.grade ?? null);
+        // 변경 전 조사는 카드에 그 변경의 등급으로 보이게 등급을 남긴다. 실제 변경 계획이 오면 그 등급으로 바뀐다.
+        const grade = input.readOnly && !input.beforeChange ? null : (input.grade ?? null);
         const now = new Date().toISOString();
         const feedbackCount = request.feedback.length;
         // 검증하는 사이(await) 요청이 취소되거나 새 지시가 왔으면 저장하지 않는다. 취소한 요청이 되살아나 워커가 생긴다.
         const saved = await this.store.update((current) => {
           const latest = current.requests.find((entry) => entry.id === request.id);
-          if (latest?.status !== "planning" || hasStarted(latest) || latest.feedback.length !== feedbackCount) {
-            return { state: current, result: false };
+          if (latest?.status !== "planning" || hasLiveTasks(latest) || latest.feedback.length !== feedbackCount) {
+            return { state: current, result: null };
           }
           return {
-          state: {
-            ...current,
-            requests: current.requests.map((item) =>
-              item.id === request.id
-                ? {
-                    ...item,
-                    status,
-                    kind: input.readOnly ? ("read" as const) : ("change" as const),
-                    title: input.title,
-                    grade,
-                    answer: null,
-                    gradeReasons: input.gradeReasons,
-                    recommendation: input.recommendation,
-                    risks: input.risks,
-                    unknowns: input.unknowns,
-                    plannedAt: now,
-                    tasks: input.tasks.map((task) => ({
-                      ...task,
-                      baseBranch: request.baseBranches[task.projectId] ?? task.baseBranch ?? null,
-                      status: "waiting" as const,
-                      workspaceId: null,
-                      agentId: null,
-                      branch: null,
-                      note: null,
-                      blocker: null,
-                      outbox: [],
-                      decisions: [],
-                      autoDecisions: [],
-                      poteto: false,
-                      completion: null,
-                      doneNudgedAt: null,
-                    })),
-                  }
-                : item,
-            ),
-          },
-          result: true,
+            state: {
+              ...current,
+              requests: current.requests.map((item) =>
+                item.id === request.id
+                  ? {
+                      ...item,
+                      status: "running" as const,
+                      kind: input.readOnly ? ("read" as const) : ("change" as const),
+                      beforeChange: input.beforeChange,
+                      title: input.title,
+                      grade,
+                      // 이전 답은 남긴다. 조사 보고(investigation)처럼 다음 결정의 근거이고, 코디네이터가 다시 읽는다.
+                      gradeReasons: input.gradeReasons,
+                      recommendation: input.recommendation,
+                      risks: input.risks,
+                      unknowns: input.unknowns,
+                      plannedAt: now,
+                      tasks: input.tasks.map((task) => newTask(request, task)),
+                    }
+                  : item,
+              ),
+            },
+            // 새 계획이 대신하는 끝난 조사 작업. 기록에서 빠지면 그 워크스페이스를 찾을 길이 없어 아래에서 정리한다.
+            result: latest.tasks,
           };
         });
         if (!saved) return { text: `Request ${request.id} changed while you were planning (canceled, or a new instruction arrived); read it again with coordinator_get_request.`, isError: true };
+        // 조사 워커는 plan 모드라 worktree 에 남긴 변경이 없다. 보고는 investigation 과 answer 에 이미 옮겼다.
+        await cleanupTaskWorkspaces(paseo, saved);
         this.onPlanStarted(paseo);
         return {
           text:
@@ -1081,21 +1295,256 @@ export class CoordinatorRuntime {
       },
     });
   }
+
+  /**
+   * 실행 중인 변경 요청에 작업을 더한다. 사람이 실행 중에 보낸 지시(예: '다른 프로젝트도 고쳐줘')를 실행할 길이 없어, 시작 카드가
+   * '다시 계획해요'라고 안내하는데 지시가 버려졌다 (2026-11-26 사용자 결정: 작업 추가·취소 도구).
+   * 원래 요청 범위를 넘으면 먼저 사람에게 묻는다. A 등급 요청과 운영 작업은 사람의 답이 있어야 더할 수 있다.
+   */
+  private addTasksTool() {
+    return defineAgentTool({
+      name: "coordinator_add_tasks",
+      title: "Add tasks",
+      description:
+        "Add tasks to a running change request, for example to carry out a new instruction from the human. Number them after the existing tasks; dependsOn may list existing tasks. Use only for work inside the request or what the human just asked; ask the human first if it goes beyond. Grade A requests and operation tasks need the human's answer on a question card after the current plan.",
+      input: z.object({
+        requestId: z.string(),
+        reason: z.string().trim().min(1).describe("Which instruction of the human this carries out, quoted."),
+        tasks: z.array(taskInput).min(1),
+      }),
+      execute: async (input, { paseo }) => {
+        const request = (await this.store.read()).requests.find((item) => item.id === input.requestId);
+        if (!request) return { text: `Unknown request ${input.requestId}`, isError: true };
+        if (request.status !== "running" || request.kind !== "change") {
+          return {
+            text:
+              request.kind === "read" && request.status === "running"
+                ? "This is a read-only investigation. When it comes back to you, plan the change with coordinator_submit_plan."
+                : `Request ${request.id} is ${request.status}; tasks can only be added to a running change request.`,
+            isError: true,
+          };
+        }
+        const projects = await allowedProjects(paseo, this.settings);
+        // 사람이 고른 프로젝트 밖의 작업은 사람이 지금 계획 뒤에 답했을 때만 더한다('B 프로젝트도 고쳐줘'를 확인받은 뒤).
+        // 고른 프로젝트로만 막으면 실행 중에 받은 다른 프로젝트 지시를 실행할 길이 없었다 (2026-11-26 최종 검사).
+        const usable = new Set(projects.map((p) => p.id));
+        const outside = [...new Set(input.tasks.map((task) => task.projectId))].filter(
+          (id) => request.projectIds.length > 0 && !request.projectIds.includes(id),
+        );
+        const problems = [
+          ...validatePlan({ title: request.title ?? request.id, tasks: input.tasks }, request.language, usable, request.tasks),
+          ...(outside.length > 0 && !humanAnsweredSince(request, request.plannedAt)
+            ? [`Project ${outside.join(", ")} is outside the projects the human chose. Ask the human with coordinator_ask_human first.`]
+            : []),
+          ...(await this.taskProblems(paseo, request, input.tasks, projects)),
+          // 지금 계획 뒤에 받은 답이어야 한다. 계획을 세울 때 받은 답으로 새 작업까지 통과시키지 않는다.
+          ...humanGateProblems(request, input.tasks, request.grade, request.plannedAt),
+        ];
+        if (problems.length > 0) return { text: `Tasks rejected:\n- ${problems.join("\n- ")}`, isError: true };
+        const now = new Date().toISOString();
+        const count = request.tasks.length;
+        const saved = await this.store.update((current) => {
+          const latest = current.requests.find((entry) => entry.id === request.id);
+          if (latest?.status !== "running" || latest.tasks.length !== count) return { state: current, result: false };
+          return {
+            state: {
+              ...current,
+              requests: current.requests.map((item) =>
+                item.id === request.id
+                  ? {
+                      ...item,
+                      // 시작 카드가 다시 확인 필요로 뜬다. 사람은 더해진 작업을 본다.
+                      plannedAt: now,
+                      projectIds: item.projectIds.length > 0 ? [...new Set([...item.projectIds, ...outside])] : item.projectIds,
+                      tasks: [
+                        ...item.tasks,
+                        ...input.tasks.map((task) => ({
+                          ...newTask(request, task),
+                          decisions: [{ summary: `Added by the coordinator: ${input.reason}`, by: "coordinator" as const, at: now, qa: [] }],
+                        })),
+                      ],
+                    }
+                  : item,
+              ),
+            },
+            result: true,
+          };
+        });
+        if (!saved) return { text: `Request ${request.id} changed while you were adding tasks; read it again with coordinator_get_request.`, isError: true };
+        this.onPlanStarted(paseo);
+        return { text: `Added tasks ${input.tasks.map((task) => task.number).join(", ")} to ${request.id}. The human sees them on the start card.` };
+      },
+    });
+  }
+
+  /**
+   * 실행 중인 요청의 작업을 취소한다. 사람이 '작업 2 는 하지 마' 처럼 지시했을 때 쓴다. 그 작업에 기대는 작업도 함께 취소된다.
+   * 끝나서 머지를 기다리는 작업은 취소하지 않는다. 그 결과를 버릴지는 사람이 머지 카드에서 정한다.
+   */
+  private cancelTasksTool() {
+    return defineAgentTool({
+      name: "coordinator_cancel_tasks",
+      title: "Cancel tasks",
+      description:
+        "Cancel tasks of a running request that have not finished, when the human told you to drop that work. Tasks that depend on them are canceled too, and their workers are stopped. Finished tasks waiting for the human's merge card cannot be canceled here. A pull request a canceled task already opened stays open on GitHub: tell the human so in your final note.",
+      input: z.object({
+        requestId: z.string(),
+        taskNumbers: z.array(z.number().int().positive()).min(1),
+        reason: z.string().trim().min(1).describe("The human's instruction this follows, quoted."),
+      }),
+      execute: async (input, { paseo }) => {
+        type Outcome = { error: string } | ReturnType<typeof cancelTasksIn>;
+        const outcome = await this.store.update<Outcome>((state) => {
+          const request = state.requests.find((item) => item.id === input.requestId);
+          if (!request || request.status !== "running") return { state, result: { error: `Request ${input.requestId} is not running.` } };
+          for (const number of input.taskNumbers) {
+            const task = request.tasks.find((item) => item.number === number);
+            if (!task) return { state, result: { error: `Task ${number} does not exist.` } };
+            if (task.status === "review" || task.status === "done" || task.status === "canceled") {
+              return {
+                state,
+                result: { error: `Task ${number} is ${task.status}; only unfinished tasks can be canceled. Ask the human about finished work.` },
+              };
+            }
+          }
+          let result: ReturnType<typeof cancelTasksIn>;
+          try {
+            result = cancelTasksIn(request, input.taskNumbers, "coordinator", input.reason);
+          } catch (error) {
+            return { state, result: { error: error instanceof Error ? error.message : String(error) } };
+          }
+          return {
+            state: { ...state, requests: state.requests.map((item) => (item.id === request.id ? result.request : item)) },
+            result,
+          };
+        });
+        if ("error" in outcome) return { text: outcome.error, isError: true };
+        if (outcome.reviewerIds.length && this.reviews) {
+          for (const number of outcome.canceled) await this.reviews.abandon(paseo, input.requestId, number, outcome.reviewerIds);
+        }
+        this.onTasksCanceled(paseo, input.requestId, outcome.agentIds, outcome.requestCanceled);
+        return {
+          text: outcome.requestCanceled
+            ? `Canceled tasks ${outcome.canceled.join(", ")}; no task is left, so request ${input.requestId} is canceled.`
+            : `Canceled tasks ${outcome.canceled.join(", ")}.`,
+        };
+      },
+    });
+  }
 }
 
-/** 계획의 형식과 규칙 검사. 실패하면 코디네이터에게 이유를 돌려줘 고치게 한다. */
+const taskInput = z.object({
+  number: z.number().int().positive(),
+  name: z.string().trim().min(1),
+  projectId: z.string(),
+  dependsOn: z.array(z.number().int().positive()).default([]),
+  kind: z
+    .enum(["code", "operation"])
+    .default("code")
+    .describe("code: change files in its own worktree and open a pull request. operation: act outside the worktree on the listed targets only, with no pull request."),
+  targets: z
+    .array(z.string().trim().min(1))
+    .default([])
+    .describe("operation only: every path, branch, remote action or app it will act on, so the human can approve exactly these."),
+  scope: z.string().trim().min(1),
+  doneCriteria: z.string().trim().min(1),
+  requestRefs: z.array(z.string().trim().min(1)).min(1),
+  baseBranch: z
+    .string()
+    .trim()
+    .min(1)
+    .optional()
+    .describe(
+      "Branch to cut this task's worktree from and open its pull request against. Set it only when the work builds on a branch that is not merged into the default branch yet (see coordinator_list_branches). Omit it to use the project's configured base.",
+    ),
+});
+
+function newTask(request: CoordinatorRequest, task: z.infer<typeof taskInput>): Task {
+  return {
+    ...task,
+    baseBranch: request.baseBranches[task.projectId] ?? task.baseBranch ?? null,
+    status: "waiting" as const,
+    workspaceId: null,
+    agentId: null,
+    branch: null,
+    note: null,
+    blocker: null,
+    outbox: [],
+    decisions: [],
+    autoDecisions: [],
+    poteto: false,
+    completion: null,
+    doneNudgedAt: null,
+  };
+}
+
+/**
+ * 사람의 답이 있어야 시작하는 작업 (RULES.md H4, 운영 작업). since 뒤에 받은 답이어야 한다. 조사 전에 받은 해석 질문의 답이나
+ * 계획을 세울 때 받은 답으로, 사람이 보지 않은 변경이 통과하지 않게 한다 (2026-11-26 전수 검사).
+ */
+export function humanGateProblems(
+  request: CoordinatorRequest,
+  tasks: readonly { kind: "code" | "operation"; targets?: readonly string[] }[],
+  grade: CoordinatorRequest["grade"],
+  since: string | null,
+): string[] {
+  const answered = humanAnsweredSince(request, since);
+  const problems: string[] = [];
+  if (grade === "A" && !answered) {
+    problems.push(
+      "Grade A: investigate first (readOnly with beforeChange), then ask the human with coordinator_ask_human which changes to make. The human's answer must come after the investigation report or previous answer, and be the latest feedback.",
+    );
+  }
+  const operations = tasks.filter((task) => task.kind === "operation");
+  if (operations.length > 0) {
+    // 답한 질문 카드에 대상이 그대로 적혀 있어야 사람이 그 대상을 승인한 것이다. '무언가에 답했다'만 보면 대상을 보여 주지 않은
+    // 질문의 답으로도 통과했다 (2026-11-26 최종 검사).
+    const shown = request.lastQuestion && (!since || request.lastQuestion.answeredAt > since) ? questionText(request.lastQuestion) : null;
+    const missing = shown === null ? [] : operations.flatMap((task) => (task.targets ?? []).filter((target) => !shown.includes(normalize(target))));
+    if (!answered || shown === null) {
+      problems.push(
+        "Operation tasks act outside their worktree: ask the human with coordinator_ask_human, listing each operation task's targets word for word in the context, and plan them after the answer.",
+      );
+    } else if (missing.length > 0) {
+      problems.push(
+        `The question the human answered did not list these operation targets word for word: ${missing.map((target) => `"${target}"`).join(", ")}. Ask again with each target in the context.`,
+      );
+    }
+  }
+  return problems;
+}
+
+/** 공백 차이를 무시하고 비교한다. 대상 문자열이 질문에 그대로 들어 있는지 볼 때 쓴다. */
+function normalize(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function questionText(question: NonNullable<CoordinatorRequest["lastQuestion"]>): string {
+  return normalize(
+    [
+      question.context,
+      ...question.questions.flatMap((item) => [item.question, ...item.options.flatMap((option) => [option.label, option.description ?? ""])]),
+    ].join(" "),
+  );
+}
+
+/**
+ * 계획의 형식과 규칙 검사. 실패하면 코디네이터에게 이유를 돌려줘 고치게 한다.
+ * existing 은 실행 중인 요청에 작업을 더할 때 이미 있는 작업이다. 새 작업 번호는 그 뒤로 이어지고, 의존은 그 작업을 가리킬 수 있다.
+ */
 export function validatePlan(
   plan: {
     title: string;
-    tasks: readonly { number: number; name: string; projectId: string; dependsOn: readonly number[] }[];
+    tasks: readonly { number: number; name: string; projectId: string; dependsOn: readonly number[]; kind?: "code" | "operation"; targets?: readonly string[] }[];
   },
   language: "en" | "ko",
   usableProjects: ReadonlySet<string>,
+  existing: readonly { number: number; projectId: string; dependsOn: readonly number[]; kind?: "code" | "operation"; status?: string }[] = [],
 ): string[] {
   const problems: string[] = [];
   const numbers = plan.tasks.map((task) => task.number);
-  const expected = plan.tasks.map((_, index) => index + 1);
-  if (numbers.join(",") !== expected.join(",")) problems.push(`Task numbers must be 1..${plan.tasks.length} in order.`);
+  const expected = plan.tasks.map((_, index) => existing.length + index + 1);
+  if (numbers.join(",") !== expected.join(",")) problems.push(`Task numbers must be ${expected[0]}..${expected.at(-1)} in order.`);
   if (language === "ko" && !HANGUL.test(plan.title)) problems.push("title must be written in Korean (language is ko).");
   for (const task of plan.tasks) {
     if (!usableProjects.has(task.projectId)) problems.push(`Task ${task.number}: project ${task.projectId} is not allowed for this request.`);
@@ -1108,20 +1557,46 @@ export function validatePlan(
     for (const dependency of task.dependsOn) {
       if (dependency >= task.number) problems.push(`Task ${task.number}: dependsOn may only list earlier tasks (got ${dependency}).`);
     }
+    if (task.kind === "operation" && !(task.targets ?? []).length) {
+      problems.push(`Task ${task.number}: an operation task must list its targets.`);
+    }
   }
-  // 같은 프로젝트의 앞 작업에 이어지는 작업은 그 worktree 를 이어 쓴다 (dispatcher). 두 작업이 같은 작업을 이어 쓰면
+  // 같은 프로젝트의 앞 코드 작업에 이어지는 코드 작업은 그 worktree 를 이어 쓴다 (dispatcher). 두 작업이 같은 작업을 이어 쓰면
   // 두 워커가 한 worktree 에서 동시에 일하고, 한쪽을 머지할 때 다른 쪽의 worktree 가 지워진다.
+  const all = [...existing.filter((task) => task.status !== "canceled"), ...plan.tasks];
+  const isCode = (task: { kind?: string }) => task.kind !== "operation";
+  const continuesFrom = (task: (typeof all)[number]) => {
+    if (!isCode(task)) return null;
+    const sameProject = all.filter((dep) => task.dependsOn.includes(dep.number) && dep.projectId === task.projectId && isCode(dep));
+    return sameProject.length ? Math.max(...sameProject.map((dep) => dep.number)) : null;
+  };
   const continuing = new Map<number, number[]>();
-  for (const task of plan.tasks) {
-    const sameProject = plan.tasks.filter((dep) => task.dependsOn.includes(dep.number) && dep.projectId === task.projectId);
-    if (sameProject.length === 0) continue;
-    const from = Math.max(...sameProject.map((dep) => dep.number));
-    continuing.set(from, [...(continuing.get(from) ?? []), task.number]);
+  for (const task of all) {
+    const from = continuesFrom(task);
+    if (from !== null) continuing.set(from, [...(continuing.get(from) ?? []), task.number]);
   }
   for (const [from, followers] of continuing) {
     if (followers.length > 1) {
       problems.push(
         `Tasks ${followers.join(", ")} all continue task ${from} in the same project, so they would share one worktree. Chain them (each after the previous one) or merge them into one task.`,
+      );
+    }
+  }
+  // 같은 프로젝트의 앞 코드 작업 여럿에 기대면, 이어 쓰는 것은 가장 늦은 작업의 worktree 하나뿐이다. 나머지가 그 사슬에 없으면
+  // 그 변경은 보이지 않는다 (2026-11-26 전수 검사).
+  const byNumber = new Map(all.map((task) => [task.number, task]));
+  for (const task of plan.tasks) {
+    const from = continuesFrom(task);
+    if (from === null) continue;
+    const chain = new Set<number>();
+    for (let current: number | null = from; current !== null; current = continuesFrom(byNumber.get(current)!)) chain.add(current);
+    const missing = task.dependsOn.filter((dep) => {
+      const other = byNumber.get(dep);
+      return other && other.projectId === task.projectId && isCode(other) && !chain.has(dep);
+    });
+    if (missing.length) {
+      problems.push(
+        `Task ${task.number} depends on tasks ${[from, ...missing].join(", ")} in the same project, but only continues task ${from}'s worktree, so the changes of task ${missing.join(", ")} would not be there. Chain them.`,
       );
     }
   }

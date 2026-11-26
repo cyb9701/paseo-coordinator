@@ -2,16 +2,16 @@
 
 import type { PaseoApi } from "./paseo-api";
 import type { PluginSettings } from "@getpaseo/plugin/server";
-import type { CoordinatorRequest, CoordinatorState, Task } from "../shared/model";
+import { type CoordinatorRequest, type CoordinatorState, type Task, completionNeedsDecision } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
-import { REPORT_DONE_TOOL, continuedBy, finishRequestIfDone } from "./completion";
+import { REPORT_DONE_TOOL, continuedBy, finishRequestIfDone, recordCompletion, reportDoneInput } from "./completion";
 import { workspaceTitle } from "./coordinator";
 import type { StateStore } from "./store";
 import { type WorkerChannel, queued } from "./worker-channel";
 import { type BaseRef, remoteDefaultBranch, resolveBaseRef } from "./branches";
 import { preapprovedOptions } from "./preapprove";
 import { say } from "./say";
-import { REPORT_BLOCKER_TOOL } from "./worker-tools";
+import { REPORT_BLOCKER_TOOL, recordBlocker, reportBlockerInput } from "./worker-tools";
 
 type Settings = PluginSettings<typeof settingsSchema>;
 type TaskPatch = Partial<Pick<Task, "status" | "workspaceId" | "agentId" | "branch" | "baseBranch" | "note" | "poteto" | "doneNudgedAt">>;
@@ -23,8 +23,56 @@ type TurnOutcome = { kind: "completed" } | { kind: "failed"; error: { message: s
 
 const RECONCILE_INTERVAL_MS = 15_000;
 
-const NUDGE =
-  "[From the coordinator plugin] Your turn ended without report_done. If the task is finished and verified, call report_done now (after pushing and opening the pull request if you are the last task on the branch, unless the human's request says not to: then quote it as noPullRequestReason). If you are blocked, call report_blocker instead.";
+/** 워커 snapshot 에서 아직 도는 백그라운드 작업(셸, 모니터) 수. 프로토콜이 runningCount 를 주지 않으면 count 를 쓴다. */
+function backgroundRunning(agent: { backgroundWork?: { count: number; runningCount?: number } | null }): number {
+  return agent.backgroundWork?.runningCount ?? agent.backgroundWork?.count ?? 0;
+}
+
+type TimelineItem = { type?: string; name?: string; status?: string; callId?: string; detail?: { input?: unknown; output?: unknown } };
+
+/**
+ * 워커가 마지막으로 부른 보고 도구(report_done, report_blocker). 도구가 세션에 없어 실패했는지도 본다.
+ * 플러그인이 다시 시작되면 이미 열린 워커 세션의 플러그인 도구가 끊길 수 있다. r12 워커는 일을 다 끝내고 report_done 을 불렀지만
+ * "Tool report_done not found" 로 실패했고, 플러그인은 그 작업을 '완료 보고 없이 두 번 멈춤'으로 막았다. 사람은 성공한 작업을
+ * 취소했다 (2026-11-26).
+ */
+async function lastReportCall(
+  paseo: PaseoApi,
+  agentId: string,
+): Promise<{ tool: "done" | "blocker"; input: unknown; missing: boolean; callId: string } | null> {
+  const page = await paseo.agents.ref(agentId).timeline.refetch({ direction: "tail", limit: 40 }).catch(() => null);
+  const entries = (page as { entries?: readonly { item?: TimelineItem }[] } | null)?.entries ?? [];
+  for (const entry of [...entries].reverse()) {
+    const item = entry.item;
+    if (item?.type !== "tool_call" || !item.name) continue;
+    const tool = item.name.endsWith(REPORT_DONE_TOOL) ? "done" : item.name.endsWith(REPORT_BLOCKER_TOOL) ? "blocker" : null;
+    if (!tool) continue;
+    const output = JSON.stringify(item.detail?.output ?? "");
+    return {
+      tool,
+      input: item.detail?.input,
+      missing: item.status === "failed" && /not found/i.test(output),
+      callId: item.callId ?? JSON.stringify(item.detail?.input ?? null),
+    };
+  }
+  return null;
+}
+
+/** report_done 없이 끝난 워커에게 다시 요청하는 말. 끝내는 방법은 킥오프와 같아야 한다 (운영 작업과 로컬 기준 브랜치는 PR 이 없다). */
+function nudge(task: Task): string {
+  const finish =
+    task.kind === "operation"
+      ? "call report_done now; operation tasks need no pull request"
+      : "call report_done now, after pushing and opening the pull request if your kickoff told you to (if the human's request says not to, quote it as noPullRequestReason)";
+  return `[From the coordinator plugin] Your turn ended without report_done. If the task is finished and verified, ${finish}. If you are blocked, call report_blocker instead.`;
+}
+
+/**
+ * 백그라운드 작업을 기다리는 워커를 끝난 것으로 보지 않는 최대 시간. 빌드 대기는 그 작업이 끝나면 워커가 다시 일한다.
+ * 다만 앱 실행이나 dev 서버처럼 끝나지 않는 작업을 띄워 두고 보고 없이 멈추면 영원히 진행 중으로 남으므로, 이 시간이 지나면
+ * 보통처럼 다시 요청하고 그래도 없으면 막힘으로 둔다 (2026-11-26 최종 검사).
+ */
+const BACKGROUND_GRACE_MS = 30 * 60_000;
 
 function patch(state: CoordinatorState, requestId: string, number: number, change: TaskPatch): CoordinatorState {
   return {
@@ -39,6 +87,21 @@ function patch(state: CoordinatorState, requestId: string, number: number, chang
 
 // 선행 작업이 이 상태면 다음 작업을 시작한다. review 는 워커가 일을 마치고 사람의 확인만 남은 상태다.
 const FINISHED: ReadonlySet<Task["status"]> = new Set(["done", "review"]);
+
+/**
+ * 선행 작업이 끝나 이 작업을 시작해도 되는가. 운영 작업은 앞 코드 작업의 결과가 사람의 결정까지 끝난 뒤에만 시작한다.
+ * PR 머지 전(review)에 시작하면 '머지 뒤 브랜치 정리' 같은 운영 작업이 아직 머지되지 않은 PR 의 브랜치를 지울 수 있다
+ * (2026-11-26 최종 검사). 이어 쓰기로 done 이 된 작업은 PR 을 뒤 작업이 내므로 사슬 끝 작업을 본다. PR 도 남은 변경도 없이
+ * 끝난 작업(확인 필요)은 기다릴 결정이 없어 끝난 것으로 본다. 기다리면 사람이 보지 않는 카드 때문에 운영 작업이 멈춘다.
+ */
+function dependencyFinished(request: CoordinatorRequest, dependency: Task | undefined, task: Task): boolean {
+  if (!dependency || !FINISHED.has(dependency.status)) return false;
+  if (task.kind !== "operation" || dependency.kind === "operation") return true;
+  let end: Task = dependency;
+  for (let next = continuedBy(request, end); next; next = continuedBy(request, end)) end = next;
+  if (end.status === "done") return true;
+  return end.status === "review" && !completionNeedsDecision(end);
+}
 
 async function readSettings(settings: Settings) {
   const state = await settings.read();
@@ -79,11 +142,12 @@ function kickoff(
   base: BaseRef | null,
 ): string {
   const readOnly = request.kind === "read";
+  const operation = !readOnly && task.kind === "operation";
   const others = request.tasks
     .filter((other) => other.number !== task.number)
     .map((other) => `- ${other.number} ${other.name}${other.dependsOn.length ? ` (after ${other.dependsOn.join(", ")})` : ""}`);
   const language = request.language === "ko" ? "Korean" : "English";
-  const successor = readOnly ? null : continuedBy(request, task);
+  const successor = readOnly || operation ? null : continuedBy(request, task);
   return [
     ...(poteto ? ["/poteto-mode", ""] : []),
     `You are a worker started by the Paseo Coordinator for request ${request.id}, task ${task.number} of ${request.tasks.length}.`,
@@ -102,7 +166,11 @@ function kickoff(
     "",
     "Rules:",
     // r12(2026-11-26): 워커가 필요한 코드가 다른 worktree 의 브랜치에 있자 그 브랜치를 checkout 했다. 기준이 틀렸으면 보고하게 한다.
-    `- Work only inside this worktree, on branch ${branch}. Do not read or change other worktrees, and do not check out other branches or commits. If the code you need is not in this worktree, report it with report_blocker.`,
+    // 운영 작업은 사람이 승인한 대상에 한해 worktree 밖에서 일한다. 이 예외가 없을 때 범위와 규칙이 부딪혀, 워커가 어느 쪽을
+    // 따를지 스스로 골랐다 (r15).
+    operation
+      ? `- This is an operation task: the human approved these targets outside this worktree, and only these: ${task.targets.map((target) => `"${target}"`).join("; ")}. Do not touch anything else outside this worktree; if you need to, report it with report_blocker. Do not edit, commit or push files of this repository and do not open a pull request.`
+      : `- Work only inside this worktree, on branch ${branch}. Do not read or change other worktrees, and do not check out other branches or commits. If the code you need is not in this worktree, report it with report_blocker.`,
     ...(base && !continuesFrom ? [`- This worktree was cut from ${base.branch}.`] : []),
     ...(continuesFrom
       ? [
@@ -111,17 +179,23 @@ function kickoff(
       : []),
     readOnly
       ? "- This is a read-only investigation. Do not change, create or delete any file. Investigate and report."
-      : successor
+      : operation
+        ? "- Before acting on each target, check that it is still in the state the plan describes. If it is not, do not act on it: report it with report_blocker."
+        : successor
         ? `- You may edit files here, run local builds, tests and linters, and commit. Do not push or open a pull request: task ${successor.number} (${successor.name}) continues in this worktree and opens it.`
         : base && !base.remote
           ? `- You may edit files here, run local builds, tests and linters, and commit on ${branch}. Do not push or open a pull request: the base branch ${base.branch} exists only on this machine, so there is nothing on GitHub to open it against. When done, call report_done with noPullRequestReason saying the base branch ${base.branch} is local only.`
           : `- You may edit files here, run local builds, tests and linters, commit, push this branch, and open a pull request from it against ${base ? `${base.branch} (gh pr create --base ${base.branch})` : "the default branch"}.`,
-    "- Never merge pull requests, push to any other branch, force push, write to any database (any environment), deploy, send messages to people, or read or write secret files (.env, keys, credentials).",
+    operation
+      ? "- Never merge pull requests, force push, write to any database (any environment), deploy, send messages to people, or read or write secret files (.env, keys, credentials). Push to or delete a remote branch only when one of the targets names it."
+      : "- Never merge pull requests, push to any other branch, force push, write to any database (any environment), deploy, send messages to people, or read or write secret files (.env, keys, credentials).",
     "- If you need a decision the request and scope do not settle, a change to your scope or approach, or you are stuck, call the report_blocker tool with the facts, the options and your recommendation, then end your turn and wait. Do not ask in plain text: only report_blocker reaches the human as a decision card.",
     readOnly
       ? `- Finish with a short report in ${language}: what you found, where you found it, and what is left unknown.`
-      : `- When the task is done and verified${successor ? " and committed" : ", pushed, with the pull request open"}, call the report_done tool as your last action, written in ${language}. Done means your verification passed${successor ? "" : " and the pull request exists"}. Never merge it: the human merges from a card. If the human's request says not to commit, push or open a pull request, follow the request and quote it as noPullRequestReason in report_done.`,
-    ...(poteto ? potetoOverride(request.grade, branch) : []),
+      : operation
+        ? `- When every target is done and checked, call the report_done tool as your last action, written in ${language}. In verification, list each target with what you did and how you checked it. No pull request is needed.`
+        : `- When the task is done and verified${successor ? " and committed" : ", pushed, with the pull request open"}, call the report_done tool as your last action, written in ${language}. Done means your verification passed${successor ? "" : " and the pull request exists"}. Never merge it: the human merges from a card. If the human's request says not to commit, push or open a pull request, follow the request and quote it as noPullRequestReason in report_done.`,
+    ...(poteto && !operation ? potetoOverride(request.grade, branch) : []),
   ].join("\n");
 }
 
@@ -141,7 +215,17 @@ export class Dispatcher {
     private readonly settings: Settings,
     private readonly channel: WorkerChannel,
     private readonly onRequestDone: (paseo: PaseoApi, requestId: string) => void,
+    /**
+     * 코디네이터가 할 일이 생겼다(조사가 끝나 돌아왔거나, 실패한 막힘 보고를 다시 처리했다). 코디네이터에게 알린다.
+     * 워커의 턴 종료는 코디네이터 알림을 부르지 않으므로 이 길로 알린다.
+     */
+    private readonly onCoordinatorWork: (paseo: PaseoApi, requestId: string) => void = () => {},
   ) {}
+
+  /** 실패한 보고 호출을 이미 다시 처리했는지. 같은 호출을 턴마다 다시 처리하지 않는다. */
+  private readonly replayed = new Set<string>();
+  /** 워커가 백그라운드 작업을 남긴 채 쉬는 것을 처음 본 시각. 플러그인 프로세스 동안만 센다. */
+  private readonly backgroundSince = new Map<string, number>();
 
   async run(paseo: PaseoApi): Promise<void> {
     if (this.running) {
@@ -204,6 +288,24 @@ export class Dispatcher {
     }
     // report_blocker 로 보고하고 멈춘 워커는 결정을 기다리는 중이다. 끝난 것으로 보지 않는다.
     if (task.blocker) return;
+    if (outcome.kind === "completed") {
+      // 백그라운드 작업(빌드 대기, 모니터)을 걸어 두고 턴을 끝낸 워커는 그 작업이 끝나면 다시 일한다. 끝난 것으로 보거나 재촉하면
+      // 일하는 중인 작업이 막힘이 된다 (r12: flutter run 을 기다리는 턴 종료를 '보고 없이 멈춤'으로 셌다).
+      const snapshot = await paseo.agents.ref(agentId).refresh().catch(() => null);
+      const background = snapshot ? backgroundRunning(snapshot.agent as Parameters<typeof backgroundRunning>[0]) : 0;
+      const since = this.backgroundSince.get(agentId) ?? Date.now();
+      if (background > 0) this.backgroundSince.set(agentId, since);
+      else this.backgroundSince.delete(agentId);
+      if (background > 0 && !task.completion && Date.now() - since < BACKGROUND_GRACE_MS) {
+        const note = say(
+          request.language,
+          `The worker is waiting for ${background} background job(s) to finish.`,
+          `워커가 백그라운드 작업 ${background}개가 끝나기를 기다리고 있어요.`,
+        );
+        if (task.note !== note) await this.patchTask(request.id, task.number, { note });
+        return;
+      }
+    }
     if (outcome.kind === "failed") {
       await this.patchTask(request.id, task.number, {
         status: "blocked",
@@ -230,9 +332,11 @@ export class Dispatcher {
    */
   private async settleChange(paseo: PaseoApi, request: CoordinatorRequest, task: Task): Promise<boolean> {
     if (task.completion) {
-      await this.patchTask(request.id, task.number, { status: continuedBy(request, task) ? "done" : "review", note: null });
+      await this.patchTask(request.id, task.number, { status: continuedBy(request, task) && task.kind !== "operation" ? "done" : "review", note: null });
       return true;
     }
+    const replay = await this.replayFailedReport(paseo, request, task);
+    if (replay !== null) return replay;
     if (!task.doneNudgedAt) {
       // 다시 요청하는 메시지는 표시와 같은 update 에서 outbox 에 넣는다 (WorkerChannel 설명).
       await this.store.update((state) => ({
@@ -244,7 +348,7 @@ export class Dispatcher {
               : {
                   ...item,
                   tasks: item.tasks.map((current) =>
-                    current.number !== task.number ? current : queued({ ...current, doneNudgedAt: new Date().toISOString() }, NUDGE),
+                    current.number !== task.number ? current : queued({ ...current, doneNudgedAt: new Date().toISOString() }, nudge(current)),
                   ),
                 },
           ),
@@ -264,6 +368,72 @@ export class Dispatcher {
         "The worker ended twice without reporting the task done. Open the worker to see where it stopped.",
         "워커가 완료 보고 없이 두 번 멈췄어요. 워커를 열어 어디서 멈췄는지 확인해 주세요.",
       ),
+    });
+    return true;
+  }
+
+  /**
+   * 워커가 보고 도구를 불렀는데 도구가 세션에 없어 실패했으면, 그 호출의 입력으로 보고를 처리한다. 그리고 세션을 다시 열어
+   * 도구를 다시 붙인다(reload 는 session-open hook 을 다시 돈다). 처리할 것이 없으면 null.
+   * 상태를 바꿨으면 true, 워커에게 다시 하라고 보냈으면 false (settleChange 와 같은 뜻).
+   */
+  private async replayFailedReport(paseo: PaseoApi, request: CoordinatorRequest, task: Task): Promise<boolean | null> {
+    if (!task.agentId) return null;
+    const call = await lastReportCall(paseo, task.agentId);
+    if (!call?.missing || this.replayed.has(`${task.agentId}:${call.callId}`)) return null;
+    this.replayed.add(`${task.agentId}:${call.callId}`);
+    const agent = await paseo.agents.ref(task.agentId).refresh().catch(() => null);
+    const cwd = agent?.agent.cwd;
+    // 도구를 다시 붙인다. 쉬고 있을 때만 한다. 일하는 중에 하면 진행 중인 턴이 끊긴다.
+    if (agent && agent.agent.status !== "running") await paseo.agents.ref(task.agentId).reload().catch(() => undefined);
+    const note = say(
+      request.language,
+      "The worker's report tool was missing after the plugin restarted, so the plugin used the report the worker tried to send.",
+      "플러그인이 다시 시작된 뒤 워커의 보고 도구가 끊겨, 워커가 보내려던 보고 내용으로 처리했어요.",
+    );
+    if (call.tool === "blocker") {
+      const parsed = reportBlockerInput.safeParse(call.input);
+      if (!parsed.success) return null;
+      const found = await recordBlocker(this.store, task.agentId, parsed.data);
+      if (!found) return null;
+      this.onCoordinatorWork(paseo, request.id);
+      return true;
+    }
+    const parsed = reportDoneInput.safeParse(call.input);
+    if (!parsed.success || !cwd) return null;
+    const result = await recordCompletion(this.store, { id: task.agentId, cwd }, parsed.data);
+    if (result.isError) {
+      // 보고는 왔지만 조건이 맞지 않는다(PR 이 없음 등). 도구를 다시 붙였으니 워커에게 이유를 알려 다시 보고하게 한다.
+      await this.store.update((state) => ({
+        state: {
+          ...state,
+          requests: state.requests.map((item) =>
+            item.id !== request.id
+              ? item
+              : {
+                  ...item,
+                  tasks: item.tasks.map((current) =>
+                    current.number !== task.number
+                      ? current
+                      : queued(
+                          { ...current, doneNudgedAt: new Date().toISOString() },
+                          `[From the coordinator plugin] Your report_done call failed because the tool was missing; it is back now. The report was checked and not accepted: ${result.text}`,
+                        ),
+                  ),
+                },
+          ),
+        },
+        result: undefined,
+      }));
+      await this.channel.flush(paseo, request.id, task.number).catch(() => undefined);
+      return false;
+    }
+    const updated = (await this.store.read()).requests.find((item) => item.id === request.id);
+    const current = updated?.tasks.find((item) => item.number === task.number);
+    if (!updated || !current?.completion) return null;
+    await this.patchTask(request.id, task.number, {
+      status: continuedBy(updated, current) && current.kind !== "operation" ? "done" : "review",
+      note,
     });
     return true;
   }
@@ -314,7 +484,7 @@ export class Dispatcher {
       const byNumber = new Map(request.tasks.map((task) => [task.number, task]));
       for (const task of request.tasks) {
         if (task.status !== "waiting") continue;
-        if (task.dependsOn.every((number) => FINISHED.has(byNumber.get(number)?.status ?? "waiting"))) {
+        if (task.dependsOn.every((number) => dependencyFinished(request, byNumber.get(number), task))) {
           ready.push({ request, task });
         }
       }
@@ -350,10 +520,16 @@ export class Dispatcher {
     if (!project) throw new Error(say(request.language, `Project ${task.projectId} is not registered on this host.`, `프로젝트 ${task.projectId} 가 이 호스트에 등록돼 있지 않아요.`));
     // 같은 프로젝트의 앞 작업에 이어지는 작업은 그 작업의 worktree 와 브랜치를 이어서 쓴다. 따로 worktree 를 만들면
     // 앞 작업의 (커밋하지 않은) 결과가 보이지 않아, 워커가 다른 worktree 를 뒤져 읽었다 (2026-11-25 r6 테스트).
+    // 운영 작업은 이어 쓰지 않고, 운영 작업의 worktree 도 넘겨받지 않는다 (continuedBy 와 같은 규칙).
     const continuesFrom =
-      request.tasks
-        .filter((other) => task.dependsOn.includes(other.number) && other.projectId === task.projectId && other.workspaceId)
-        .sort((a, b) => b.number - a.number)[0] ?? null;
+      task.kind === "operation"
+        ? null
+        : (request.tasks
+            .filter(
+              (other) =>
+                task.dependsOn.includes(other.number) && other.projectId === task.projectId && other.kind !== "operation" && other.workspaceId,
+            )
+            .sort((a, b) => b.number - a.number)[0] ?? null);
     // 한 작업의 worktree 는 한 작업만 이어 쓴다. 둘이 이어 쓰면 두 워커가 한 worktree 에서 동시에 일하고,
     // 한쪽을 머지할 때 다른 쪽의 worktree 가 지워진다. 계획 검증(validatePlan)이 막지만 여기서도 한 번 더 막는다.
     if (continuesFrom && continuedBy(request, continuesFrom)?.number !== task.number) {
@@ -427,7 +603,8 @@ export class Dispatcher {
         "paseo-coordinator.task": String(task.number),
       },
     });
-    const poteto = values.poteto ? await this.potetoFor(paseo, request, provider, agent.id) : { use: false, note: null };
+    // 운영 작업은 코드를 바꾸지 않아 poteto 의 구현 흐름이 맞지 않는다.
+    const poteto = values.poteto && task.kind !== "operation" ? await this.potetoFor(paseo, request, provider, agent.id) : { use: false, note: null };
     await paseo.agents.ref(agent.id).send(kickoff(request, task, branch, continuesFrom, poteto.use, base));
     // 킥오프를 보낸 뒤에 기록한다. 먼저 기록하면 보정 검사(reconcile)가 프롬프트 전의 쉬는 워커를 끝난 것으로 본다.
     // 그사이 요청이 취소됐거나 다시 계획됐으면 이 워커는 맡을 작업이 없다. 정리한다.
@@ -492,13 +669,33 @@ export class Dispatcher {
    */
   async afterCancel(paseo: PaseoApi, requestId: string, agentIds: readonly string[]): Promise<void> {
     for (const agentId of agentIds) await paseo.agents.ref(agentId).archive().catch(() => undefined);
+    await this.settleRequest(paseo, requestId);
+  }
+
+  /** 실행 중인 모든 요청을 마무리할 수 있으면 마무리한다. 코디네이터의 턴 종료 hook 이 유실돼도 주기 검사가 이어 간다. */
+  async settleAll(paseo: PaseoApi): Promise<void> {
+    const running = (await this.store.read()).requests.filter((request) => request.status === "running").map((request) => request.id);
+    for (const id of running) await this.settleRequest(paseo, id);
+  }
+
+  /**
+   * 요청의 작업이 모두 끝났으면 요청을 마무리한다. 읽기 요청은 보고를 모으고, 변경 요청은 끝낸다.
+   * 코디네이터의 턴이 끝난 뒤에도 부른다. 열린 질문 때문에 미뤘던 마무리를 사람이 답하고 코디네이터가 처리한 뒤 이어 간다.
+   */
+  async settleRequest(paseo: PaseoApi, requestId: string): Promise<void> {
     const request = (await this.store.read()).requests.find((item) => item.id === requestId);
-    if (!request || request.status !== "running") return;
+    if (!request || request.status !== "running" || request.tasks.length === 0) return;
     if (request.kind === "read") await this.compileAnswer(paseo, requestId);
     else if (await finishRequestIfDone(this.store, requestId)) this.onRequestDone(paseo, requestId);
   }
 
-  /** 읽기 조사가 모두 끝났으면 워커들의 마지막 보고를 모아 답변으로 만든다. */
+  /**
+   * 읽기 조사가 모두 끝났으면 워커들의 마지막 보고를 모은다. 보통은 답변 카드가 된다. 다음 경우에는 답변 카드로 끝내지 않고
+   * 코디네이터에게 돌려준다. 답변 카드의 확인은 요청을 끝내므로, 사람이 바란 변경이 조용히 사라진다 (r13~r15, 2026-11-26).
+   * - 변경 전 조사(beforeChange): 코디네이터가 이 보고로 질문 카드를 만들거나 바로 계획한다 (RULES.md §2.0).
+   * - 조사가 도는 동안 사람이 지시를 보냈다: 그 지시(예: '끝나면 그대로 지워줘')를 코디네이터가 처리해야 한다.
+   * 코디네이터의 질문 카드가 열려 있으면 그 답을 기다린다(needs_input). 답변 카드로 바꾸면 질문 카드가 사라진다.
+   */
   private async compileAnswer(paseo: PaseoApi, requestId: string): Promise<void> {
     const request = (await this.store.read()).requests.find((item) => item.id === requestId);
     if (!request || request.status !== "running" || !request.tasks.every((task) => task.status === "done" || task.status === "canceled")) return;
@@ -516,27 +713,36 @@ export class Dispatcher {
       sections.push(`## ${task.number} ${task.name}\n\n${last?.item?.text?.trim() ?? "(no report)"}`);
     }
     const at = new Date().toISOString();
-    await this.store.update((state) => ({
-      state: {
-        ...state,
-        requests: state.requests.map((item) =>
-          item.id === requestId
-            ? {
-                ...item,
-                status: "answered" as const,
-                answer: {
-                  text: sections.join("\n\n"),
-                  sources: request.tasks.filter((task) => task.status !== "canceled").map((task) => `${task.number} ${task.name}`),
-                  unknowns: [],
-                  projectIds: [...new Set(request.tasks.map((task) => task.projectId))],
-                  at,
-                },
-              }
-            : item,
-        ),
-      },
-      result: undefined,
-    }));
+    const text = sections.join("\n\n");
+    // 워커들의 타임라인을 읽는 사이에 요청이 취소되거나 바뀌었을 수 있다. 저장하는 순간에 다시 본다.
+    const outcome = await this.store.update((state) => {
+      const current = state.requests.find((item) => item.id === requestId);
+      if (current?.status !== "running" || current.kind !== "read") return { state, result: null };
+      // 조사가 도는 동안 사람이 보낸 것은 지시든 질문의 답이든 코디네이터가 처리해야 한다 ('예, 끝나면 지워줘' 같은 답도 있다).
+      // 계획 시각이 없는 옛 기록은 계획 뒤의 피드백을 알 수 없어 예전처럼 답변으로 만든다.
+      const instructed = Boolean(current.plannedAt) && current.feedback.some((item) => item.at > current.plannedAt!);
+      const toCoordinator = current.beforeChange || instructed;
+      const next = toCoordinator
+        ? { ...current, status: current.question ? ("needs_input" as const) : ("planning" as const), investigation: { text, at } }
+        : {
+            ...current,
+            status: current.question ? ("needs_input" as const) : ("answered" as const),
+            answer: {
+              text,
+              sources: current.tasks.filter((task) => task.status !== "canceled").map((task) => `${task.number} ${task.name}`),
+              // 코디네이터가 계획에 적은 해석과 가정을 답에 옮긴다. '실행은 후속 지시가 필요' 같은 경고가 사람에게 보여야 한다
+              // (r13·r14 는 이 경고가 답변 카드에 없어 확인만 누르고 끝났다).
+              unknowns: current.unknowns,
+              projectIds: [...new Set(current.tasks.map((task) => task.projectId))],
+              at,
+            },
+          };
+      return {
+        state: { ...state, requests: state.requests.map((item) => (item.id === requestId ? next : item)) },
+        result: toCoordinator ? "coordinator" : "answer",
+      };
+    });
+    if (outcome === "coordinator") this.onCoordinatorWork(paseo, requestId);
   }
 
   /** 요청이 실행 중이고 작업이 아직 이 브랜치로 표시돼 있을 때만 기록한다. 기록했으면 true. */

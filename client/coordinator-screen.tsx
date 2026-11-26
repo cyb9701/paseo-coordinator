@@ -3,7 +3,6 @@ import type { PluginScreenProps, PluginSurfaceProps } from "@getpaseo/plugin/cli
 import { useAgents } from "@getpaseo/plugin/client";
 import { useState } from "react";
 import { ScrollView, Text, View } from "react-native";
-import { isVisibleAgent } from "./agent-state";
 import { CoordinatorStateProvider, requestReactionCount, useCoordinatorState } from "./coordinator-state";
 import { FontProvider, useFonts } from "./fonts";
 import { useT } from "./i18n";
@@ -41,7 +40,7 @@ function ScreenBody({ theme, layout, host, navigation }: PluginScreenProps) {
   const ctx: ViewContext = { theme, compact: layout.compact, hostId: host.id, now, navigation, t, fonts };
   const waiting = useAgents({
     hosts: [host.id],
-    where: (agent: PluginAgentSnapshot) => isVisibleAgent(agent) && classify.column(agent) === "react",
+    where: (agent: PluginAgentSnapshot) => classify.needsMyDecision(agent),
   });
   const { state } = useCoordinatorState();
   const blocked =

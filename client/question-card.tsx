@@ -10,7 +10,7 @@ import { formatAgo } from "./time";
 import { Chip, ChoiceBox, CtaButton, type ViewContext } from "./ui";
 
 /**
- * 질문 카드 (반응 필요). 코디네이터가 스스로 정할 수 없는 것만 묻는다 (RULES.md §2.0):
+ * 질문 카드 (내 결정 필요). 코디네이터가 스스로 정할 수 없는 것만 묻는다 (RULES.md §2.0):
  * 요청을 두 가지 이상으로 읽을 수 있을 때, 사람이 정할 선택이 있을 때, A 등급의 실제 변경을 시작할 때.
  * 읽는 순서: 내 요청 → 추가 지시 → 배경 → 질문 → 결정할 것 → 버튼 (DESIGN.md 카드 읽는 순서).
  */
@@ -22,11 +22,12 @@ export function QuestionCard({ request, ctx }: { request: CoordinatorRequest; ct
   const [typed, setTyped] = useState<Record<string, string>>({});
   const [instructing, setInstructing] = useState(false);
   const [instruction, setInstruction] = useState("");
+  const [showReport, setShowReport] = useState(false);
   const question = request.question;
   const action = useMutation({
     mutationFn: async (kind: "answer" | "instruct" | "cancel") => {
       if (kind === "cancel") return cancel({ id: request.id });
-      if (kind === "instruct") return revise({ id: request.id, text: instruction });
+      if (kind === "instruct") return revise({ id: request.id, text: instruction, answersQuestion: true });
       const answers = (question?.questions ?? []).map((item) => ({
         question: item.question,
         answer: typed[item.question]?.trim() || selected[item.question] || "",
@@ -83,6 +84,23 @@ export function QuestionCard({ request, ctx }: { request: CoordinatorRequest; ct
       <Row label={ctx.t("questionCard.context")} ctx={ctx}>
         <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body }}>{question.context}</Text>
       </Row>
+      {/* A 등급 변경 전 조사의 원문. 배경은 코디네이터의 요약이라, 근거를 직접 보고 고를 수 있게 원문을 펼쳐 볼 수 있게 둔다. */}
+      {request.investigation ? (
+        <Row label={ctx.t("questionCard.investigation")} ctx={ctx}>
+          <View style={{ gap: 8, alignItems: "flex-start" }}>
+            <CtaButton
+              label={showReport ? ctx.t("questionCard.hideInvestigation") : ctx.t("questionCard.showInvestigation")}
+              theme={ctx.theme}
+              onPress={() => setShowReport((value) => !value)}
+            />
+            {showReport ? (
+              <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.5) }}>
+                {request.investigation.text}
+              </Text>
+            ) : null}
+          </View>
+        </Row>
+      ) : null}
       <Row label={ctx.t("questionCard.questions")} ctx={ctx}>
         {question.questions.map((item) => (
           <View key={item.question} style={{ gap: 8, marginBottom: 6 }}>

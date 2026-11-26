@@ -438,6 +438,20 @@ export function SettingsView({ theme, hostId, t }: { theme: PluginTheme; hostId:
         </Wrap>
       </Block>
 
+      <Block title={t("settings.autoDecisions")} hint={t("settings.autoDecisionsHint")} theme={theme}>
+        <Wrap>
+          {[true, false].map((on) => (
+            <ChoiceBox
+              key={String(on)}
+              label={on ? t("settings.autoDecisionsOn") : t("settings.autoDecisionsOff")}
+              selected={draft.autoDecisions === on}
+              onPress={() => update((current) => ({ ...current, autoDecisions: on }))}
+              theme={theme}
+            />
+          ))}
+        </Wrap>
+      </Block>
+
       <Block title={t("settings.reviewers")} hint={t("settings.reviewersHint")} theme={theme}>
         {catalog.isError ? (
           <Note

@@ -3,7 +3,7 @@ import type { PluginSettings } from "@getpaseo/plugin/server";
 import { defineAgentTool } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import type { CoordinatorRequest, CoordinatorState, Task } from "../shared/model";
-import { AUTO_RULES } from "../shared/model";
+import { AUTO_RULES, revertRoute } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
 import type { StateStore } from "./store";
 import { type WorkerChannel, queued } from "./worker-channel";
@@ -155,6 +155,10 @@ export class ReviewRunner {
   precheck(state: CoordinatorState, request: CoordinatorRequest, task: Task, rule: (typeof AUTO_RULES)[number]): string | null {
     if (request.grade === "A") return "Grade A requests are never decided automatically (RULES.md H4).";
     if (state.disabledRules.includes(rule)) return `Rule ${rule} is switched off after the human reverted its decisions (RULES.md §5).`;
+    // 사람이 이 요청에서 이 규칙의 자동 결정을 되돌렸으면, 요청이 끝날 때까지 같은 규칙으로 자동 처리하지 않는다 (RULES.md §8).
+    if (request.tasks.some((other) => other.autoDecisions.some((item) => item.rule === rule && item.reverted))) {
+      return `The human reverted a ${rule} decision in this request, so ${rule} is not used again until the request ends (RULES.md §8).`;
+    }
     if (task.autoDecisions.length >= MAX_AUTO_PER_TASK) {
       return `This task already had ${task.autoDecisions.length} automatic decisions (RULES.md H6).`;
     }
@@ -266,9 +270,16 @@ export class ReviewRunner {
     this.clearTimer(`${requestId}:${taskNumber}`);
     const passed = review.reviewers.length === review.required && review.reviewers.every((item) => item.verdict === "PASS");
     const at = new Date().toISOString();
+    // 읽은 뒤 저장하기 전에 사람이 카드에서 먼저 정했거나 워커가 다시 보고했을 수 있다. 같은 블로커의 같은 검토일 때만 마무리한다.
+    // 아니면 사람의 결정과 자동 답이 함께 가거나, 새 보고가 조용히 사라진다 (2026-11-26 전수 검사).
+    const sameReview = (task: Task) => task.blocker?.at === blocker.at && task.blocker.review?.status === "running";
     if (passed) {
       const message = `[Decision from the coordinator, verified by ${review.required} independent reviewers, on what you reported: "${blocker.summary}"]\n${proposal.answer}\nContinue your task with this decision.`;
-      await this.store.update((state) => ({
+      const applied = await this.store.update((state) => {
+        const target = state.requests.find((request) => request.id === requestId)?.tasks.find((task) => task.number === taskNumber);
+        if (!target || !sameReview(target)) return { state, result: false };
+        return {
+        result: true,
         state: {
           ...state,
           requests: state.requests.map((request) =>
@@ -306,11 +317,13 @@ export class ReviewRunner {
                 },
           ),
         },
-        result: undefined,
-      }));
-      await this.channel.flush(paseo, requestId, taskNumber).catch((error: unknown) =>
-        console.error(`[coordinator] could not send the reviewed answer for ${requestId}:${taskNumber}; it stays queued`, error),
-      );
+        };
+      });
+      if (applied) {
+        await this.channel.flush(paseo, requestId, taskNumber).catch((error: unknown) =>
+          console.error(`[coordinator] could not send the reviewed answer for ${requestId}:${taskNumber}; it stays queued`, error),
+        );
+      }
     } else {
       // 사람 카드로 돌린다. 코디네이터의 제안을 선택지 하나로 두고, 검토자의 우려를 '확인할 것'에 그대로 넣는다.
       // 사람이 읽는 카드 문구는 요청 언어를 따른다. 검토자의 우려 원문은 검토자가 쓴 그대로 둔다.
@@ -323,7 +336,7 @@ export class ReviewRunner {
         if (item.verdict === "PASS") return [];
         return item.objections.length ? item.objections.map((text) => `${label} ${item.verdict}: ${text}`) : [`${label}: ${item.verdict}`];
       });
-      await this.patchBlocker(requestId, taskNumber, (current) => ({
+      await this.patchBlocker(requestId, taskNumber, (current) => current.at !== blocker.at || current.review?.status !== "running" ? current : ({
         ...current,
         objections,
         review: current.review ? { ...current.review, status: "failed" } : current.review,
@@ -405,6 +418,9 @@ export class ReviewRunner {
   /**
    * 자동 결정 카드. 확인하거나, 되돌리고 지시한다. 되돌리면 워커에게 바로잡는 지시를 보내고,
    * 같은 규칙의 최근 자동 결정 중 되돌린 것이 기준을 넘으면 그 규칙을 끈다 (RULES.md §5 자동 정지).
+   * 지시가 어디로 가는지는 revertRoute 가 정한다. 작업이 끝나 보낼 워커가 없으면 지시를 보내지 않고 '잘못된 결정'으로만
+   * 표시한다. 머지한 작업의 되돌리기가 정리된 워커에게 가고 카드는 '되돌림'으로 닫히던 문제를 막는다 (2026-11-26 전수 검사).
+   * 결정 카드가 열린 작업이면 지시는 그 결정과 함께 간다 (WorkerChannel.flush).
    */
   async reviewAutoDecision(
     paseo: PaseoApi,
@@ -414,37 +430,52 @@ export class ReviewRunner {
     const decision = found?.task.autoDecisions.find((item) => item.id === input.id);
     if (!found || !decision) throw new Error(say(found?.request.language, "This automatic decision no longer exists.", "이 자동 결정은 더 이상 없어요."));
     const revert = Boolean(input.revertText?.trim());
+    const route = revertRoute(found.request, found.task);
     const at = new Date().toISOString();
-    const revertMessage = `[From the human] The earlier automatic decision is withdrawn: "${decision.answer}"\n${input.revertText}\nUndo what that decision changed if needed (${decision.undo}), then continue with this instruction.`;
+    const revertMessage = `[From the human] The earlier automatic decision on task ${input.taskNumber} is withdrawn: "${decision.answer}"\n${input.revertText}\nUndo what that decision changed if needed (${decision.undo}), then continue with this instruction.`;
+    const target = route.kind === "markOnly" ? null : route.taskNumber;
     await this.store.update((state) => {
-      const requests = state.requests.map((request) =>
-        request.id !== input.requestId
-          ? request
-          : {
-              ...request,
-              tasks: request.tasks.map((task) =>
-                task.number !== input.taskNumber
-                  ? task
-                  : (() => {
-                      const updated = {
-                      ...task,
-                      autoDecisions: task.autoDecisions.map((item) =>
-                        item.id === input.id ? { ...item, reviewedAt: at, reverted: item.reverted || revert } : item,
-                      ),
-                      decisions: revert
-                        ? [...task.decisions, { summary: `Reverted: ${decision.answer} → ${input.revertText}`, by: "human" as const, at, qa: [] }]
-                        : task.decisions,
-                      // 이미 끝난 작업이면 다시 실행 중으로 돌린다. 예전 완료 보고가 남으면 머지 카드가 바뀌기 전 내용을 보여준다.
-                      ...(revert && (task.status === "review" || task.status === "done") && !task.completion?.closedAt
-                        ? { status: "running" as const, completion: null, doneNudgedAt: null }
-                        : {}),
-                    };
-                      // 되돌린 지시는 상태 변경과 같은 update 에서 outbox 에 넣는다 (WorkerChannel 설명).
-                      return revert ? queued(updated, revertMessage) : updated;
-                    })(),
-              ),
-            },
-      );
+      const requests = state.requests.map((request) => {
+        if (request.id !== input.requestId) return request;
+        return {
+          ...request,
+          tasks: request.tasks.map((task) => {
+            let updated = task;
+            if (task.number === input.taskNumber) {
+              updated = {
+                ...updated,
+                autoDecisions: updated.autoDecisions.map((item) =>
+                  item.id === input.id ? { ...item, reviewedAt: at, reverted: item.reverted || revert } : item,
+                ),
+                decisions: revert
+                  ? [
+                      ...updated.decisions,
+                      {
+                        summary:
+                          route.kind === "markOnly"
+                            ? `Marked wrong (task already ${route.reason}; nothing sent): ${decision.answer} → ${input.revertText}`
+                            : `Reverted: ${decision.answer} → ${input.revertText}${route.kind === "successor" ? ` (sent to task ${route.taskNumber}, which continues this worktree)` : ""}`,
+                        by: "human" as const,
+                        at,
+                        qa: [],
+                      },
+                    ]
+                  : updated.decisions,
+              };
+            }
+            if (revert && target !== null && task.number === target) {
+              // 머지 카드를 기다리던 작업이면 다시 실행 중으로 돌린다. 예전 완료 보고가 남으면 머지 카드가 바뀌기 전 내용을 보여준다.
+              const reopened =
+                updated.status === "review" && !updated.completion?.closedAt
+                  ? { ...updated, status: "running" as const, completion: null, doneNudgedAt: null }
+                  : updated;
+              // 되돌린 지시는 상태 변경과 같은 update 에서 outbox 에 넣는다 (WorkerChannel 설명).
+              updated = queued(reopened, revertMessage);
+            }
+            return updated;
+          }),
+        };
+      });
       const recent = requests
         .flatMap((request) => request.tasks.flatMap((task) => task.autoDecisions))
         .filter((item) => item.rule === decision.rule)
@@ -457,9 +488,9 @@ export class ReviewRunner {
           : state.disabledRules;
       return { state: { ...state, requests, disabledRules }, result: undefined };
     });
-    if (revert) {
-      await this.channel.flush(paseo, input.requestId, input.taskNumber).catch((error: unknown) =>
-        console.error(`[coordinator] could not send the revert for ${input.requestId}:${input.taskNumber}; it stays queued`, error),
+    if (revert && target !== null) {
+      await this.channel.flush(paseo, input.requestId, target).catch((error: unknown) =>
+        console.error(`[coordinator] could not send the revert for ${input.requestId}:${target}; it stays queued`, error),
       );
     }
   }

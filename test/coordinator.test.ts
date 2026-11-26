@@ -14,9 +14,9 @@ import { join } from "node:path";
 import { describe, test } from "node:test";
 import { resolveBaseRef } from "../server/branches";
 import { CompletionRunner } from "../server/completion";
-import { validatePlan } from "../server/coordinator";
+import { CoordinatorRuntime, validatePlan } from "../server/coordinator";
 import { Dispatcher } from "../server/dispatcher";
-import { answerQuestions, askCoordinator, cancelTask, resolveBlocker, retryTask } from "../server/requests";
+import { acknowledge, answerQuestions, askCoordinator, cancelTask, resolveBlocker, retryTask } from "../server/requests";
 import { ReviewRunner } from "../server/review";
 import { StateStore } from "../server/store";
 import { WorkerChannel } from "../server/worker-channel";
@@ -38,6 +38,8 @@ function fakePaseo(calls: string[], agentStatus = "idle"): Fake {
           calls.push(`archive ${id}`);
           return { archivedAt: "" };
         },
+        reload: async () => void calls.push(`reload ${id}`),
+        timeline: { refetch: async () => ({ entries: [] }) },
       }),
     },
     workspaces: { ref: (id: string) => ({ archive: async () => (calls.push(`archive-ws ${id}`), {}) }) },
@@ -204,7 +206,7 @@ describe("자동 결정 되돌리기와 자동 정지", () => {
     assert.ok(!state.disabledRules.includes("W5"), "한 번은 아직 켜져 있다");
     assert.equal(task.status, "running");
     assert.equal(task.completion, null);
-    assert.ok(calls.some((call) => call.startsWith("send w1: [From the human] The earlier automatic decision is withdrawn")));
+    assert.ok(calls.some((call) => call.startsWith("send w1: [From the human] The earlier automatic decision on task 1 is withdrawn")));
     assert.ok(task.decisions.some((item) => item.summary.startsWith("Reverted:")));
 
     await runner.reviewAutoDecision(paseo, { requestId: "r1", taskNumber: 1, id: "d2", revertText: "그것도 취소" });
@@ -405,6 +407,130 @@ describe("계획과 요청 상태", () => {
     await assert.rejects(retryTask({ requestId: "r1", taskNumber: 1, instruction: null }, korean.store), /다시 시작할 상태가 아니에요/);
     const english = await storeWith(baseState({ status: "running" }, { language: "en" }));
     await assert.rejects(retryTask({ requestId: "r1", taskNumber: 1, instruction: null }, english.store), /not waiting to be restarted/);
+  });
+});
+
+describe("A 등급 변경 전 조사", () => {
+  // 2026-11-26 사용자 피드백: '브랜치를 정리해줘' 요청이 읽기 조사로 처리돼 답변 카드로 끝났고, 확인을 누르자 아무것도
+  // 지우지 않은 채 요청이 끝났다 (r13~r15). 조사 → 코디네이터 → 질문 카드 → 답 → 변경 계획으로 이어져야 한다.
+  const investigating = () =>
+    baseState(
+      { status: "running", workspaceId: "ws1", agentId: "w1" },
+      { kind: "read", grade: "A", beforeChange: true, coordinatorAgentId: "c1", notifiedAt: now(), plannedAt: now(), title: "브랜치 정리" },
+    );
+  const coordinatorPaseo = (calls: string[]): Fake => ({
+    agents: {
+      ref: (id: string) => ({
+        refresh: async () => ({ agent: { status: "idle", pendingPermissions: [], archivedAt: null } }),
+        send: async (text: string) => void calls.push(`send ${id}: ${text}`),
+        archive: async () => (calls.push(`archive ${id}`), {}),
+        timeline: {
+          refetch: async () => ({ entries: [{ item: { type: "assistant_message", text: "삭제 후보: coord/r12-1-jgrq" } }] }),
+        },
+      }),
+    },
+    workspaces: { ref: (id: string) => ({ archive: async () => (calls.push(`archive-ws ${id}`), {}) }) },
+    projects: { list: async () => ({ projects: [{ projectId: "p", projectRootPath: "/nonexistent", projectDisplayName: "p" }] }) },
+  });
+  const ready: Fake = { read: async () => ({ status: "ready", values: { allowedProjectIds: ["p"] } }) };
+  const changePlan = (extra: Record<string, unknown> = {}) => ({
+    requestId: "r1",
+    readOnly: false,
+    beforeChange: false,
+    title: "브랜치 정리",
+    grade: "A",
+    gradeReasons: ["브랜치 삭제"],
+    recommendation: "고른 브랜치만 지운다",
+    risks: [],
+    unknowns: [],
+    tasks: [{ number: 1, name: "브랜치 삭제", projectId: "p", dependsOn: [], scope: "coord/r12-1-jgrq 삭제", doneCriteria: "브랜치 없음", requestRefs: ["정리"] }],
+    ...extra,
+  });
+
+  test("조사가 끝나면 답변 카드가 아니라 계획 단계로 돌아가 코디네이터가 질문 카드를 거쳐 변경을 계획한다", async () => {
+    const calls: string[] = [];
+    const paseo = coordinatorPaseo(calls);
+    const { store, channel } = await storeWith(investigating());
+    const investigated: string[] = [];
+    const dispatcher = new Dispatcher(store, ready, channel, () => {}, (_, requestId) => investigated.push(requestId));
+    await dispatcher.onWorkerTurn(paseo, "w1", { kind: "completed" }, false);
+
+    let request = (await store.read()).requests[0]!;
+    assert.equal(request.status, "planning");
+    assert.equal(request.answer, null);
+    assert.match(request.investigation?.text ?? "", /coord\/r12-1-jgrq/);
+    assert.deepEqual(investigated, ["r1"]);
+
+    // 사람의 새 지시가 없어도 코디네이터에게 조사 보고를 알린다.
+    const runtime = new CoordinatorRuntime(store, ready, () => calls.push("plan started"), channel);
+    await runtime.notify(paseo);
+    assert.ok(calls.some((call) => call.startsWith("send c1:") && call.includes("Investigations came back to you: r1")));
+
+    const tool = (name: string) => runtime.tools().find((item) => item.name === name)!;
+    const context: Fake = { paseo, agent: { id: "c1" } };
+    // 사람이 답하기 전에는 A 등급 변경 계획을 받지 않는다.
+    const early = await tool("coordinator_submit_plan").execute(changePlan(), context);
+    assert.equal(early.isError, true);
+
+    const asked = await tool("coordinator_ask_human").execute(
+      {
+        requestId: "r1",
+        title: "브랜치 정리",
+        context: "삭제 후보 1개",
+        questions: [{ question: "무엇을 지울까요?", options: [{ label: "추천 항목만" }, { label: "지우지 않음" }], recommended: "추천 항목만" }],
+        projectIds: ["p"],
+      },
+      context,
+    );
+    assert.notEqual(asked.isError, true);
+    assert.equal((await store.read()).requests[0]!.status, "needs_input");
+    await answerQuestions({ id: "r1", answers: [{ question: "무엇을 지울까요?", answer: "추천 항목만" }] }, store);
+
+    const planned = await tool("coordinator_submit_plan").execute(changePlan(), context);
+    assert.notEqual(planned.isError, true, String(planned.text));
+    request = (await store.read()).requests[0]!;
+    assert.equal(request.status, "running");
+    assert.equal(request.kind, "change");
+    assert.equal(request.beforeChange, false);
+    assert.equal(request.tasks[0]!.status, "waiting");
+    assert.equal(request.tasks[0]!.agentId, null);
+    // 조사 보고는 기록으로 남고, 새 계획이 대신한 조사 워크스페이스는 정리한다.
+    assert.match(request.investigation?.text ?? "", /coord\/r12-1-jgrq/);
+    assert.ok(calls.includes("archive-ws ws1"));
+    assert.ok(calls.includes("plan started"));
+  });
+
+  test("등급을 단 읽기 조사는 beforeChange 가 없으면 거절한다", async () => {
+    const calls: string[] = [];
+    const { store, channel } = await storeWith(baseState({ status: "waiting", agentId: null, workspaceId: null }, { status: "planning", kind: null, grade: null, coordinatorAgentId: "c1" }));
+    const runtime = new CoordinatorRuntime(store, ready, () => {}, channel);
+    const submit = runtime.tools().find((item) => item.name === "coordinator_submit_plan")!;
+    const context: Fake = { paseo: coordinatorPaseo(calls), agent: { id: "c1" } };
+    const rejected = await submit.execute(changePlan({ readOnly: true }), context);
+    assert.equal(rejected.isError, true);
+    assert.match(String(rejected.text), /beforeChange/);
+    const missingGrade = await submit.execute(changePlan({ readOnly: true, beforeChange: true, grade: undefined }), context);
+    assert.match(String(missingGrade.text), /beforeChange needs the grade/);
+    const accepted = await submit.execute(changePlan({ readOnly: true, beforeChange: true, grade: "A" }), context);
+    assert.notEqual(accepted.isError, true, String(accepted.text));
+    const request = (await store.read()).requests[0]!;
+    assert.equal(request.kind, "read");
+    assert.equal(request.grade, "A");
+    assert.equal(request.beforeChange, true);
+  });
+
+  test("일반 읽기 조사는 그대로 답변 카드가 되고, 확인하면 끝난다", async () => {
+    const calls: string[] = [];
+    const { store, channel } = await storeWith(investigating());
+    await store.update((state) => ({
+      state: { ...state, requests: state.requests.map((request) => ({ ...request, beforeChange: false, grade: null })) },
+      result: undefined,
+    }));
+    const dispatcher = new Dispatcher(store, ready, channel, () => {});
+    await dispatcher.onWorkerTurn(coordinatorPaseo(calls), "w1", { kind: "completed" }, false);
+    assert.equal((await store.read()).requests[0]!.status, "answered");
+    await acknowledge({ id: "r1" }, store);
+    assert.equal((await store.read()).requests[0]!.status, "done");
   });
 });
 

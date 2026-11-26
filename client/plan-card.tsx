@@ -56,6 +56,12 @@ function TaskBlock({ task, ctx }: { task: Task; ctx: ViewContext }) {
           <Text style={muted}>{ctx.t("planCard.dependsOn", { list: task.dependsOn.join(", ") })}</Text>
         ) : null}
       </View>
+      {task.kind === "operation" ? (
+        // 운영 작업은 worktree 밖을 건드린다. 사람이 승인한 대상이 무엇인지 계획에서 바로 보이게 한다.
+        <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>
+          {ctx.t("planCard.operation", { targets: task.targets.join(", ") })}
+        </Text>
+      ) : null}
       {task.scope ? <Text style={muted}>{`${ctx.t("planCard.scope")}: ${task.scope}`}</Text> : null}
       {task.doneCriteria ? <Text style={muted}>{`${ctx.t("planCard.taskDone")}: ${task.doneCriteria}`}</Text> : null}
       {task.requestRefs.length > 0 ? (
@@ -148,6 +154,9 @@ export function StartedCard({ request, ctx }: { request: CoordinatorRequest; ctx
           <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600" }}>
             {ctx.t("planCard.decideGrade", { grade: request.grade, count: request.tasks.length })}
           </Text>
+          {request.beforeChange ? (
+            <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{ctx.t("planCard.beforeChange")}</Text>
+          ) : null}
           <Lines items={request.gradeReasons} ctx={ctx} />
         </Row>
       ) : null}
@@ -188,9 +197,9 @@ export function StartedCard({ request, ctx }: { request: CoordinatorRequest; ctx
             value={text}
             onChangeText={setText}
             multiline
-            placeholder={ctx.t("planCard.revisePlaceholder")}
+            placeholder={request.kind === "read" ? ctx.t("requestRow.revisePlaceholderRead") : ctx.t("planCard.revisePlaceholder")}
             placeholderTextColor={ctx.theme.colors.foregroundMuted}
-            accessibilityLabel={ctx.t("planCard.revisePlaceholder")}
+            accessibilityLabel={request.kind === "read" ? ctx.t("requestRow.revisePlaceholderRead") : ctx.t("planCard.revisePlaceholder")}
             style={{
               minHeight: 72,
               padding: 10,

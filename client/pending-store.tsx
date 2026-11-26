@@ -93,6 +93,12 @@ export interface Classifier {
   column(agent: PluginAgentSnapshot | StateFields): ColumnKey;
   /** 칸반 카드로 올릴 에이전트. 하위 세션은 부모 카드 안에 접되, 반응이 필요하면 따로 꺼낸다. */
   isCard(agent: PluginAgentSnapshot): boolean;
+  /**
+   * 인박스 '내 결정 필요'에 에이전트 카드로 올릴 에이전트. 플러그인 워커는 권한 요청만 올린다. 워커의 에러는 작업이 막혀
+   * 멈춘 작업 카드로 이미 오고, 에러 카드까지 뜨면 같은 일에 카드가 두 장이고 에러 카드의 지시는 작업 상태를 바꾸지 않았다
+   * (2026-11-26 전수 검사). 인박스, 탭, 사이드바가 같은 기준으로 센다.
+   */
+  needsMyDecision(agent: PluginAgentSnapshot): boolean;
 }
 
 type StateFields = Pick<PluginAgentSnapshot, "id" | "status" | "attentionReason" | "requiresAttention">;
@@ -105,6 +111,8 @@ export function classifierFor(directory: PendingDirectory): Classifier {
     column,
     // 진행 현황의 '직접 띄운 에이전트' 구역. 워커는 요청 행에 있으므로 뺀다.
     isCard: (agent) => isDirectAgent(agent) && (agent.parentAgentId === null || column(agent) === "react"),
+    needsMyDecision: (agent) =>
+      isVisibleAgent(agent) && column(agent) === "react" && (isDirectAgent(agent) || directory.pending.has(agent.id)),
   };
 }
 
@@ -114,7 +122,7 @@ export function useClassifier(): Classifier {
 }
 
 /**
- * 반응 필요 카드 수. 인박스는 대기 중인 권한 요청 하나당 카드 한 장을 그리므로, 에이전트 수가 아니라 요청 수로 센다.
+ * 내 결정 필요 카드 수. 인박스는 대기 중인 권한 요청 하나당 카드 한 장을 그리므로, 에이전트 수가 아니라 요청 수로 센다.
  * 요청이 없는데 멈춘 에이전트(에러)는 한 장이다. (에이전트 수로 셌더니 카드 2장에 숫자 1이 나왔다. 2026-11-25)
  */
 export function cardCount(agentIds: readonly string[], directory: PendingDirectory): number {

@@ -1,17 +1,30 @@
 import type { PluginAgentSnapshot } from "@getpaseo/plugin";
 import type { AgentRef } from "@getpaseo/plugin/client";
-import { useAgent, useAgents, usePaseo, useWorkspace } from "@getpaseo/plugin/client";
+import { useAgent, useAgents, usePaseo, useRpc, useWorkspace } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { AgentCard } from "./agent-card";
-import { columnColor, isDirectAgent, isVisibleAgent } from "./agent-state";
+import { columnColor, isDirectAgent } from "./agent-state";
 import { AnswerCard } from "./answer-card";
 import { BlockerCard } from "./blocker-card";
 import { MergeCard } from "./merge-card";
 import { StoppedCard } from "./stopped-card";
 import { AutoDecisionCard } from "./auto-decision-card";
-import { autoDecisionCards, blockerCards, completionCards, stoppedCards, requestNeedsReaction, requestNeedsReview, useCoordinatorState, useSentLog } from "./coordinator-state";
+import {
+  autoDecisionCards,
+  blockerCards,
+  completionCards,
+  finishedCards,
+  stalledRequests,
+  stoppedCards,
+  requestNeedsReaction,
+  requestNeedsReview,
+  useCoordinatorState,
+  useSentLog,
+} from "./coordinator-state";
+import { type CoordinatorRequest, type Task, acknowledgeRpc, closeCompletionRpc, reviewAutoDecisionRpc } from "../shared/model";
+import { StallCard } from "./stall-card";
 import { StartedCard } from "./plan-card";
 import { QuestionCard } from "./question-card";
 import { cardCount, useClassifier, usePending } from "./pending-store";
@@ -35,7 +48,7 @@ import { WorkspaceProjectChip } from "./project-chip";
 import { formatAgo } from "./time";
 import { Chip, CtaButton, type ViewContext } from "./ui";
 
-// 반응 필요는 오래 기다린 순서, 확인 필요는 최근 순서 (RULES.md §12).
+// 내 결정 필요는 오래 기다린 순서, 확인 필요는 최근 순서 (RULES.md §12).
 function oldestFirst(a: PluginAgentSnapshot, b: PluginAgentSnapshot): number {
   return Date.parse(a.lastActivityAt) - Date.parse(b.lastActivityAt);
 }
@@ -532,11 +545,59 @@ function SectionHeader({ title, count, hint, color, ctx }: { title: string; coun
   );
 }
 
-/** 결정 인박스. 반응 필요는 카드에서 바로 처리하고, 확인 필요는 열어서 본다 (RULES.md §12). */
+/**
+ * 확인 필요의 '모두 확인'. 이미 끝났거나 계속 진행되는 일만 한 번에 확인한다: 시작 카드, 자동 결정, PR 도 남은 변경도 없이
+ * 끝난 작업. 답변 카드는 넣지 않는다. 답변을 확인하면 요청이 끝나므로, 하나씩 읽고 끝낼지 지시할지 정해야 한다.
+ * r15 에서 끝난 작업 8개를 하나씩 확인해야 했다 (2026-11-26).
+ */
+function ReviewAllButton({
+  started,
+  autos,
+  finished,
+  ctx,
+}: {
+  started: readonly CoordinatorRequest[];
+  autos: readonly { request: CoordinatorRequest; task: Task; decision: Task["autoDecisions"][number] }[];
+  finished: readonly { request: CoordinatorRequest; task: Task }[];
+  ctx: ViewContext;
+}) {
+  const acknowledge = useRpc(acknowledgeRpc);
+  const review = useRpc(reviewAutoDecisionRpc);
+  const close = useRpc(closeCompletionRpc);
+  const action = useMutation({
+    mutationFn: async () => {
+      // 하나가 실패해도 나머지는 확인한다. 실패한 것은 카드로 남아 사람이 따로 본다.
+      const results = await Promise.allSettled([
+        ...started.map((request) => acknowledge({ id: request.id })),
+        ...autos.map(({ request, task, decision }) => review({ requestId: request.id, taskNumber: task.number, id: decision.id, revertText: null })),
+        ...finished.map(({ request, task }) => close({ requestId: request.id, taskNumber: task.number, action: "merge", instruction: null })),
+      ]);
+      const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failed) throw failed.reason;
+    },
+  });
+  const total = started.length + autos.length + finished.length;
+  if (total < 2) return null;
+  return (
+    <View style={{ gap: 4 }}>
+      <View style={{ flexDirection: "row" }}>
+        <CtaButton label={`${ctx.t("inbox.reviewAll")} ${total}`} disabled={action.isPending} theme={ctx.theme} onPress={() => action.mutate()} />
+      </View>
+      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{ctx.t("inbox.reviewAllHint")}</Text>
+      {action.error ? (
+        <Text style={{ color: ctx.theme.colors.statusDanger, fontSize: ctx.fonts.meta }}>
+          {ctx.t("inbox.failed", { message: action.error instanceof Error ? action.error.message : String(action.error) })}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
+/** 결정 인박스. 내 결정 필요는 카드에서 바로 처리하고, 확인 필요는 열어서 본다 (RULES.md §12). */
 export function InboxView({ ctx }: { ctx: ViewContext }) {
   const classify = useClassifier();
   const directory = usePending();
-  const needsReaction = (agent: PluginAgentSnapshot) => isVisibleAgent(agent) && classify.column(agent) === "react";
+  const needsReaction = (agent: PluginAgentSnapshot) => classify.needsMyDecision(agent);
   // 확인 필요의 에이전트 카드는 직접 띄운 에이전트만. 워커의 결과는 시작 카드와 진행 현황의 작업 카드로 본다.
   const needsReview = (agent: PluginAgentSnapshot) => isDirectAgent(agent) && classify.column(agent) === "review";
   const reacting = useAgents({ hosts: [ctx.hostId], where: needsReaction, orderBy: oldestFirst });
@@ -555,9 +616,13 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
   const blockers = blockerCards(requests);
   const merges = completionCards(requests);
   const stopped = stoppedCards(requests);
-  const reactCount = questions.length + blockers.length + merges.length + stopped.length + cardCount(reacting.map((ref) => ref.id), directory);
+  const stalled = stalledRequests(requests);
+  const reactCount =
+    questions.length + blockers.length + merges.length + stopped.length + stalled.length + cardCount(reacting.map((ref) => ref.id), directory);
   const autos = autoDecisionCards(requests);
-  const reviewCount = reviews.length + autos.length + reviewing.length;
+  const finished = finishedCards(requests);
+  const started = reviews.filter((request) => request.status !== "answered");
+  const reviewCount = reviews.length + autos.length + finished.length + reviewing.length;
   return (
     <View style={{ gap: 20, maxWidth: 880 }}>
       <View style={{ gap: 10 }}>
@@ -571,6 +636,9 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
         {reactCount === 0 ? (
           <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.body }}>{ctx.t("inbox.nothingBlocked")}</Text>
         ) : null}
+        {stalled.map((request) => (
+          <StallCard key={`stall:${request.id}`} request={request} ctx={ctx} />
+        ))}
         {questions.map((request) => (
           <QuestionCard key={request.id} request={request} ctx={ctx} />
         ))}
@@ -598,6 +666,10 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
         {reviewCount === 0 ? (
           <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.body }}>{ctx.t("inbox.nothingToReview")}</Text>
         ) : null}
+        <ReviewAllButton started={started} autos={autos} finished={finished} ctx={ctx} />
+        {finished.map(({ request, task }) => (
+          <MergeCard key={`${request.id}:${task.number}`} request={request} task={task} ctx={ctx} />
+        ))}
         {autos.map(({ request, task, decision }) => (
           <AutoDecisionCard key={decision.id} request={request} task={task} decision={decision} ctx={ctx} />
         ))}
