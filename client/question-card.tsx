@@ -7,13 +7,15 @@ import { type CoordinatorRequest, answerQuestionsRpc, cancelRequestRpc, revisePl
 import { columnColor } from "./agent-state";
 import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
-import { Chip, ChoiceBox, CtaButton, Decide, Fold, Lines, Row, type ViewContext } from "./ui";
+import { Chip, ChoiceBox, CtaButton, Decide, Fold, Lines, type ViewContext } from "./ui";
 
 /**
  * 질문 카드 (내 결정 필요). 코디네이터가 스스로 정할 수 없는 것만 묻는다 (RULES.md §2.0):
  * 요청을 두 가지 이상으로 읽을 수 있을 때, 사람이 정할 선택이 있을 때, A 등급의 실제 변경을 시작할 때.
- * 읽는 순서: 내 요청 → 추가 지시 → 배경 → 자세히 보기(조사 보고) → 결정할 것(질문과 선택지) → 버튼 (DESIGN.md 카드 읽는 순서).
- * 내 요청은 접지 않는다. 요청을 어떻게 읽을지 묻는 카드라서 원문과 바로 비교해야 한다 (RULES.md H1).
+ * 읽는 순서: 질문과 선택지 → 버튼 → 자세히 보기(내 요청, 추가 지시, 배경, 조사 보고).
+ * 카드 밖에는 정할 것과 버튼만 둔다 (2026-11-27 사용자 결정). 카드마다 읽을 것이 많아 결정이 늦어졌다. 그래서 질문과 선택지는
+ * 배경 없이도 읽히게 써야 하고, 운영 작업의 대상과 기존 워크스페이스 경로는 질문이나 선택지에 그대로 들어가야 승인된다
+ * (server/coordinator.ts questionText, RULES.md §2.0).
  */
 export function QuestionCard({ request, ctx }: { request: CoordinatorRequest; ctx: ViewContext }) {
   const answerRpc = useRpc(answerQuestionsRpc);
@@ -38,6 +40,7 @@ export function QuestionCard({ request, ctx }: { request: CoordinatorRequest; ct
   if (!question) return null;
   const busy = action.isPending;
   const accent = columnColor("react", ctx.theme);
+  const body = { color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body } as const;
   const answered = question.questions.every((item) => Boolean(typed[item.question]?.trim() || selected[item.question]));
   const inputStyle = {
     padding: 10,
@@ -72,34 +75,6 @@ export function QuestionCard({ request, ctx }: { request: CoordinatorRequest; ct
           {ctx.t("time.waiting", { ago: formatAgo(question.at, ctx.now, ctx.t) })}
         </Text>
       </View>
-
-      <Row label={ctx.t("questionCard.request")} ctx={ctx}>
-        <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body }}>{request.text}</Text>
-      </Row>
-      {request.feedback.length > 0 ? (
-        <Row label={ctx.t("questionCard.feedback")} ctx={ctx}>
-          <Lines items={request.feedback.map((item) => `${formatAgo(item.at, ctx.now, ctx.t)} · ${item.text}`)} ctx={ctx} />
-        </Row>
-      ) : null}
-      <Row label={ctx.t("questionCard.context")} ctx={ctx}>
-        <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body }}>{question.context}</Text>
-      </Row>
-      {/* A 등급 변경 전 조사의 원문. 배경은 코디네이터의 요약이라, 근거를 직접 보고 고를 수 있게 원문을 접어 둔다. */}
-      <Fold
-        ctx={ctx}
-        items={[
-          request.investigation
-            ? {
-                label: ctx.t("questionCard.investigation"),
-                content: (
-                  <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.5) }}>
-                    {request.investigation.text}
-                  </Text>
-                ),
-              }
-            : null,
-        ]}
-      />
 
       <Decide ctx={ctx}>
         {question.questions.map((item) => (
@@ -171,6 +146,31 @@ export function QuestionCard({ request, ctx }: { request: CoordinatorRequest; ct
           {ctx.t("inbox.failed", { message: action.error instanceof Error ? action.error.message : String(action.error) })}
         </Text>
       ) : null}
+      <Fold
+        ctx={ctx}
+        items={[
+          { label: ctx.t("questionCard.request"), content: <Text selectable style={body}>{request.text}</Text> },
+          request.feedback.length > 0
+            ? {
+                label: ctx.t("questionCard.feedback"),
+                count: request.feedback.length,
+                content: <Lines items={request.feedback.map((item) => `${formatAgo(item.at, ctx.now, ctx.t)} · ${item.text}`)} ctx={ctx} />,
+              }
+            : null,
+          { label: ctx.t("questionCard.context"), content: <Text selectable style={body}>{question.context}</Text> },
+          // A 등급 변경 전 조사의 원문. 배경은 코디네이터의 요약이라, 근거를 직접 보고 고를 수 있게 원문을 둔다.
+          request.investigation
+            ? {
+                label: ctx.t("questionCard.investigation"),
+                content: (
+                  <Text selectable style={{ ...body, lineHeight: Math.round(ctx.fonts.body * 1.5) }}>
+                    {request.investigation.text}
+                  </Text>
+                ),
+              }
+            : null,
+        ]}
+      />
     </View>
   );
 }

@@ -274,6 +274,26 @@ export default function contribute(server: PluginServerContext) {
         .catch(logFailure("answer reviewer permission"));
       return;
     }
+    // plan 모드 워커(Auto 가 없는 provider 의 읽기 조사, 또는 바꾸기 전에 만든 워커)는 조사를 마치면 ExitPlanMode 로 계획 승인을
+    // 사람에게 받으려고 멈춘다. 읽기 조사에는 승인할 계획이 없고, 승인하면 세션이 편집 모드로 바뀌어 읽기 전용이 풀린다
+    // (r13·r14·r18, 2026-11-27). 거절하고 보고를 마지막 메시지로 쓰게 한다. 답변은 그 메시지에서 모은다.
+    if (request.kind === "plan") {
+      const worker = await dispatcher.findWorker(agent.id);
+      if (worker?.request.kind === "read") {
+        await paseo.agents
+          .ref(agent.id)
+          .respondToPermission({
+            requestId: request.id,
+            response: {
+              behavior: "deny",
+              message:
+                "This is a read-only investigation, so there is no plan to approve. Stay read-only. Write your full report (everything you put in the plan) as your final message and end your turn.",
+            },
+          })
+          .catch(logFailure("deny read worker plan exit"));
+        return;
+      }
+    }
     // 워커가 보고 도구를 부를 때 권한 확인이 뜨면 허용한다. 보고하는 일 자체가 사람을 기다리면 안 된다.
     if (
       request.kind === "tool" &&

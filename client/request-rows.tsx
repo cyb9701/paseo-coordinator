@@ -3,7 +3,15 @@ import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
 import { CancelRequestButton } from "./cancel-request";
-import { type CoordinatorRequest, type Task, cancelRequestRpc, completionNeedsDecision, requestProjectIds, revisePlanRpc } from "../shared/model";
+import {
+  type CoordinatorRequest,
+  type Task,
+  cancelRequestRpc,
+  isOpenCompletion,
+  requestProjectIds,
+  requestReport,
+  revisePlanRpc,
+} from "../shared/model";
 import { COLUMN_KEYS, type ColumnKey, columnColor } from "./agent-state";
 import { DecisionHistory } from "./decision-history";
 import { usePending } from "./pending-store";
@@ -13,19 +21,25 @@ import { formatAgo } from "./time";
 import { CtaButton, GradeBadge, type ViewContext } from "./ui";
 import { WorkspacePlace } from "./workspace-place";
 
-export type RequestItem = { kind: "planning" } | { kind: "question" } | { kind: "answer" } | { kind: "stall" } | { kind: "task"; task: Task };
+export type RequestItem =
+  | { kind: "planning" }
+  | { kind: "question" }
+  | { kind: "answer" }
+  | { kind: "report" }
+  | { kind: "stall" }
+  | { kind: "task"; task: Task };
 
 /**
  * 작업이 놓일 컬럼. 워커가 막힘을 보고했으면, 코디네이터가 판단하는 동안은 '코디네이터 처리 중',
- * 결정 카드가 나오면 '내 결정 필요'다. 완료를 보고하고 머지를 기다리는 작업도 '내 결정 필요'다.
+ * 결정 카드가 나오면 '내 결정 필요'다. 완료를 보고한 작업은 작업 카드로 두지 않는다. 요청이 끝나면 완료 보고서 하나로 보인다
+ * (2026-11-27 사용자 결정). 그 전까지는 끝난 작업이라 칸을 차지하지 않는다.
  */
 function taskColumn(task: Task, waitsOnPermission: boolean): ColumnKey | null {
   if (task.blocker) return task.blocker.coordinator ? "react" : "auto";
   // 워커가 권한 요청을 기다리면 서버의 작업 상태는 running 이지만 사람을 기다린다. 인박스는 '내 결정 필요'로 세는데 보드는 '작업 중'에
   // 두어 두 화면이 어긋났다 (2026-11-26 전수 검사).
   if (waitsOnPermission && task.status === "running") return "react";
-  // 완료를 보고한 작업. PR 머지나 남은 변경 처리는 사람의 결정이고, PR 도 남은 변경도 없으면 나중에 확인하면 된다.
-  if (task.status === "review" && task.completion && !task.completion.closedAt) return completionNeedsDecision(task) ? "react" : "review";
+  if (isOpenCompletion(task)) return null;
   return TASK_COLUMNS[task.status];
 }
 
@@ -39,10 +53,9 @@ const TASK_COLUMNS: Record<Task["status"], ColumnKey | null> = {
   canceled: null,
 };
 
-/** 요청 하나를 (컬럼 → 카드) 로 나눈다. 헤더의 컬럼별 숫자도 이 결과로 센다. */
 /**
+ * 요청 하나를 (컬럼 → 카드) 로 나눈다. 헤더의 컬럼별 숫자도 이 결과로 센다. 인박스와 같은 수가 나와야 한다.
  * waitsOnPermission: 그 에이전트가 권한 요청을 기다리는지. 인박스와 같은 구독(usePending)에서 온다.
- * 확인하지 않은 자동 결정이 걸린 작업은 확인 필요에도 걸친다. 카드가 겹치면 더 왼쪽 칸에 둔다 (DESIGN.md 진행 현황).
  */
 export function requestCells(request: CoordinatorRequest, waitsOnPermission: (agentId: string) => boolean = () => false): Map<ColumnKey, RequestItem[]> {
   const cells = new Map<ColumnKey, RequestItem[]>();
@@ -52,10 +65,10 @@ export function requestCells(request: CoordinatorRequest, waitsOnPermission: (ag
   else if (request.status === "planning") add("auto", { kind: "planning" });
   if (requestNeedsReaction(request)) add("react", { kind: "question" });
   if (request.status === "answered") add("review", { kind: "answer" });
+  const report = requestReport(request);
+  if (report) add(report.needsDecision ? "react" : "review", { kind: "report" });
   for (const task of request.tasks) {
-    let column = taskColumn(task, Boolean(task.agentId && waitsOnPermission(task.agentId)));
-    const unreviewed = task.autoDecisions.some((decision) => !decision.reviewedAt && !decision.reverted);
-    if (unreviewed && (column === "running" || column === "waiting" || column === "auto")) column = "review";
+    const column = taskColumn(task, Boolean(task.agentId && waitsOnPermission(task.agentId)));
     if (column) add(column, { kind: "task", task });
   }
   return cells;
@@ -192,12 +205,14 @@ function ItemCard({
         ? ctx.t("requestRow.questionCard")
         : item.kind === "stall"
           ? ctx.t("requestRow.stallCard")
-          : ctx.t("requestRow.answerCard");
+          : item.kind === "report"
+            ? ctx.t("requestRow.reportCard")
+            : ctx.t("requestRow.answerCard");
   return <PlaceholderCard text={text} column={column} projectIds={requestProjectIds(request)} ctx={ctx} />;
 }
 
 /**
- * 요청 칸. 시작 카드를 확인한 뒤에도 수정 지시를 보낼 곳이 있어야 한다. 시작 카드에만 있으면 확인을 누르는 순간 요청 단위로
+ * 요청 칸. 실행 중인 요청에 수정 지시를 보내는 입구다. 시작 카드에만 두었을 때는 확인을 누르는 순간 요청 단위로
  * 지시할 입구가 사라졌다 (2026-11-26 전수 검사).
  */
 function RequestCell({ request, ctx }: { request: CoordinatorRequest; ctx: ViewContext }) {
@@ -217,7 +232,8 @@ function RequestCell({ request, ctx }: { request: CoordinatorRequest; ctx: ViewC
   // 조사 워커는 읽기 전용이라 지시를 실행하지 못한다. 조사가 끝나면 코디네이터가 그 지시로 계획한다는 것을 말한다.
   const placeholder =
     request.kind === "read" && request.status === "running" ? ctx.t("requestRow.revisePlaceholderRead") : ctx.t("requestRow.revisePlaceholder");
-  const done = request.tasks.filter((task) => task.status === "done").length;
+  // 완료를 보고한 작업도 끝난 것으로 센다. 머지는 보고서에서 사람이 한다.
+  const done = request.tasks.filter((task) => task.status === "done" || task.status === "review").length;
   // 취소한 작업은 할 일에서 빠진다. 세면 끝난 요청이 끝나지 않은 것처럼 보인다.
   const total = request.tasks.filter((task) => task.status !== "canceled").length;
   return (

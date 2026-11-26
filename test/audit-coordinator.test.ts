@@ -174,13 +174,30 @@ describe("승인 문자열 경계", () => {
         request({
           plannedAt: null,
           feedback: [{ text: "예", at: now(), kind: "answer" }],
-          lastQuestion: { context: "워크스페이스 /x/app-feature 에서 할까요?", questions: [], answeredAt: now() },
+          lastQuestion: { context: "", questions: [{ question: "워크스페이스 /x/app-feature 에서 할까요?", options: [], recommended: null }], answeredAt: now() },
         }),
       ],
       sent: [],
     }).requests[0]!;
     const problems = humanGateProblems(value, [{ kind: "code" }], "C", null, ["/x/app"]);
     assert.ok(problems.some((problem) => /did not show these workspace directories/.test(problem)), problems.join("\n"));
+  });
+
+  test("운영 대상이 접힌 배경에만 있으면 승인되지 않는다. 카드는 질문과 선택지만 밖에 둔다 (2026-11-27)", () => {
+    const answered = (lastQuestion: unknown) =>
+      stateSchema.parse({
+        requests: [request({ plannedAt: null, feedback: [{ text: "예", at: now(), kind: "answer" }], lastQuestion })],
+        sent: [],
+      }).requests[0]!;
+    const onlyContext = answered({ context: "로컬 브랜치 coord/r1-1-ab 를 지웁니다", questions: [{ question: "지울까요?", options: [{ label: "예" }], recommended: null }], answeredAt: now() });
+    const inOption = answered({
+      context: "",
+      questions: [{ question: "지울까요?", options: [{ label: "예", description: "로컬 브랜치 coord/r1-1-ab 를 지웁니다" }], recommended: null }],
+      answeredAt: now(),
+    });
+    const operation = [{ kind: "operation" as const, targets: ["coord/r1-1-ab"] }];
+    assert.ok(humanGateProblems(onlyContext, operation, "C", null).some((problem) => /did not list these operation targets/.test(problem)));
+    assert.deepEqual(humanGateProblems(inOption, operation, "C", null), []);
   });
 });
 

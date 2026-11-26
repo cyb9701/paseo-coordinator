@@ -2,9 +2,9 @@
 
 import type { PaseoApi } from "./paseo-api";
 import type { PluginSettings } from "@getpaseo/plugin/server";
-import { type CoordinatorRequest, type CoordinatorState, type Task, completionNeedsDecision } from "../shared/model";
+import { type CoordinatorRequest, type CoordinatorState, type Task, dependencyFinished } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
-import { REPORT_DONE_TOOL, continuedBy, finishRequestIfDone, recordCompletion, reportDoneInput } from "./completion";
+import { REPORT_DONE_TOOL, continuedBy, finishRequestIfDone, recordCompletion, reportDoneInput, uncommittedChanges } from "./completion";
 import { workspaceTitle } from "./coordinator";
 import type { StateStore } from "./store";
 import { type WorkerChannel, queued } from "./worker-channel";
@@ -88,24 +88,6 @@ function patch(state: CoordinatorState, requestId: string, number: number, chang
         : request,
     ),
   };
-}
-
-// 선행 작업이 이 상태면 다음 작업을 시작한다. review 는 워커가 일을 마치고 사람의 확인만 남은 상태다.
-const FINISHED: ReadonlySet<Task["status"]> = new Set(["done", "review"]);
-
-/**
- * 선행 작업이 끝나 이 작업을 시작해도 되는가. 운영 작업은 앞 코드 작업의 결과가 사람의 결정까지 끝난 뒤에만 시작한다.
- * PR 머지 전(review)에 시작하면 '머지 뒤 브랜치 정리' 같은 운영 작업이 아직 머지되지 않은 PR 의 브랜치를 지울 수 있다
- * (2026-11-26 최종 검사). 이어 쓰기로 done 이 된 작업은 PR 을 뒤 작업이 내므로 사슬 끝 작업을 본다. PR 도 남은 변경도 없이
- * 끝난 작업(확인 필요)은 기다릴 결정이 없어 끝난 것으로 본다. 기다리면 사람이 보지 않는 카드 때문에 운영 작업이 멈춘다.
- */
-function dependencyFinished(request: CoordinatorRequest, dependency: Task | undefined, task: Task): boolean {
-  if (!dependency || !FINISHED.has(dependency.status)) return false;
-  if (task.kind !== "operation" || dependency.kind === "operation") return true;
-  let end: Task = dependency;
-  for (let next = continuedBy(request, end); next; next = continuedBy(request, end)) end = next;
-  if (end.status === "done") return true;
-  return end.status === "review" && !completionNeedsDecision(end);
 }
 
 async function readSettings(settings: Settings) {
@@ -207,7 +189,7 @@ function kickoff(
         ]
       : []),
     readOnly
-      ? "- This is a read-only investigation. Do not change, create or delete any file. Investigate and report."
+      ? "- This is a read-only investigation. Do not change, create or delete any file, and do not run commands that change git state, branches, remotes, processes or any other system (no checkout, commit, branch deletion, push, installs). Investigate and report."
       : operation
         ? "- Before acting on each target, check that it is still in the state the plan describes. If it is not, do not act on it: report it with report_blocker."
         : successor
@@ -654,12 +636,21 @@ export class Dispatcher {
     const provider = values.worker.model.split("/")[0]!;
     const modes = (await paseo.providers.listModes(provider).catch(() => null))?.modes ?? [];
     const has = (id: string) => modes.some((mode) => mode.id === id);
-    // 읽기 조사는 plan 모드라 파일을 바꿀 수 없다.
-    // 변경 작업은 Auto 모드다 (2026-11-25 사용자 결정). acceptEdits 로 띄웠더니 읽기 전용 git 명령까지 사람에게 물었다.
+    // 변경 작업도 읽기 조사도 Auto 모드다. acceptEdits 로 띄웠더니 읽기 전용 git 명령까지 사람에게 물었다 (2026-11-25 사용자 결정).
+    // 읽기 조사는 plan 모드였는데, 조사를 마치면 워커가 ExitPlanMode 로 '계획 승인'을 사람에게 받으려고 멈췄다. 승인하면 세션이
+    // acceptEdits 로 바뀌어 읽기 전용도 풀렸다 (r13·r14·r18, 2026-11-27 사용자 결정으로 바꿈). 읽기 전용은 킥오프가 지키게 하고,
+    // 워커가 파일을 남겼는지는 답을 모을 때 플러그인이 git 으로 확인한다. Auto 가 없는 provider 는 읽기 전용을 지키려고 plan 으로 둔다.
     // Auto 가 허용한 명령은 플러그인에 오지 않으므로, 막아야 할 명령은 Claude 권한 규칙(ask/deny)으로 묻게 해야
     // 인박스에 올라온다 (RULES.md §9).
-    const modeId =
-      request.kind === "read" ? (has("plan") ? "plan" : undefined) : has("auto") ? "auto" : has("acceptEdits") ? "acceptEdits" : undefined;
+    const modeId = has("auto")
+      ? "auto"
+      : request.kind === "read"
+        ? has("plan")
+          ? "plan"
+          : undefined
+        : has("acceptEdits")
+          ? "acceptEdits"
+          : undefined;
     // 킥오프를 보내기 전에 세션이 /poteto-mode 를 실제로 불러왔는지 본다. 그래서 프롬프트 없이 먼저 만든다.
     const agent = await workspace.agents.create({
       config: {
@@ -848,7 +839,13 @@ export class Dispatcher {
       const page = await paseo.agents.ref(task.agentId).timeline.refetch({ direction: "tail", limit: 30 }).catch(() => null);
       const entries = (page as { entries?: readonly { item?: { type?: string; text?: string } }[] } | null)?.entries ?? [];
       const last = [...entries].reverse().find((entry) => entry.item?.type === "assistant_message" && entry.item.text?.trim());
-      sections.push(`## ${task.number} ${task.name}\n\n${last?.item?.text?.trim() ?? "(no report)"}`);
+      // 읽기 조사 워커는 Auto 모드라 하네스가 쓰기를 막지 않는다. 워커가 자기 worktree 에 파일을 남겼으면 답에 밝힌다. 정리 단계는
+      // 바뀐 것이 있는 worktree 를 지우지 않으므로(cleanup.ts) 그 파일은 남아 사람이 볼 수 있다. 사람의 기존 워크스페이스는 사람의
+      // 변경과 섞여 구분할 수 없어 보지 않는다.
+      const cwd = task.existingWorkspaceId ? null : await this.workerCwd(paseo, task.agentId);
+      const dirty = cwd ? await uncommittedChanges(cwd).catch(() => null) : null;
+      const warning = dirty ? `\n\n(The read-only worker left changes in ${cwd}: ${dirty})` : "";
+      sections.push(`## ${task.number} ${task.name}\n\n${last?.item?.text?.trim() ?? "(no report)"}${warning}`);
     }
     const at = new Date().toISOString();
     const text = sections.join("\n\n");
@@ -881,6 +878,15 @@ export class Dispatcher {
       };
     });
     if (outcome === "coordinator") this.onCoordinatorWork(paseo, requestId);
+  }
+
+  private async workerCwd(paseo: PaseoApi, agentId: string): Promise<string | null> {
+    // 확인은 덧붙이는 경고라서, 스냅샷을 못 읽어도 답을 모으는 일을 막으면 안 된다.
+    const snapshot = await Promise.resolve()
+      .then(() => paseo.agents.ref(agentId).refresh())
+      .catch(() => null);
+    const cwd = (snapshot?.agent as { cwd?: unknown } | undefined)?.cwd;
+    return typeof cwd === "string" && cwd ? cwd : null;
   }
 
   /** 요청이 실행 중이고 작업이 아직 이 브랜치로 표시돼 있을 때만 기록한다. 기록했으면 true. */

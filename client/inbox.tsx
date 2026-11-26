@@ -4,18 +4,14 @@ import { useAgent, useAgents, usePaseo, useRpc, useWorkspace } from "@getpaseo/p
 import { useMutation } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import { AgentCard } from "./agent-card";
-import { columnColor, isDirectAgent } from "./agent-state";
+import { columnColor } from "./agent-state";
 import { AnswerCard } from "./answer-card";
 import { BlockerCard } from "./blocker-card";
-import { MergeCard } from "./merge-card";
+import { ReportCard } from "./report-card";
 import { StoppedCard } from "./stopped-card";
-import { AutoDecisionCard } from "./auto-decision-card";
 import {
-  autoDecisionCards,
   blockerCards,
-  completionCards,
-  finishedCards,
+  reportCards,
   stalledRequests,
   stoppedCards,
   requestNeedsReaction,
@@ -23,9 +19,7 @@ import {
   useCoordinatorState,
   useSentLog,
 } from "./coordinator-state";
-import { type CoordinatorRequest, type Task, acknowledgeRpc, closeCompletionRpc, reviewAutoDecisionRpc } from "../shared/model";
 import { StallCard } from "./stall-card";
-import { StartedCard } from "./plan-card";
 import { QuestionCard } from "./question-card";
 import { cardCount, useClassifier, usePending } from "./pending-store";
 import {
@@ -46,7 +40,7 @@ import {
 } from "./permissions";
 import { WorkspaceProjectChip } from "./project-chip";
 import { formatAgo } from "./time";
-import { Chip, CtaButton, type ViewContext } from "./ui";
+import { Chip, CtaButton, Fold, type ViewContext } from "./ui";
 
 // 내 결정 필요는 오래 기다린 순서, 확인 필요는 최근 순서 (RULES.md §12).
 function oldestFirst(a: PluginAgentSnapshot, b: PluginAgentSnapshot): number {
@@ -331,29 +325,9 @@ function DecisionCard({ request, agent, ctx }: { request: PermissionRequest; age
 
   return (
     <CardFrame kind={ctx.t(`kinds.${request.kind}`)} agent={agent} ctx={ctx}>
-      {facts ? (
-        <Section
-          label={ctx.t("inbox.facts")}
-          ctx={ctx}
-          value={
-            <>
-              {facts.command ? <CodeBox text={facts.command} ctx={ctx} /> : null}
-              {facts.inputs.map(([key, value]) => (
-                <Text key={key} selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta }}>
-                  {`${key}: ${value}`}
-                </Text>
-              ))}
-              {request.description ? (
-                <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{request.description}</Text>
-              ) : null}
-            </>
-          }
-        />
-      ) : null}
-      {plan ? <Section label={ctx.t("inbox.plan")} ctx={ctx} value={<CodeBox text={plan} ctx={ctx} maxHeight={320} />} /> : null}
       {/*
-        사실과 계획을 먼저 읽고, 결정할 것은 버튼 바로 위에 둔다. 질문이면 '답을 기다린다'는 안내 대신 질문 자체가 결정할 것이다.
-        안내 문구를 가장 크게 보이면 진짜 질문이 그 아래로 밀린다 (2026-11-26 사용자 피드백).
+        카드 밖에는 정할 것과 버튼만 둔다 (2026-11-27 사용자 결정). 허용할 명령 원문은 예외로 밖에 둔다. 명령을 보지 않고 허용하면
+        안 된다. 입력값, 설명, 계획 원문은 자세히 보기에 있다.
       */}
       <Section
         label={ctx.t("inbox.decide")}
@@ -369,15 +343,15 @@ function DecisionCard({ request, agent, ctx }: { request: PermissionRequest; age
               ctx={ctx}
             />
           ) : (
-            <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>
-              {decisionPrompt(request, ctx.t)}
-            </Text>
+            <>
+              <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>
+                {decisionPrompt(request, ctx.t)}
+              </Text>
+              {facts?.command ? <CodeBox text={facts.command} ctx={ctx} /> : null}
+            </>
           )
         }
       />
-      {request.kind !== "tool" && request.kind !== "plan" && request.kind !== "question" && request.description ? (
-        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{request.description}</Text>
-      ) : null}
 
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         {request.kind === "question" ? (
@@ -426,6 +400,26 @@ function DecisionCard({ request, agent, ctx }: { request: PermissionRequest; age
         />
       ) : null}
       <ErrorLine error={respond.error} ctx={ctx} />
+      <Fold
+        ctx={ctx}
+        items={[
+          facts && facts.inputs.length > 0
+            ? {
+                label: ctx.t("inbox.facts"),
+                count: facts.inputs.length,
+                content: facts.inputs.map(([key, value]) => (
+                  <Text key={key} selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta }}>
+                    {`${key}: ${value}`}
+                  </Text>
+                )),
+              }
+            : null,
+          request.description && request.kind !== "question"
+            ? { label: ctx.t("inbox.description"), content: <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body }}>{request.description}</Text> }
+            : null,
+          plan ? { label: ctx.t("inbox.plan"), content: <CodeBox text={plan} ctx={ctx} maxHeight={320} /> } : null,
+        ]}
+      />
     </CardFrame>
   );
 }
@@ -550,90 +544,35 @@ function SectionHeader({ title, count, hint, color, ctx }: { title: string; coun
 }
 
 /**
- * 확인 필요의 '모두 확인'. 이미 끝났거나 계속 진행되는 일만 한 번에 확인한다: 시작 카드, 자동 결정, PR 도 남은 변경도 없이
- * 끝난 작업. 답변 카드는 넣지 않는다. 답변을 확인하면 요청이 끝나므로, 하나씩 읽고 끝낼지 지시할지 정해야 한다.
- * r15 에서 끝난 작업 8개를 하나씩 확인해야 했다 (2026-11-26).
+ * 결정 인박스. 내 결정 필요는 카드에서 바로 처리하고, 확인 필요는 열어서 본다 (RULES.md §12).
+ * 확인 필요에는 끝난 일의 보고만 온다: 읽기 요청의 답변과, 결정할 것이 없는 완료 보고서. 시작 카드, 자동 결정 카드, 직접 띄운
+ * 에이전트의 턴 종료는 뺐다 (2026-11-27 사용자 결정). 사람이 움직이지 않아도 일이 계속되는 것을 카드로 확인받는 것도 병목이었다.
+ * 자동 결정은 완료 보고서에, 직접 띄운 에이전트는 진행 현황과 Paseo 사이드바에 남는다.
  */
-function ReviewAllButton({
-  started,
-  autos,
-  finished,
-  ctx,
-}: {
-  started: readonly CoordinatorRequest[];
-  autos: readonly { request: CoordinatorRequest; task: Task; decision: Task["autoDecisions"][number] }[];
-  finished: readonly { request: CoordinatorRequest; task: Task }[];
-  ctx: ViewContext;
-}) {
-  const acknowledge = useRpc(acknowledgeRpc);
-  const review = useRpc(reviewAutoDecisionRpc);
-  const close = useRpc(closeCompletionRpc);
-  // 답을 기다리는 질문이 있거나 '남은 것'이 적힌 완료 카드는 한꺼번에 닫지 않는다. 일괄로 닫으면 답 없는 질문이 버려지고, 남은 일을
-  // 읽지 않은 채 요청이 끝났다 (2026-11-26 전수 검사). 사람이 그 카드를 열어 직접 닫는다.
-  const closable = finished.filter(({ task }) => !task.completion?.left.length && !task.completion?.qa.some((qa) => qa.answer === null));
-  const skipped = finished.length - closable.length;
-  const action = useMutation({
-    mutationFn: async () => {
-      // 하나가 실패해도 나머지는 확인한다. 실패한 것은 카드로 남아 사람이 따로 본다.
-      const results = await Promise.allSettled([
-        ...started.map((request) => acknowledge({ id: request.id })),
-        ...autos.map(({ request, task, decision }) => review({ requestId: request.id, taskNumber: task.number, id: decision.id, revertText: null })),
-        ...closable.map(({ request, task }) => close({ requestId: request.id, taskNumber: task.number, action: "merge", instruction: null })),
-      ]);
-      const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
-      if (failed) throw failed.reason;
-    },
-  });
-  const total = started.length + autos.length + closable.length;
-  if (total < 2) return null;
-  return (
-    <View style={{ gap: 4 }}>
-      <View style={{ flexDirection: "row" }}>
-        <CtaButton label={`${ctx.t("inbox.reviewAll")} ${total}`} disabled={action.isPending} theme={ctx.theme} onPress={() => action.mutate()} />
-      </View>
-      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{ctx.t("inbox.reviewAllHint")}</Text>
-      {skipped > 0 ? (
-        <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>{ctx.t("inbox.reviewAllSkipped", { count: skipped })}</Text>
-      ) : null}
-      {action.error ? (
-        <Text style={{ color: ctx.theme.colors.statusDanger, fontSize: ctx.fonts.meta }}>
-          {ctx.t("inbox.failed", { message: action.error instanceof Error ? action.error.message : String(action.error) })}
-        </Text>
-      ) : null}
-    </View>
-  );
-}
-
-/** 결정 인박스. 내 결정 필요는 카드에서 바로 처리하고, 확인 필요는 열어서 본다 (RULES.md §12). */
 export function InboxView({ ctx }: { ctx: ViewContext }) {
   const classify = useClassifier();
   const directory = usePending();
   const needsReaction = (agent: PluginAgentSnapshot) => classify.needsMyDecision(agent);
-  // 확인 필요의 에이전트 카드는 직접 띄운 에이전트만. 워커의 결과는 시작 카드와 진행 현황의 작업 카드로 본다.
-  const needsReview = (agent: PluginAgentSnapshot) => isDirectAgent(agent) && classify.column(agent) === "review";
   const reacting = useAgents({ hosts: [ctx.hostId], where: needsReaction, orderBy: oldestFirst });
-  const reviewing = useAgents({ hosts: [ctx.hostId], where: needsReview, orderBy: ["lastActivityAt", "desc"] });
   // 질문 카드는 요청 전체를 막고 있어서 에이전트 카드보다 위에, 오래 기다린 순서로 둔다.
   const { state } = useCoordinatorState();
   const requests = state?.requests ?? [];
   const questions = requests
     .filter(requestNeedsReaction)
     .sort((a, b) => (a.question?.at ?? a.createdAt).localeCompare(b.question?.at ?? b.createdAt));
-  // 확인 필요는 최근 순서. 답변 카드와 시작 카드가 에이전트 카드보다 위다.
-  const reviews = requests
+  const answers = requests
     .filter(requestNeedsReview)
-    .sort((a, b) => (b.answer?.at ?? b.plannedAt ?? b.createdAt).localeCompare(a.answer?.at ?? a.plannedAt ?? a.createdAt));
+    .sort((a, b) => (b.answer?.at ?? b.createdAt).localeCompare(a.answer?.at ?? a.createdAt));
   // 워커 질문: 워커가 보고했고 코디네이터가 결정 카드를 다 쓴 것. 워커 에이전트 자체는 쉬는 중이라 에이전트 카드로는 안 잡힌다.
   const blockers = blockerCards(requests);
-  const merges = completionCards(requests);
+  const reports = reportCards(requests);
+  const decisionReports = reports.filter(({ report }) => report.needsDecision);
+  const doneReports = reports.filter(({ report }) => !report.needsDecision);
   const stopped = stoppedCards(requests);
   const stalled = stalledRequests(requests);
   const reactCount =
-    questions.length + blockers.length + merges.length + stopped.length + stalled.length + cardCount(reacting.map((ref) => ref.id), directory);
-  const autos = autoDecisionCards(requests);
-  const finished = finishedCards(requests);
-  const started = reviews.filter((request) => request.status !== "answered");
-  const reviewCount = reviews.length + autos.length + finished.length + reviewing.length;
+    questions.length + blockers.length + decisionReports.length + stopped.length + stalled.length + cardCount(reacting.map((ref) => ref.id), directory);
+  const reviewCount = answers.length + doneReports.length;
   return (
     <View style={{ gap: 20, maxWidth: 880 }}>
       <View style={{ gap: 10 }}>
@@ -656,11 +595,11 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
         {blockers.map(({ request, task }) => (
           <BlockerCard key={`${request.id}:${task.number}`} request={request} task={task} ctx={ctx} />
         ))}
-        {merges.map(({ request, task }) => (
-          <MergeCard key={`${request.id}:${task.number}`} request={request} task={task} ctx={ctx} />
-        ))}
         {stopped.map(({ request, task }) => (
           <StoppedCard key={`${request.id}:${task.number}`} request={request} task={task} ctx={ctx} />
+        ))}
+        {decisionReports.map(({ request, report }) => (
+          <ReportCard key={`report:${request.id}`} request={request} report={report} ctx={ctx} />
         ))}
         {reacting.map((ref) => (
           <AgentDecisions key={ref.key} agentRef={ref} ctx={ctx} />
@@ -677,22 +616,11 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
         {reviewCount === 0 ? (
           <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.body }}>{ctx.t("inbox.nothingToReview")}</Text>
         ) : null}
-        <ReviewAllButton started={started} autos={autos} finished={finished} ctx={ctx} />
-        {finished.map(({ request, task }) => (
-          <MergeCard key={`${request.id}:${task.number}`} request={request} task={task} ctx={ctx} />
+        {doneReports.map(({ request, report }) => (
+          <ReportCard key={`report:${request.id}`} request={request} report={report} ctx={ctx} />
         ))}
-        {autos.map(({ request, task, decision }) => (
-          <AutoDecisionCard key={decision.id} request={request} task={task} decision={decision} ctx={ctx} />
-        ))}
-        {reviews.map((request) =>
-          request.status === "answered" ? (
-            <AnswerCard key={request.id} request={request} ctx={ctx} />
-          ) : (
-            <StartedCard key={request.id} request={request} ctx={ctx} />
-          ),
-        )}
-        {reviewing.map((ref) => (
-          <AgentCard key={ref.key} agentRef={ref} ctx={ctx} />
+        {answers.map((request) => (
+          <AnswerCard key={request.id} request={request} ctx={ctx} />
         ))}
       </View>
     </View>

@@ -5,8 +5,9 @@ import {
   type Task,
   type CoordinatorState,
   type SentInstruction,
-  completionNeedsDecision,
+  type RequestReport,
   recordInstructionRpc,
+  requestReport,
   watchStateSubscription,
 } from "../shared/model";
 
@@ -100,13 +101,12 @@ function isOpen(request: CoordinatorRequest): boolean {
 }
 
 /**
- * 확인 필요: 코디네이터가 답했거나(답변 카드), 계획해서 시작한 뒤 내가 아직 보지 않았다(시작 카드).
- * 확인한 뒤 새 계획이 오면 다시 확인 필요가 된다.
+ * 확인 필요: 읽기 요청에 코디네이터가 답했다(답변 카드). 읽기 요청에서는 이 카드가 완료 보고서다.
+ * 시작 카드는 없앴다 (2026-11-27 사용자 결정). 코디네이터가 시작 전에 물을 것을 묻고 정리되면 바로 일하므로, 시작했다는 확인을
+ * 받는 것도 병목이었다. 계획은 진행 현황과 완료 보고서에서 본다.
  */
 export function requestNeedsReview(request: CoordinatorRequest): boolean {
-  if (request.status === "answered") return request.answer !== null;
-  if (request.status !== "running" || !request.plannedAt) return false;
-  return !request.reviewedAt || request.reviewedAt < request.plannedAt;
+  return request.status === "answered" && request.answer !== null;
 }
 
 /** 내 결정 필요: 워커가 보고했고 코디네이터가 결정 카드를 다 쓴 것. 오래 기다린 순서. */
@@ -117,43 +117,18 @@ export function blockerCards(requests: readonly CoordinatorRequest[]): { request
     .sort((a, b) => a.task.blocker!.at.localeCompare(b.task.blocker!.at));
 }
 
-/** 확인 필요: 검토를 통과해 자동으로 처리했고 아직 사람이 보지 않은 결정. 최근 순서. 끝난 요청의 결정도 남긴다(잘못됐으면 표시할 수 있다). */
-export function autoDecisionCards(requests: readonly CoordinatorRequest[]) {
-  return requests
-    .flatMap((request) =>
-      request.tasks.flatMap((task) =>
-        task.autoDecisions.filter((decision) => !decision.reviewedAt).map((decision) => ({ request, task, decision })),
-      ),
-    )
-    .sort((a, b) => b.decision.at.localeCompare(a.decision.at));
-}
-
-/** 워커가 완료를 보고했고 아직 닫지 않은 작업. 오래 기다린 순서. */
-function openCompletions(requests: readonly CoordinatorRequest[]): { request: CoordinatorRequest; task: Task }[] {
-  return requests
-    .filter(isOpen)
-    .flatMap((request) =>
-      request.tasks
-        .filter((task) => task.status === "review" && task.completion && !task.completion.closedAt && !task.blocker)
-        .map((task) => ({ request, task })),
-    )
-    .sort((a, b) => a.task.completion!.at.localeCompare(b.task.completion!.at));
-}
-
 /**
- * 내 결정 필요: PR 머지(모든 등급에서 사람이 한다, RULES.md H2)나, PR 에 없는 변경이 남은 완료 (7단계).
- * A·B 의 완료 판정도 이 카드에서 함께 한다.
+ * 완료 보고서 (2026-11-27 사용자 결정). 작업마다 머지·확인 카드를 띄우지 않고, 요청에서 더 진행할 일이 없을 때 요청마다 하나로
+ * 보인다. PR 머지나 남은 변경이 있으면 내 결정 필요, 없으면 확인 필요다. 가장 늦게 끝난 작업이 위에 온다.
  */
-export function completionCards(requests: readonly CoordinatorRequest[]): { request: CoordinatorRequest; task: Task }[] {
-  return openCompletions(requests).filter(({ task }) => completionNeedsDecision(task));
-}
-
-/**
- * 확인 필요: PR 도 남은 변경도 없이 끝난 작업(운영 작업, 바뀐 것 없음). 이미 끝난 일이라 사람이 움직이지 않아도 멈춘 것이 없다.
- * '내 결정 필요'에 두었을 때 r15 의 끝난 삭제 작업 8개가 쌓여 66초 동안 확인만 눌렀다 (2026-11-26).
- */
-export function finishedCards(requests: readonly CoordinatorRequest[]): { request: CoordinatorRequest; task: Task }[] {
-  return openCompletions(requests).filter(({ task }) => !completionNeedsDecision(task));
+export function reportCards(requests: readonly CoordinatorRequest[]): { request: CoordinatorRequest; report: RequestReport }[] {
+  const lastAt = (report: RequestReport) => report.completions.map((task) => task.completion!.at).sort().at(-1) ?? "";
+  return requests
+    .flatMap((request) => {
+      const report = requestReport(request);
+      return report ? [{ request, report }] : [];
+    })
+    .sort((a, b) => lastAt(b.report).localeCompare(lastAt(a.report)));
 }
 
 /** 내 결정 필요: 코디네이터가 멈춰 요청을 이어 가지 못한다. 다시 시도는 사람만 할 수 있다. */
@@ -166,7 +141,7 @@ export function requestReactionCount(requests: readonly CoordinatorRequest[]): n
   return (
     requests.filter(requestNeedsReaction).length +
     blockerCards(requests).length +
-    completionCards(requests).length +
+    reportCards(requests).filter(({ report }) => report.needsDecision).length +
     stoppedCards(requests).length +
     stalledRequests(requests).length
   );

@@ -6,13 +6,14 @@ import { type CoordinatorRequest, type Task, cancelTaskRpc, continuedBy, depende
 import { columnColor } from "./agent-state";
 import { DecisionList } from "./decision-history";
 import { ProjectChips } from "./project-chip";
-import { Chip, CtaButton, Decide, Fold, Row, type ViewContext } from "./ui";
+import { Chip, CtaButton, Decide, Fold, type ViewContext } from "./ui";
 
 /**
  * 멈춘 작업 카드 (내 결정 필요). 워커 질문 카드 없이 막힌 작업이다: 워커를 만들지 못했거나, 턴이 에러로 끝났거나,
  * 완료 보고 없이 두 번 끝났다. 사람이 원인을 보고 다시 시작하거나(지시를 붙일 수 있다) 워커를 열어 직접 본다.
  * 진행하지 않을 작업은 취소한다. 기대는 작업도 함께 취소되므로, 누르면 바로 취소하지 않고 함께 취소될 작업을 보여 준 뒤 확정받는다.
- * 읽는 순서: 내 요청 → 멈춘 이유 → 자세히 보기(결정 기록) → 결정할 것 → 버튼. 작업 이름은 머리 줄에 있다.
+ * 읽는 순서: 결정할 것(멈춘 이유) → 버튼 → 자세히 보기(내 요청, 결정 기록). 작업 이름은 머리 줄에 있다. 카드 밖에는 정할 것과
+ * 버튼만 둔다 (2026-11-27 사용자 결정).
  */
 export function StoppedCard({ request, task, ctx }: { request: CoordinatorRequest; task: Task; ctx: ViewContext }) {
   const retry = useRpc(retryTaskRpc);
@@ -62,26 +63,13 @@ export function StoppedCard({ request, task, ctx }: { request: CoordinatorReques
           {`${request.title ?? request.id} › ${task.number} ${task.name}`}
         </Text>
       </View>
-      <Row label={ctx.t("blockerCard.request")} ctx={ctx}>
-        <Text selectable style={body}>{request.text}</Text>
-      </Row>
-      <Row label={ctx.t("stoppedCard.reason")} ctx={ctx}>
+      <Decide question={ctx.t("stoppedCard.decide")} ctx={ctx}>
         <Text selectable style={{ color: ctx.theme.colors.statusDanger, fontSize: ctx.fonts.body }}>
           {task.note ?? ctx.t("stoppedCard.noReason")}
         </Text>
         <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
           {task.agentId ? ctx.t("stoppedCard.withWorker") : ctx.t("stoppedCard.withoutWorker")}
         </Text>
-      </Row>
-      <Fold
-        ctx={ctx}
-        items={[
-          task.decisions.length > 0
-            ? { label: ctx.t("decisions.label"), count: task.decisions.length, content: <DecisionList task={task} ctx={ctx} /> }
-            : null,
-        ]}
-      />
-      <Decide question={ctx.t("stoppedCard.decide")} ctx={ctx}>
         {task.agentId ? (
           <TextInput
             value={text}
@@ -164,6 +152,15 @@ export function StoppedCard({ request, task, ctx }: { request: CoordinatorReques
           {ctx.t("inbox.failed", { message: action.error instanceof Error ? action.error.message : String(action.error) })}
         </Text>
       ) : null}
+      <Fold
+        ctx={ctx}
+        items={[
+          { label: ctx.t("blockerCard.request"), content: <Text selectable style={body}>{request.text}</Text> },
+          task.decisions.length > 0
+            ? { label: ctx.t("decisions.label"), count: task.decisions.length, content: <DecisionList task={task} ctx={ctx} /> }
+            : null,
+        ]}
+      />
     </View>
   );
 }

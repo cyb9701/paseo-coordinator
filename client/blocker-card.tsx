@@ -7,11 +7,12 @@ import { columnColor } from "./agent-state";
 import { DecisionList } from "./decision-history";
 import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
-import { Chip, ChoiceBox, CtaButton, Decide, Fold, Lines, Row, type ViewContext } from "./ui";
+import { Chip, ChoiceBox, CtaButton, Decide, Fold, Lines, type ViewContext } from "./ui";
 
 /**
  * 워커 질문 카드 (내 결정 필요, 4단계). 워커가 report_blocker 로 멈췄고 코디네이터가 판단을 채웠다.
- * 읽는 순서: 내 요청 → 상황(코디네이터가 정리한 맥락) → 확인할 것 → 문답 → 자세히 보기 → 결정할 것(워커의 질문과 선택지) → 버튼.
+ * 읽는 순서: 검토자의 반대 의견(있을 때) → 결정할 것(워커의 질문과 선택지, 선택지마다 위험 한 줄) → 버튼 → 자세히 보기(내 요청, 상황,
+ * 추천 이유, 문답, 워커 보고, 선택지 자세히, 규칙, 범위, 결정 기록). 카드 밖에는 정할 것과 버튼만 둔다 (2026-11-27 사용자 결정).
  * 워커가 낸 선택지와 추천은 코디네이터의 선택지와 겹쳐서, 처음에는 코디네이터 선택지만 보이고 워커 보고는 접어 둔다.
  * 사람이 고르면 플러그인이 선택지의 지시문을 워커에게 보낸다. 질문하기는 코디네이터에게만 묻고 워커는 건드리지 않는다.
  */
@@ -77,72 +78,13 @@ export function BlockerCard({ request, task, ctx }: { request: CoordinatorReques
         <Text style={muted}>{ctx.t("time.waiting", { ago: formatAgo(blocker.at, ctx.now, ctx.t) })}</Text>
       </View>
 
-      <Row label={ctx.t("blockerCard.request")} ctx={ctx}>
-        <Text selectable style={body}>{request.text}</Text>
-      </Row>
-      <Row label={ctx.t("blockerCard.situation")} ctx={ctx}>
-        <Text selectable style={body}>{analysis.context}</Text>
-      </Row>
       {/* 검토자의 반대 의견은 접지 않는다. 사람에게 온 이유 자체다 (RULES.md §12 확인할 것). */}
       {blocker.objections.length > 0 ? (
-        <Row label={ctx.t("objections")} ctx={ctx}>
-          <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>{ctx.t("reviewFailed")}</Text>
+        <View style={{ gap: 4 }}>
+          <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>{`⚠ ${ctx.t("reviewFailed")}`}</Text>
           <Lines items={blocker.objections} ctx={ctx} />
-        </Row>
+        </View>
       ) : null}
-      {blocker.qa.length > 0 ? (
-        <Row label={ctx.t("blockerCard.qa")} ctx={ctx}>
-          {blocker.qa.map((qa) => (
-            <View key={qa.at} style={{ gap: 2 }}>
-              <Text style={{ ...body, fontWeight: "600" }}>{`Q. ${qa.question}`}</Text>
-              <Text selectable style={qa.answer ? body : muted}>{qa.answer ? `A. ${qa.answer}` : ctx.t("blockerCard.waitingAnswer")}</Text>
-            </View>
-          ))}
-        </Row>
-      ) : null}
-      <Fold
-        ctx={ctx}
-        items={[
-          {
-            label: ctx.t("blockerCard.report"),
-            content: (
-              <>
-                <Text style={muted}>{ctx.t("blockerCard.facts")}</Text>
-                <Lines items={blocker.facts} ctx={ctx} />
-                {blocker.options.length > 0 ? (
-                  <>
-                    <Text style={muted}>{ctx.t("blockerCard.workerOptions")}</Text>
-                    <Lines items={blocker.options.map((option) => `${option.label}: ${option.consequence}`)} ctx={ctx} />
-                  </>
-                ) : null}
-                {blocker.workerRecommendation ? (
-                  <Text style={muted}>{`${ctx.t("blockerCard.workerRecommendation")}: ${blocker.workerRecommendation}`}</Text>
-                ) : null}
-              </>
-            ),
-          },
-          {
-            label: ctx.t("blockerCard.optionDetails"),
-            content: analysis.options.map((option) => (
-              <View key={option.label} style={{ gap: 2 }}>
-                <Text style={{ ...body, fontWeight: "600" }}>{option.label}</Text>
-                <Text selectable style={muted}>{`${ctx.t("blockerCard.result")}: ${option.result}`}</Text>
-                <Text selectable style={muted}>{`${ctx.t("blockerCard.undo")}: ${option.undo}`}</Text>
-                {/* 이 선택지를 고르면 워커에게 그대로 가는 문장이다. 라벨과 다르면 사람이 알아챌 수 있어야 한다. */}
-                <Text selectable style={muted}>{`${ctx.t("blockerCard.instruction")}: ${option.instruction}`}</Text>
-              </View>
-            )),
-          },
-          analysis.rules.length > 0
-            ? { label: ctx.t("blockerCard.rules"), content: <Text style={body}>{analysis.rules.join(", ")}</Text> }
-            : null,
-          task.scope ? { label: ctx.t("blockerCard.scope"), content: <Text selectable style={body}>{task.scope}</Text> } : null,
-          task.decisions.length > 0
-            ? { label: ctx.t("decisions.label"), count: task.decisions.length, content: <DecisionList task={task} ctx={ctx} /> }
-            : null,
-        ]}
-      />
-
       <Decide question={blocker.summary} ctx={ctx}>
         {analysis.options.map((option) => (
           <ChoiceBox
@@ -156,12 +98,6 @@ export function BlockerCard({ request, task, ctx }: { request: CoordinatorReques
             theme={ctx.theme}
           />
         ))}
-        {analysis.reasons.length > 0 ? (
-          <View style={{ gap: 2 }}>
-            <Text style={muted}>{ctx.t("blockerCard.why")}</Text>
-            <Lines items={analysis.reasons} ctx={ctx} muted />
-          </View>
-        ) : null}
       </Decide>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         <CtaButton
@@ -218,6 +154,65 @@ export function BlockerCard({ request, task, ctx }: { request: CoordinatorReques
           {ctx.t("inbox.failed", { message: action.error instanceof Error ? action.error.message : String(action.error) })}
         </Text>
       ) : null}
+      <Fold
+        ctx={ctx}
+        items={[
+          { label: ctx.t("blockerCard.request"), content: <Text selectable style={body}>{request.text}</Text> },
+          { label: ctx.t("blockerCard.situation"), content: <Text selectable style={body}>{analysis.context}</Text> },
+          analysis.reasons.length > 0
+            ? { label: ctx.t("blockerCard.why"), content: <Lines items={analysis.reasons} ctx={ctx} /> }
+            : null,
+          blocker.qa.length > 0
+            ? {
+                label: ctx.t("blockerCard.qa"),
+                count: blocker.qa.length,
+                content: blocker.qa.map((qa) => (
+                  <View key={qa.at} style={{ gap: 2 }}>
+                    <Text style={{ ...body, fontWeight: "600" }}>{`Q. ${qa.question}`}</Text>
+                    <Text selectable style={qa.answer ? body : muted}>{qa.answer ? `A. ${qa.answer}` : ctx.t("blockerCard.waitingAnswer")}</Text>
+                  </View>
+                )),
+              }
+            : null,
+          {
+            label: ctx.t("blockerCard.report"),
+            content: (
+              <>
+                <Text style={muted}>{ctx.t("blockerCard.facts")}</Text>
+                <Lines items={blocker.facts} ctx={ctx} />
+                {blocker.options.length > 0 ? (
+                  <>
+                    <Text style={muted}>{ctx.t("blockerCard.workerOptions")}</Text>
+                    <Lines items={blocker.options.map((option) => `${option.label}: ${option.consequence}`)} ctx={ctx} />
+                  </>
+                ) : null}
+                {blocker.workerRecommendation ? (
+                  <Text style={muted}>{`${ctx.t("blockerCard.workerRecommendation")}: ${blocker.workerRecommendation}`}</Text>
+                ) : null}
+              </>
+            ),
+          },
+          {
+            label: ctx.t("blockerCard.optionDetails"),
+            content: analysis.options.map((option) => (
+              <View key={option.label} style={{ gap: 2 }}>
+                <Text style={{ ...body, fontWeight: "600" }}>{option.label}</Text>
+                <Text selectable style={muted}>{`${ctx.t("blockerCard.result")}: ${option.result}`}</Text>
+                <Text selectable style={muted}>{`${ctx.t("blockerCard.undo")}: ${option.undo}`}</Text>
+                {/* 이 선택지를 고르면 워커에게 그대로 가는 문장이다. 라벨과 다르면 사람이 알아챌 수 있어야 한다. */}
+                <Text selectable style={muted}>{`${ctx.t("blockerCard.instruction")}: ${option.instruction}`}</Text>
+              </View>
+            )),
+          },
+          analysis.rules.length > 0
+            ? { label: ctx.t("blockerCard.rules"), content: <Text style={body}>{analysis.rules.join(", ")}</Text> }
+            : null,
+          task.scope ? { label: ctx.t("blockerCard.scope"), content: <Text selectable style={body}>{task.scope}</Text> } : null,
+          task.decisions.length > 0
+            ? { label: ctx.t("decisions.label"), count: task.decisions.length, content: <DecisionList task={task} ctx={ctx} /> }
+            : null,
+        ]}
+      />
     </View>
   );
 }

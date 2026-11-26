@@ -5,12 +5,12 @@ import { type CoordinatorRequest, requestProjectIds, retryCoordinatorRpc } from 
 import { columnColor } from "./agent-state";
 import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
-import { Chip, CtaButton, Decide, Row, type ViewContext } from "./ui";
+import { Chip, CtaButton, Decide, Fold, type ViewContext } from "./ui";
 
 /**
  * 코디네이터 멈춤 카드 (내 결정 필요). 코디네이터는 사람 화면에 보이지 않는 에이전트라, 만들기에 실패하거나 에러로 멈추거나
  * 알림을 받고도 처리하지 않으면 보드에 '계획 세우는 중'만 계속 보였다 (2026-11-26 전수 검사). 이유를 보여 주고 다시 시도하게 한다.
- * 읽는 순서: 내 요청 → 이유 → 결정할 것 → 버튼.
+ * 읽는 순서: 결정할 것(이유) → 버튼 → 자세히 보기(내 요청). 카드 밖에는 정할 것과 버튼만 둔다 (2026-11-27 사용자 결정).
  */
 export function StallCard({ request, ctx }: { request: CoordinatorRequest; ctx: ViewContext }) {
   const retry = useRpc(retryCoordinatorRpc);
@@ -43,13 +43,9 @@ export function StallCard({ request, ctx }: { request: CoordinatorRequest; ctx: 
           {ctx.t("time.waiting", { ago: formatAgo(stall.at, ctx.now, ctx.t) })}
         </Text>
       </View>
-      <Row label={ctx.t("questionCard.request")} ctx={ctx}>
-        <Text selectable style={body}>{request.text}</Text>
-      </Row>
-      <Row label={ctx.t("stallCard.reason")} ctx={ctx}>
+      <Decide question={ctx.t("stallCard.decide")} ctx={ctx}>
         <Text selectable style={{ color: ctx.theme.colors.statusDanger, fontSize: ctx.fonts.body }}>{stall.reason}</Text>
-      </Row>
-      <Decide question={ctx.t("stallCard.decide")} ctx={ctx} />
+      </Decide>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         <CtaButton label={ctx.t("stallCard.retry")} tone="primary" disabled={action.isPending} theme={ctx.theme} onPress={() => action.mutate()} />
         {request.coordinatorAgentId && ctx.navigation ? (
@@ -65,6 +61,7 @@ export function StallCard({ request, ctx }: { request: CoordinatorRequest; ctx: 
           {ctx.t("inbox.failed", { message: action.error instanceof Error ? action.error.message : String(action.error) })}
         </Text>
       ) : null}
+      <Fold ctx={ctx} items={[{ label: ctx.t("questionCard.request"), content: <Text selectable style={body}>{request.text}</Text> }]} />
     </View>
   );
 }

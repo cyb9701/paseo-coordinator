@@ -7,18 +7,29 @@ import { columnColor } from "./agent-state";
 import { DecisionList } from "./decision-history";
 import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
-import { Chip, CtaButton, Decide, Fold, GradeBadge, Lines, Row, type ViewContext } from "./ui";
+import { Chip, CtaButton, Decide, Fold, GradeBadge, Lines, type ViewContext } from "./ui";
 import { WorkspacePlace } from "./workspace-place";
 
 /**
- * PR 머지 카드 (내 결정 필요, 7단계). PR 도 남은 변경도 없이 끝난 작업(운영 작업, 바뀐 것 없음)은 같은 카드로 '확인 필요'에 온다. 워커가 report_done 으로 완료를 보고했고, 사람의 마지막 결정인 머지만 남았다.
+ * PR 머지 카드 (내 결정 필요, 7단계). 2026-11-27 부터 인박스에 따로 뜨지 않고 완료 보고서(report-card.tsx) 안에 놓인다. 워커가 report_done 으로 완료를 보고했고, 사람의 마지막 결정인 머지만 남았다.
  * 모든 등급에서 머지는 사람이 한다 (RULES.md H2). A·B 의 완료 판정도 이 카드가 맡는다. 워커가 스스로 고른 것도 여기서 본다.
- * 읽는 순서: 내 요청 → 워커 보고 → 남은 것 → PR → 문답 → 자세히 보기(검증, 워커가 고른 것) → 결정할 것 → 버튼.
- * 머지를 정하는 데 처음 필요한 것은 무엇을 했고 무엇이 남았고 PR 이 머지할 수 있는 상태인지다. 검증 목록과 워커가 고른 것은
- * 길어서 접어 둔다. 남은 것은 접지 않는다. 머지해도 끝나지 않는 일이 있다는 신호라서다.
+ * 읽는 순서: 경고(충돌, 체크 실패, PR 에 없는 변경) → 결정할 것(PR 한 줄) → 버튼 → 자세히 보기(내 요청, 워커 보고, 남은 것, 문답,
+ * 검증, 워커가 고른 것, 작업, 결정 기록). 카드 밖에는 정할 것과 버튼만 둔다 (2026-11-27 사용자 결정). 남은 것은 완료 보고서의
+ * '내가 할 일'에 접지 않고 보인다.
  * 질문하기는 그 요청의 코디네이터에게만 묻는다. 워커는 건드리지 않는다.
  */
-export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest; task: Task; ctx: ViewContext }) {
+export function MergeCard({
+  request,
+  task,
+  ctx,
+  embedded = false,
+}: {
+  request: CoordinatorRequest;
+  task: Task;
+  ctx: ViewContext;
+  /** 완료 보고서 안에 놓였다. 요청 원문과 등급은 보고서가 이미 보여서 되풀이하지 않는다. */
+  embedded?: boolean;
+}) {
   const close = useRpc(closeCompletionRpc);
   const ask = useRpc(askCoordinatorRpc);
   const [panel, setPanel] = useState<"none" | "revise" | "ask">("none");
@@ -49,6 +60,9 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
   const muted = { color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta } as const;
   const body = { color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body } as const;
   const conflicting = pr?.mergeable === "CONFLICTING";
+  // 플러그인이 만든 체크 요약('passed 3, failed 1, pending 0')에서 실패를 찾는다.
+  const checksFailed = Boolean(pr?.checks && /failed [1-9]/.test(pr.checks));
+  const warning = { color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta } as const;
   // 이어 쓴 작업이 여럿이면 어느 작업의 검증·선택인지 작업 번호로 묶어 보인다.
   const group = (pick: (report: NonNullable<Task["completion"]>) => string[]) =>
     chain
@@ -86,113 +100,24 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
           color={accent}
           theme={ctx.theme}
         />
-        {request.grade ? <GradeBadge grade={request.grade} label={ctx.t("card.grade", { grade: request.grade })} theme={ctx.theme} /> : null}
+        {request.grade && !embedded ? <GradeBadge grade={request.grade} label={ctx.t("card.grade", { grade: request.grade })} theme={ctx.theme} /> : null}
         <ProjectChips projectIds={[task.projectId]} ctx={ctx} />
         <Text numberOfLines={1} style={{ ...body, fontWeight: "600", flexShrink: 1 }}>
-          {`${request.title ?? request.id} › ${task.number} ${task.name}`}
+          {embedded ? `${task.number} ${task.name}` : `${request.title ?? request.id} › ${task.number} ${task.name}`}
         </Text>
         <View style={{ flex: 1 }} />
         <Text style={muted}>{ctx.t("time.waiting", { ago: formatAgo(completion.at, ctx.now, ctx.t) })}</Text>
       </View>
 
-      <Row label={ctx.t("mergeCard.request")} ctx={ctx}>
-        <Text selectable style={body}>{request.text}</Text>
-      </Row>
-      <Row label={ctx.t("mergeCard.report")} ctx={ctx}>
-        {chain.map((item) => (
-          <Text key={item.number} selectable style={body}>
-            {chain.length > 1 ? `${item.number} · ${item.completion!.summary}` : item.completion!.summary}
-          </Text>
-        ))}
-      </Row>
-      {left.length > 0 ? (
-        <Row label={ctx.t("mergeCard.left")} ctx={ctx}>
-          <Lines items={left} ctx={ctx} />
-        </Row>
+      {/* 경고는 접지 않는다. 보지 않고 머지하면 안 되는 것들이다 (2026-11-27 사용자 결정의 예외). */}
+      {conflicting ? <Text style={warning}>{`⚠ ${ctx.t("mergeCard.conflicting")}`}</Text> : null}
+      {checksFailed ? <Text style={warning}>{`⚠ ${ctx.t("mergeCard.checks", { checks: pr!.checks! })}`}</Text> : null}
+      {completion.unpublished ? (
+        <View style={{ gap: 2 }}>
+          <Text style={warning}>{`⚠ ${ctx.t("mergeCard.unpublished")}`}</Text>
+          <Text selectable style={muted}>{completion.unpublished}</Text>
+        </View>
       ) : null}
-      <Row label={ctx.t("mergeCard.pr")} ctx={ctx}>
-        {pr ? (
-          <>
-            <Text selectable style={{ ...body, fontWeight: "600" }}>{`#${pr.number} ${pr.title}`}</Text>
-            <Text style={body}>
-              {ctx.t("mergeCard.stats", { additions: pr.additions, deletions: pr.deletions, files: pr.changedFiles, base: pr.baseRefName })}
-            </Text>
-            <Text style={muted}>{pr.checks ? ctx.t("mergeCard.checks", { checks: pr.checks }) : ctx.t("mergeCard.noChecks")}</Text>
-            {conflicting ? (
-              <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>{ctx.t("mergeCard.conflicting")}</Text>
-            ) : null}
-          </>
-        ) : (
-          <>
-            {/* 이유의 출처를 구분한다. 코디네이터가 쓴 범위를 '요청대로'라고 보이면 사람이 하지 않은 말을 한 것처럼 된다 (r15). */}
-            {completion.noPrSource === "operation" || operation ? (
-              <>
-                <Text style={body}>{ctx.t("mergeCard.noPrOperation")}</Text>
-                <Lines items={task.targets} ctx={ctx} />
-              </>
-            ) : completion.noPrSource === "existingWorkspace" ? (
-              <Text style={body}>{ctx.t("mergeCard.noPrExisting", { branch: task.branch ?? "" })}</Text>
-            ) : completion.noPrSource === "localBase" ? (
-              <Text style={body}>{ctx.t("mergeCard.noPrLocalBase")}</Text>
-            ) : completion.noPrSource === "request" && completion.noPrReason ? (
-              <Text style={body}>{ctx.t("mergeCard.noPrByRequest", { reason: completion.noPrReason })}</Text>
-            ) : completion.noPrReason ? (
-              <Text style={body}>{ctx.t("mergeCard.noPrWithReason", { reason: completion.noPrReason })}</Text>
-            ) : completion.unpublished ? (
-              // 이어 쓰던 뒤 작업이 취소돼 PR 을 기다리던 커밋이 남은 경우. '아무것도 바꾸지 않았다'와 함께 보이면 모순이다.
-              <Text style={body}>{ctx.t("mergeCard.noPrYet")}</Text>
-            ) : (
-              <Text style={body}>{ctx.t("mergeCard.noPr")}</Text>
-            )}
-            {existing && task.workspaceId ? <WorkspacePlace workspaceId={task.workspaceId} ctx={ctx} /> : null}
-            {completion.unpublished ? (
-              <>
-                <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>{ctx.t("mergeCard.unpublished")}</Text>
-                <Text selectable style={muted}>{completion.unpublished}</Text>
-              </>
-            ) : null}
-          </>
-        )}
-      </Row>
-
-      {completion.qa.length > 0 ? (
-        <Row label={ctx.t("blockerCard.qa")} ctx={ctx}>
-          {completion.qa.map((qa) => (
-            <View key={qa.at} style={{ gap: 2 }}>
-              <Text style={{ ...body, fontWeight: "600" }}>{`Q. ${qa.question}`}</Text>
-              <Text selectable style={qa.answer ? body : muted}>{qa.answer ? `A. ${qa.answer}` : ctx.t("blockerCard.waitingAnswer")}</Text>
-            </View>
-          ))}
-        </Row>
-      ) : null}
-      <Fold
-        ctx={ctx}
-        items={[
-          verification.length > 0
-            ? { label: ctx.t("mergeCard.verification"), count: verification.length, content: <Grouped groups={verifiedBy} ctx={ctx} /> }
-            : null,
-          choices.length > 0
-            ? { label: ctx.t("mergeCard.choices"), count: choices.length, content: <Grouped groups={choseBy} ctx={ctx} /> }
-            : null,
-          chain.length > 1 || task.poteto
-            ? {
-                label: ctx.t("mergeCard.tasks"),
-                content: (
-                  <>
-                    {chain.map((item) => (
-                      <Text key={item.number} style={body}>{`${item.number} ${item.name}`}</Text>
-                    ))}
-                    {task.poteto ? <Text style={muted}>{ctx.t("mergeCard.poteto")}</Text> : null}
-                  </>
-                ),
-              }
-            : null,
-          task.decisions.length > 0
-            ? { label: ctx.t("decisions.label"), count: task.decisions.length, content: <DecisionList task={task} ctx={ctx} /> }
-            : null,
-        ]}
-      />
-
       <Decide
         question={
           pr
@@ -204,7 +129,40 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
                 : ctx.t("mergeCard.decideNoPr")
         }
         ctx={ctx}
-      />
+      >
+        {pr ? (
+          <>
+            <Text selectable style={{ ...body, fontWeight: "600" }}>{`#${pr.number} ${pr.title}`}</Text>
+            <Text style={muted}>
+              {`${ctx.t("mergeCard.stats", { additions: pr.additions, deletions: pr.deletions, files: pr.changedFiles, base: pr.baseRefName })} · ${
+                pr.checks ? ctx.t("mergeCard.checks", { checks: pr.checks }) : ctx.t("mergeCard.noChecks")
+              }`}
+            </Text>
+          </>
+        ) : completion.noPrSource === "operation" || operation ? (
+          // 이유의 출처를 구분한다. 코디네이터가 쓴 범위를 '요청대로'라고 보이면 사람이 하지 않은 말을 한 것처럼 된다 (r15).
+          <>
+            <Text style={body}>{ctx.t("mergeCard.noPrOperation")}</Text>
+            <Lines items={task.targets} ctx={ctx} />
+          </>
+        ) : completion.noPrSource === "existingWorkspace" ? (
+          <>
+            <Text style={body}>{ctx.t("mergeCard.noPrExisting", { branch: task.branch ?? "" })}</Text>
+            {task.workspaceId ? <WorkspacePlace workspaceId={task.workspaceId} ctx={ctx} /> : null}
+          </>
+        ) : completion.noPrSource === "localBase" ? (
+          <Text style={body}>{ctx.t("mergeCard.noPrLocalBase")}</Text>
+        ) : completion.noPrSource === "request" && completion.noPrReason ? (
+          <Text style={body}>{ctx.t("mergeCard.noPrByRequest", { reason: completion.noPrReason })}</Text>
+        ) : completion.noPrReason ? (
+          <Text style={body}>{ctx.t("mergeCard.noPrWithReason", { reason: completion.noPrReason })}</Text>
+        ) : completion.unpublished ? (
+          // 이어 쓰던 뒤 작업이 취소돼 PR 을 기다리던 커밋이 남은 경우. '아무것도 바꾸지 않았다'와 함께 보이면 모순이다.
+          <Text style={body}>{ctx.t("mergeCard.noPrYet")}</Text>
+        ) : (
+          <Text style={body}>{ctx.t("mergeCard.noPr")}</Text>
+        )}
+      </Decide>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         <CtaButton
           label={
@@ -287,6 +245,55 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
           })}
         </Text>
       ) : null}
+      <Fold
+        ctx={ctx}
+        items={[
+          embedded ? null : { label: ctx.t("mergeCard.request"), content: <Text selectable style={body}>{request.text}</Text> },
+          {
+            label: ctx.t("mergeCard.report"),
+            content: chain.map((item) => (
+              <Text key={item.number} selectable style={body}>
+                {chain.length > 1 ? `${item.number} · ${item.completion!.summary}` : item.completion!.summary}
+              </Text>
+            )),
+          },
+          left.length > 0 ? { label: ctx.t("mergeCard.left"), count: left.length, content: <Lines items={left} ctx={ctx} /> } : null,
+          completion.qa.length > 0
+            ? {
+                label: ctx.t("blockerCard.qa"),
+                count: completion.qa.length,
+                content: completion.qa.map((qa) => (
+                  <View key={qa.at} style={{ gap: 2 }}>
+                    <Text style={{ ...body, fontWeight: "600" }}>{`Q. ${qa.question}`}</Text>
+                    <Text selectable style={qa.answer ? body : muted}>{qa.answer ? `A. ${qa.answer}` : ctx.t("blockerCard.waitingAnswer")}</Text>
+                  </View>
+                )),
+              }
+            : null,
+          verification.length > 0
+            ? { label: ctx.t("mergeCard.verification"), count: verification.length, content: <Grouped groups={verifiedBy} ctx={ctx} /> }
+            : null,
+          choices.length > 0
+            ? { label: ctx.t("mergeCard.choices"), count: choices.length, content: <Grouped groups={choseBy} ctx={ctx} /> }
+            : null,
+          chain.length > 1 || task.poteto
+            ? {
+                label: ctx.t("mergeCard.tasks"),
+                content: (
+                  <>
+                    {chain.map((item) => (
+                      <Text key={item.number} style={body}>{`${item.number} ${item.name}`}</Text>
+                    ))}
+                    {task.poteto ? <Text style={muted}>{ctx.t("mergeCard.poteto")}</Text> : null}
+                  </>
+                ),
+              }
+            : null,
+          task.decisions.length > 0
+            ? { label: ctx.t("decisions.label"), count: task.decisions.length, content: <DecisionList task={task} ctx={ctx} /> }
+            : null,
+        ]}
+      />
     </View>
   );
 }

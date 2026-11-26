@@ -139,7 +139,7 @@ export async function recordInstruction({ agentId, text }: RpcInput<typeof recor
 }
 
 /**
- * 사람의 추가 지시(시작 카드·보드의 수정 지시, 답변 카드의 추가 질문, 질문 카드의 직접 지시).
+ * 사람의 추가 지시(보드·완료 보고서의 지시, 답변 카드의 추가 질문, 질문 카드의 직접 지시).
  * 요청에 남기고, 워커가 아직 일하지 않으면 다시 계획 단계로 돌린다. 코디네이터에게는 호출한 쪽이 알린다.
  * 워커가 일하는 요청은 진행 중인 채로 두고, 코디네이터가 워커에게 전하거나 작업을 더하거나 뺀다.
  * 질문 카드의 직접 지시(answersQuestion)는 그 질문에 대한 사람의 답이다. 답으로 기록해야 A 등급 관문이 같은 질문을 다시 묻지
@@ -233,7 +233,7 @@ export async function answerQuestions(
   return {};
 }
 
-/** 시작 카드나 답변 카드를 확인했다. 답변은 요청을 끝내고, 시작한 요청은 계속 진행된다. */
+/** 답변 카드를 확인했다. 답변은 요청을 끝낸다. 시작 카드는 2026-11-27 에 없앴지만, 예전 화면이 보낸 확인은 그대로 받는다. */
 export async function acknowledge({ id }: { id: string }, store: StateStore) {
   await store.update((state) => {
     const request = state.requests.find((item) => item.id === id);

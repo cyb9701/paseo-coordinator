@@ -209,6 +209,25 @@ describe("기존 워크스페이스 배정", () => {
     assert.equal((await first(store)).tasks[0]!.status, "running");
   });
 
+  test("읽기 조사 워커는 plan 이 아니라 Auto 로 만든다. plan 이면 조사를 마치고 ExitPlanMode 승인을 사람에게 기다렸다 (r18)", async () => {
+    const directory = await humanRepo();
+    const calls: string[] = [];
+    const modes: unknown[] = [];
+    const paseo = fakePaseo(calls, directory);
+    paseo.providers.listModes = async () => ({ modes: [{ id: "plan" }, { id: "auto" }] });
+    const ref = paseo.workspaces.ref;
+    paseo.workspaces.ref = (id: string) => {
+      const workspace = ref(id);
+      const create = workspace.agents.create;
+      workspace.agents.create = async (input: Fake) => (modes.push(input.config.modeId), create(input));
+      return workspace;
+    };
+    const { store, channel } = await storeWith(state(request({ kind: "read", grade: null }, [waiting])));
+    await new Dispatcher(store, workerSettings, channel, () => {}).run(paseo);
+    assert.deepEqual(modes, ["auto"]);
+    assert.ok(calls.some((call) => call.includes("read-only investigation") && call.includes("no checkout")));
+  });
+
   test("워크스페이스가 닫혔거나 브랜치가 아니면(detached HEAD) 막힘으로 둔다", async () => {
     const directory = await humanRepo();
     git(directory, "checkout", "--detach");
@@ -413,7 +432,7 @@ describe("기존 워크스페이스 지정", () => {
     assert.match(String(early.text), new RegExp(directory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 
     const ask = async (text: string) => {
-      const question = { context: text, questions: [{ question: "q", options: [{ label: "예" }, { label: "아니오" }], recommended: null }], projectIds: [], at: now() };
+      const question = { context: text, questions: [{ question: "q", options: [{ label: "예", description: text }, { label: "아니오" }], recommended: null }], projectIds: [], at: now() };
       await store.update((value) => ({
         state: { ...value, requests: value.requests.map((item) => ({ ...item, status: "needs_input" as const, question })) },
         result: undefined,

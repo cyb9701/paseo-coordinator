@@ -27,7 +27,7 @@ import type { settingsSchema } from "../shared/settings";
 import { type StateStore, dataDirectory } from "./store";
 import type { ReviewRunner } from "./review";
 import { type WorkerChannel, queued } from "./worker-channel";
-import { preapprovedOptions } from "./preapprove";
+import { COORDINATOR_BLOCKED_TOOLS, preapprovedOptions } from "./preapprove";
 import { listBranches, listTreeAt, readBlobAt, remoteDefaultBranch, resolveBaseRef, treePath } from "./branches";
 import { uncommittedChanges } from "./completion";
 import { run } from "./run";
@@ -348,8 +348,14 @@ export class CoordinatorRuntime {
     const values = await readSettings(this.settings);
     const provider = values.coordinator.model.split("/")[0]!;
     const modes = await paseo.providers.listModes(provider).catch(() => null);
-    // 권한을 묻는 기본 모드로 띄운다. 코디네이터가 자기 도구 밖의 일을 하려 하면 사람에게 올라가야 한다.
-    const modeId = modes?.modes?.some((mode) => mode.id === "default") ? "default" : undefined;
+    // Auto 모드로 띄운다 (2026-11-27 사용자 결정: 모든 에이전트를 Auto 로). 기본 모드였을 때는 자기 도구 밖의 호출을 권한 hook 이
+    // 거절했는데, Auto 가 허용한 호출은 hook 에 오지 않는다. 그래서 내장 도구와 Paseo 변경 도구를 disallowedTools 로 뺀다.
+    // Auto 가 없는 provider 는 기본 모드로 두어 hook 이 계속 막게 한다.
+    const modeId = modes?.modes?.some((mode) => mode.id === "auto")
+      ? "auto"
+      : modes?.modes?.some((mode) => mode.id === "default")
+        ? "default"
+        : undefined;
     const label = request.title ?? request.text.split("\n")[0]!.slice(0, 30);
     const create = async () => {
       const workspaceId = await this.ensureWorkspace(paseo, request.language);
@@ -358,7 +364,7 @@ export class CoordinatorRuntime {
           provider: values.coordinator.model,
           modeId,
           thinkingOptionId: values.coordinator.effort,
-          options: preapprovedOptions(values.coordinator.model, this.tools().map((tool) => tool.name)),
+          options: preapprovedOptions(values.coordinator.model, this.tools().map((tool) => tool.name), COORDINATOR_BLOCKED_TOOLS),
         },
         title: `${request.id} · ${label}`,
         labels: { [COORDINATOR_LABEL]: "coordinator", "paseo-coordinator.request": request.id },
@@ -1105,7 +1111,7 @@ export class CoordinatorRuntime {
       name: "coordinator_ask_human",
       title: "Ask the human",
       description:
-        "Send the human a question card when the request is ambiguous, needs a human choice (product or UX direction, data structure, library, public API), or is grade A and the real change must start. It is also how the human approves operation targets and running in one of their existing workspaces: write each target or workspace directory word for word in the context. Give context, concrete questions, options and your recommendation. Do not ask about things you can decide yourself.",
+        "Send the human a question card when the request is ambiguous, needs a human choice (product or UX direction, data structure, library, public API), or is grade A and the real change must start. It is also how the human approves operation targets and running in one of their existing workspaces: write each target or workspace directory word for word in a question or its options. The card shows only the questions, options and buttons; the context is folded under Details, so each question must make sense without it. Give context, concrete questions, options and your recommendation. Do not ask about things you can decide yourself.",
       input: z.object({
         requestId: z.string(),
         title: z.string().trim().min(1),
@@ -1370,8 +1376,8 @@ export class CoordinatorRuntime {
           ...humanGateProblems(request, input.tasks, input.readOnly ? null : (input.grade ?? null), decisionBasisAt(request), checked.approvals),
         );
         if (problems.length > 0) return { text: `Plan rejected:\n- ${problems.join("\n- ")}`, isError: true };
-        // v3: 명확한 요청은 코디네이터 판단으로 바로 시작한다. 사람은 확인 필요의 시작 카드로 본다 (RULES.md §2.0).
-        // 읽기 전용 조사 워커는 읽기 전용 모드로 띄운다 (3e).
+        // v3: 명확한 요청은 코디네이터 판단으로 바로 시작한다. 시작했다는 확인 카드는 없다 (2026-11-27). 사람은 진행 현황에서 보고
+        // 멈추거나 지시하며, 진행할 일이 없어지면 완료 보고서를 받는다 (RULES.md §2.0).
         // 변경 전 조사는 카드에 그 변경의 등급으로 보이게 등급을 남긴다. 실제 변경 계획이 오면 그 등급으로 바뀐다.
         const grade = input.readOnly && !input.beforeChange ? null : (input.grade ?? null);
         const now = new Date().toISOString();
@@ -1419,7 +1425,7 @@ export class CoordinatorRuntime {
         this.onPlanStarted(paseo);
         return {
           text:
-            `Plan stored for ${request.id} and started. The plugin creates the workers. The human sees it as a start card and can stop or redirect it.`,
+            `Plan stored for ${request.id} and started. The plugin creates the workers. The human sees it on the progress board and can stop or redirect it; they get one report when nothing is left to run.`,
         };
       },
     });
@@ -1484,7 +1490,7 @@ export class CoordinatorRuntime {
                 item.id === request.id
                   ? {
                       ...item,
-                      // 시작 카드가 다시 확인 필요로 뜬다. 사람은 더해진 작업을 본다.
+                      // 계획 시각을 새로 해, 이 뒤에 온 지시만 코디네이터가 아직 읽지 않은 것으로 센다.
                       plannedAt: now,
                       projectIds: item.projectIds.length > 0 ? [...new Set([...item.projectIds, ...outside])] : item.projectIds,
                       tasks: withInheritedWorkspaces([
@@ -1506,7 +1512,7 @@ export class CoordinatorRuntime {
         }
         if (!saved) return { text: `Request ${request.id} changed while you were adding tasks; read it again with coordinator_get_request.`, isError: true };
         this.onPlanStarted(paseo);
-        return { text: `Added tasks ${input.tasks.map((task) => task.number).join(", ")} to ${request.id}. The human sees them on the start card.` };
+        return { text: `Added tasks ${input.tasks.map((task) => task.number).join(", ")} to ${request.id}. The human sees them on the progress board and in the final report.` };
       },
     });
   }
@@ -1614,7 +1620,7 @@ function unreadByCoordinator(request: CoordinatorRequest): boolean {
 
 /**
  * 앞 작업의 worktree 를 이어 쓰는 코드 작업에 그 작업의 기존 워크스페이스를 미리 적는다. 배정기도 시작할 때 물려받지만, 그 전에는
- * 시작 카드와 보드에 어디서 일할지 보이지 않았다 (2026-11-26 전수 검사).
+ * 보드에 어디서 일할지 보이지 않았다 (2026-11-26 전수 검사).
  */
 function withInheritedWorkspaces(tasks: Task[]): Task[] {
   const result = [...tasks];
@@ -1677,11 +1683,11 @@ export function humanGateProblems(
     const missing = shown === null ? [] : operations.flatMap((task) => (task.targets ?? []).filter((target) => !containsBounded(shown, normalize(target))));
     if (!answered || shown === null) {
       problems.push(
-        "Operation tasks act outside their worktree: ask the human with coordinator_ask_human, listing each operation task's targets word for word in the context, and plan them after the answer.",
+        "Operation tasks act outside their worktree: ask the human with coordinator_ask_human, listing each operation task's targets word for word in a question or its options (the card folds the context away), and plan them after the answer.",
       );
     } else if (missing.length > 0) {
       problems.push(
-        `The question the human answered did not list these operation targets word for word: ${missing.map((target) => `"${target}"`).join(", ")}. Ask again with each target in the context.`,
+        `The question the human answered did not list these operation targets word for word: ${missing.map((target) => `"${target}"`).join(", ")}. Ask again with each target in a question or its options; the context is folded on the card and does not count.`,
       );
     }
   }
@@ -1689,10 +1695,10 @@ export function humanGateProblems(
     const missing = shown === null ? [] : workspaceDirectories.filter((directory) => !containsBounded(shown, normalize(directory)));
     if (!answered || shown === null) {
       problems.push(
-        `Working in the human's existing workspace needs their approval: ask with coordinator_ask_human, writing each workspace directory word for word (${workspaceDirectories.join(", ")}), and plan after the answer.`,
+        `Working in the human's existing workspace needs their approval: ask with coordinator_ask_human, writing each workspace directory word for word in a question or its options (${workspaceDirectories.join(", ")}), and plan after the answer.`,
       );
     } else if (missing.length > 0) {
-      problems.push(`The question the human answered did not show these workspace directories word for word: ${missing.join(", ")}. Ask again with each directory in the context.`);
+      problems.push(`The question the human answered did not show these workspace directories word for word: ${missing.join(", ")}. Ask again with each directory in a question or its options; the context is folded on the card and does not count.`);
     }
   }
   return problems;
@@ -1720,12 +1726,13 @@ function normalize(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+/**
+ * 사람이 질문 카드에서 바로 본 글. 배경(context)은 넣지 않는다. 카드는 질문과 선택지만 밖에 두고 배경을 자세히 보기에 접으므로
+ * (2026-11-27 사용자 결정), 배경에만 적힌 운영 대상이나 워크스페이스 경로는 사람이 보지 않고 승인할 수 있었다.
+ */
 function questionText(question: NonNullable<CoordinatorRequest["lastQuestion"]>): string {
   return normalize(
-    [
-      question.context,
-      ...question.questions.flatMap((item) => [item.question, ...item.options.flatMap((option) => [option.label, option.description ?? ""])]),
-    ].join(" "),
+    question.questions.flatMap((item) => [item.question, ...item.options.flatMap((option) => [option.label, option.description ?? ""])]).join(" "),
   );
 }
 

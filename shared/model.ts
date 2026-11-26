@@ -323,7 +323,7 @@ export const requestSchema = z.object({
    * (2026-11-25 사용자 결정: 코디네이터 하나가 계속 쌓이면 context 가 커져 느려지고 판단이 흐려질 수 있다).
    */
   coordinatorAgentId: z.string().nullable().default(null),
-  /** 사람이 시작 카드나 답변 카드를 확인한 시각. 그 뒤에 새 계획이나 답이 오면 다시 확인 필요가 된다. */
+  /** 사람이 답변 카드를 확인한 시각. 시작 카드(2026-11-27 에 없앰)의 확인 시각도 예전 기록에 남아 있다. */
   reviewedAt: z.string().nullable().default(null),
   /**
    * 코디네이터가 coordinator_get_request 로 이 요청을 마지막으로 읽은 시각. 실행 중 요청에 온 지시를 코디네이터가 읽었는지
@@ -541,6 +541,63 @@ export function completionNeedsDecision(task: Task): boolean {
   return Boolean(completion && (completion.pr || completion.unpublished));
 }
 
+// 선행 작업이 이 상태면 다음 작업을 시작한다. review 는 워커가 일을 마치고 사람의 확인만 남은 상태다.
+const FINISHED: ReadonlySet<Task["status"]> = new Set(["done", "review"]);
+
+/**
+ * 선행 작업이 끝나 이 작업을 시작해도 되는가. 운영 작업은 앞 코드 작업의 결과가 사람의 결정까지 끝난 뒤에만 시작한다.
+ * PR 머지 전(review)에 시작하면 '머지 뒤 브랜치 정리' 같은 운영 작업이 아직 머지되지 않은 PR 의 브랜치를 지울 수 있다
+ * (2026-11-26 최종 검사). 이어 쓰기로 done 이 된 작업은 PR 을 뒤 작업이 내므로 사슬 끝 작업을 본다. PR 도 남은 변경도 없이
+ * 끝난 작업은 기다릴 결정이 없어 끝난 것으로 본다. 기다리면 사람이 보지 않는 카드 때문에 운영 작업이 멈춘다.
+ * 배정기와 완료 보고서가 같은 규칙을 써야 한다. 보고서가 다르게 판정하면, 머지를 기다리는 운영 작업 때문에 보고서가 뜨지 않아
+ * 사람은 머지할 카드를 못 보고 운영 작업은 머지를 기다리는 교착이 생긴다.
+ */
+export function dependencyFinished(request: Pick<CoordinatorRequest, "tasks">, dependency: Task | undefined, task: Task): boolean {
+  if (!dependency || !FINISHED.has(dependency.status)) return false;
+  if (task.kind !== "operation" || dependency.kind === "operation") return true;
+  let end: Task = dependency;
+  for (let next = continuedBy(request, end); next; next = continuedBy(request, end)) end = next;
+  if (end.status === "done") return true;
+  return end.status === "review" && !completionNeedsDecision(end);
+}
+
+/** 선행 작업이 모두 끝나 배정기가 곧 시작할 대기 작업인가. */
+export function canStart(request: Pick<CoordinatorRequest, "tasks">, task: Task): boolean {
+  if (task.status !== "waiting") return false;
+  const byNumber = new Map(request.tasks.map((item) => [item.number, item]));
+  return task.dependsOn.every((number) => dependencyFinished(request, byNumber.get(number), task));
+}
+
+/** 워커가 완료를 보고했고 사람이 아직 닫지 않은 작업. 워커 질문이 열린 작업은 그 카드가 먼저다. */
+export function isOpenCompletion(task: Task): boolean {
+  return task.status === "review" && Boolean(task.completion) && !task.completion!.closedAt && !task.blocker;
+}
+
+/**
+ * 완료 보고서 (2026-11-27 사용자 결정). 사람이 병목이 되지 않도록, 작업이 하나 끝날 때마다 카드를 띄우지 않고 요청에서 더
+ * 진행할 일이 없을 때 보고서 하나로 알린다. 진행할 일은 일하는 워커, 막힌 작업(그 카드는 따로 바로 뜬다), 곧 시작할 대기 작업,
+ * 열린 질문, 코디네이터가 아직 읽지 않은 지시다. 머지를 기다려야 시작하는 운영 작업은 진행할 일로 세지 않는다. 세면 보고서가
+ * 뜨지 않아 머지할 길이 없다.
+ * 보고서는 PR 머지나 남은 변경이 하나라도 있으면 내 결정 필요, 아니면 확인 필요다.
+ */
+export interface RequestReport {
+  /** 아직 닫지 않은 완료. 보고서 안에서 하나씩 머지하거나 확인한다. */
+  completions: Task[];
+  needsDecision: boolean;
+}
+
+export function requestReport(request: CoordinatorRequest): RequestReport | null {
+  if (request.kind !== "change" || request.status !== "running" || request.question || request.stall) return null;
+  if (unreadInstructionAt(request)) return null;
+  const busy = request.tasks.some(
+    (task) => task.status === "running" || task.status === "blocked" || Boolean(task.blocker) || canStart(request, task),
+  );
+  if (busy) return null;
+  const completions = request.tasks.filter(isOpenCompletion);
+  if (completions.length === 0) return null;
+  return { completions, needsDecision: completions.some(completionNeedsDecision) };
+}
+
 export type SentInstruction = z.infer<typeof sentInstructionSchema>;
 export type CoordinatorState = z.infer<typeof stateSchema>;
 
@@ -592,7 +649,7 @@ export const retryCoordinatorRpc = defineRpc({
   output: z.object({}),
 });
 
-/** 시작 카드나 답변 카드를 확인했다. 답변은 요청을 끝낸다. */
+/** 답변 카드를 확인했다. 답변은 요청을 끝낸다. */
 export const acknowledgeRpc = defineRpc({
   name: "requests.acknowledge",
   input: z.object({ id: z.string() }),

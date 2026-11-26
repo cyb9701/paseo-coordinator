@@ -15,7 +15,7 @@ export type AgentStateKey =
 /**
  * 진행 현황 컬럼. 왼쪽일수록 사람을 더 기다린다.
  * - react: 작업이 멈춰서 나를 기다린다 (RULES.md §12 내 결정 필요)
- * - review: 작업은 계속되고, 나중에 봐도 된다 (RULES.md §12 확인 필요)
+ * - review: 끝난 일이라 나중에 봐도 된다. 답변, 결정할 것 없는 완료 보고서, 턴을 마친 직접 띄운 에이전트 (RULES.md §12 확인 필요)
  * - auto: 코디네이터와 검토자가 대신 판단하는 중이다 (RULES.md §2 ④~⑥). 3·6단계부터 채워진다
  * - running: 워커가 일하는 중이다
  * - waiting: 시작 전이거나 세션이 쉬는 중이다
@@ -85,7 +85,7 @@ const ROLE_LABEL = "paseo-coordinator.role";
 
 /**
  * 사람이 볼 에이전트. 검토자처럼 플러그인이 만드는 background 에이전트와 코디네이터는 뺀다.
- * 코디네이터는 플러그인이 요청마다 만들고 정리하며, 할 일은 질문·답변·시작 카드로 대신 보인다.
+ * 코디네이터는 플러그인이 요청마다 만들고 정리하며, 할 일은 질문·답변 카드와 완료 보고서로 대신 보인다.
  * 워커는 남긴다. 워커의 권한 요청과 에러는 사람이 직접 처리해야 하기 때문이다.
  */
 export function isVisibleAgent(agent: Pick<PluginAgentSnapshot, "background" | "labels">): boolean {

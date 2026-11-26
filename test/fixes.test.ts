@@ -297,7 +297,7 @@ describe("사람의 지시가 버려지지 않는다", () => {
 });
 
 describe("실행 중 요청의 작업 추가와 취소", () => {
-  test("작업을 더하면 번호가 이어지고 시작 카드가 다시 확인 필요가 되며, 운영 작업은 사람의 답 없이 더할 수 없다", async () => {
+  test("작업을 더하면 번호가 이어지고 계획 시각이 갱신되며, 운영 작업은 사람의 답 없이 더할 수 없다", async () => {
     const calls: string[] = [];
     const { store, channel } = await storeWith(state(request({}, [{}])));
     const { tool } = coordinatorTools(store, channel, calls);
@@ -418,7 +418,8 @@ describe("운영 작업", () => {
 
 /** 코디네이터가 이 context 로 질문 카드를 띄운 것처럼 만든다. 질문 카드에 답하는 흐름을 짧게 만들 때 쓴다. */
 async function askAt(store: StateStore, context: string): Promise<StateStore> {
-  const question = { context, questions: [{ question: "q", options: [{ label: "승인" }, { label: "아니오" }], recommended: null }], projectIds: [], at: now() };
+  // 카드는 배경을 접어 두므로 승인 관문은 질문과 선택지만 본다. 대상은 선택지 설명에 넣는다.
+  const question = { context, questions: [{ question: "q", options: [{ label: "승인", description: context }, { label: "아니오" }], recommended: null }], projectIds: [], at: now() };
   await store.update((value) => ({
     state: { ...value, requests: value.requests.map((item) => ({ ...item, status: "needs_input" as const, question })) },
     result: undefined,

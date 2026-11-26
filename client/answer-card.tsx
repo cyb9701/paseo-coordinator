@@ -6,12 +6,12 @@ import { type CoordinatorRequest, acknowledgeRpc, revisePlanRpc, requestProjectI
 import { columnColor } from "./agent-state";
 import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
-import { Chip, CtaButton, Decide, Fold, Lines, Row, type ViewContext } from "./ui";
+import { Chip, CtaButton, Decide, Fold, Lines, type ViewContext } from "./ui";
 
 /**
  * 답변 카드 (확인 필요). 읽기 요청에 코디네이터가 직접 쓴 답이다. 등급도 승인도 없다 (RULES.md §2.0).
- * 읽는 순서: 내 요청 → 추가 질문 → 답변 → 해석과 가정 → 자세히 보기(읽은 파일) → 결정할 것 → 버튼.
- * 해석과 가정은 접지 않는다. 답이 틀릴 수 있는 곳이라 끝내기 전에 봐야 한다 (RULES.md §12 확인할 것).
+ * 읽는 순서: 답변 → 결정할 것 → 버튼 → 자세히 보기(내 요청, 추가 질문, 해석과 가정, 읽은 파일).
+ * 카드 밖에는 답변과 버튼만 둔다 (2026-11-27 사용자 결정). 해석과 가정은 접힌 이름 옆에 개수가 보여 있다는 것은 알 수 있다.
  */
 export function AnswerCard({ request, ctx }: { request: CoordinatorRequest; ctx: ViewContext }) {
   const acknowledge = useRpc(acknowledgeRpc);
@@ -30,6 +30,7 @@ export function AnswerCard({ request, ctx }: { request: CoordinatorRequest; ctx:
   if (!answer) return null;
   const busy = action.isPending;
   const accent = columnColor("review", ctx.theme);
+  const body = { color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body } as const;
   return (
     <View
       style={{
@@ -53,33 +54,10 @@ export function AnswerCard({ request, ctx }: { request: CoordinatorRequest; ctx:
         <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{formatAgo(answer.at, ctx.now, ctx.t)}</Text>
       </View>
 
-      <Row label={ctx.t("answerCard.request")} ctx={ctx}>
-        <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body }}>{request.text}</Text>
-      </Row>
-      {request.feedback.length > 0 ? (
-        <Row label={ctx.t("answerCard.followUps")} ctx={ctx}>
-          <Lines items={request.feedback.map((item) => `${formatAgo(item.at, ctx.now, ctx.t)} · ${item.text}`)} ctx={ctx} />
-        </Row>
-      ) : null}
-      <Row label={ctx.t("answerCard.answer")} ctx={ctx}>
-        <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.5) }}>
-          {answer.text}
-        </Text>
-      </Row>
-      {answer.unknowns.length > 0 ? (
-        <Row label={ctx.t("answerCard.unknowns")} ctx={ctx}>
-          <Lines items={answer.unknowns} ctx={ctx} />
-        </Row>
-      ) : null}
-      <Fold
-        ctx={ctx}
-        items={[
-          answer.sources.length > 0
-            ? { label: ctx.t("answerCard.sources"), count: answer.sources.length, content: <Lines items={answer.sources} ctx={ctx} /> }
-            : null,
-        ]}
-      />
-
+      {/* 답변 본문은 이 카드의 내용 자체라 접지 않는다. */}
+      <Text selectable style={{ ...body, lineHeight: Math.round(ctx.fonts.body * 1.5) }}>
+        {answer.text}
+      </Text>
       <Decide question={ctx.t("answerCard.decide")} ctx={ctx} />
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         <CtaButton label={ctx.t("answerCard.acknowledge")} tone="primary" disabled={busy} theme={ctx.theme} onPress={() => action.mutate("ack")} />
@@ -127,6 +105,25 @@ export function AnswerCard({ request, ctx }: { request: CoordinatorRequest; ctx:
           {ctx.t("inbox.failed", { message: action.error instanceof Error ? action.error.message : String(action.error) })}
         </Text>
       ) : null}
+      <Fold
+        ctx={ctx}
+        items={[
+          { label: ctx.t("answerCard.request"), content: <Text selectable style={body}>{request.text}</Text> },
+          request.feedback.length > 0
+            ? {
+                label: ctx.t("answerCard.followUps"),
+                count: request.feedback.length,
+                content: <Lines items={request.feedback.map((item) => `${formatAgo(item.at, ctx.now, ctx.t)} · ${item.text}`)} ctx={ctx} />,
+              }
+            : null,
+          answer.unknowns.length > 0
+            ? { label: ctx.t("answerCard.unknowns"), count: answer.unknowns.length, content: <Lines items={answer.unknowns} ctx={ctx} /> }
+            : null,
+          answer.sources.length > 0
+            ? { label: ctx.t("answerCard.sources"), count: answer.sources.length, content: <Lines items={answer.sources} ctx={ctx} /> }
+            : null,
+        ]}
+      />
     </View>
   );
 }
