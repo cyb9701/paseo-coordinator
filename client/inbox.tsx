@@ -568,19 +568,23 @@ function ReviewAllButton({
   const acknowledge = useRpc(acknowledgeRpc);
   const review = useRpc(reviewAutoDecisionRpc);
   const close = useRpc(closeCompletionRpc);
+  // 답을 기다리는 질문이 있거나 '남은 것'이 적힌 완료 카드는 한꺼번에 닫지 않는다. 일괄로 닫으면 답 없는 질문이 버려지고, 남은 일을
+  // 읽지 않은 채 요청이 끝났다 (2026-11-26 전수 검사). 사람이 그 카드를 열어 직접 닫는다.
+  const closable = finished.filter(({ task }) => !task.completion?.left.length && !task.completion?.qa.some((qa) => qa.answer === null));
+  const skipped = finished.length - closable.length;
   const action = useMutation({
     mutationFn: async () => {
       // 하나가 실패해도 나머지는 확인한다. 실패한 것은 카드로 남아 사람이 따로 본다.
       const results = await Promise.allSettled([
         ...started.map((request) => acknowledge({ id: request.id })),
         ...autos.map(({ request, task, decision }) => review({ requestId: request.id, taskNumber: task.number, id: decision.id, revertText: null })),
-        ...finished.map(({ request, task }) => close({ requestId: request.id, taskNumber: task.number, action: "merge", instruction: null })),
+        ...closable.map(({ request, task }) => close({ requestId: request.id, taskNumber: task.number, action: "merge", instruction: null })),
       ]);
       const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
       if (failed) throw failed.reason;
     },
   });
-  const total = started.length + autos.length + finished.length;
+  const total = started.length + autos.length + closable.length;
   if (total < 2) return null;
   return (
     <View style={{ gap: 4 }}>
@@ -588,6 +592,9 @@ function ReviewAllButton({
         <CtaButton label={`${ctx.t("inbox.reviewAll")} ${total}`} disabled={action.isPending} theme={ctx.theme} onPress={() => action.mutate()} />
       </View>
       <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{ctx.t("inbox.reviewAllHint")}</Text>
+      {skipped > 0 ? (
+        <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>{ctx.t("inbox.reviewAllSkipped", { count: skipped })}</Text>
+      ) : null}
       {action.error ? (
         <Text style={{ color: ctx.theme.colors.statusDanger, fontSize: ctx.fonts.meta }}>
           {ctx.t("inbox.failed", { message: action.error instanceof Error ? action.error.message : String(action.error) })}

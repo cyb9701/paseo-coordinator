@@ -20,9 +20,11 @@ export function BlockerCard({ request, task, ctx }: { request: CoordinatorReques
   const ask = useRpc(askCoordinatorRpc);
   const blocker = task.blocker;
   const analysis = blocker?.coordinator ?? null;
-  const [chosen, setChosen] = useState<string | null>(analysis?.recommended ?? null);
-  // 코디네이터가 카드를 다시 쓰면(질문하기 뒤 등) 예전 선택이 새 선택지에 없을 수 있다. 그때는 새 추천을 고른 것으로 본다.
-  const selected = analysis?.options.some((option) => option.label === chosen) ? chosen : (analysis?.recommended ?? null);
+  // 사람이 직접 누른 선택만 기억한다. 처음부터 추천을 담아 두면, 코디네이터가 카드를 다시 써서 추천이 바뀌어도 예전 추천이 선택된
+  // 채로 남아 그대로 워커에게 갔다 (2026-11-26 전수 검사). 카드를 다시 쓰면(analysis.at 이 바뀌면) 사람의 선택도 지운다.
+  const [chosen, setChosen] = useState<{ label: string; at: string } | null>(null);
+  const picked = chosen && chosen.at === analysis?.at ? chosen.label : null;
+  const selected = analysis?.options.some((option) => option.label === picked) ? picked : (analysis?.recommended ?? null);
   const [panel, setPanel] = useState<"none" | "instruct" | "ask">("none");
   const [text, setText] = useState("");
   const action = useMutation({
@@ -126,6 +128,8 @@ export function BlockerCard({ request, task, ctx }: { request: CoordinatorReques
                 <Text style={{ ...body, fontWeight: "600" }}>{option.label}</Text>
                 <Text selectable style={muted}>{`${ctx.t("blockerCard.result")}: ${option.result}`}</Text>
                 <Text selectable style={muted}>{`${ctx.t("blockerCard.undo")}: ${option.undo}`}</Text>
+                {/* 이 선택지를 고르면 워커에게 그대로 가는 문장이다. 라벨과 다르면 사람이 알아챌 수 있어야 한다. */}
+                <Text selectable style={muted}>{`${ctx.t("blockerCard.instruction")}: ${option.instruction}`}</Text>
               </View>
             )),
           },
@@ -148,7 +152,7 @@ export function BlockerCard({ request, task, ctx }: { request: CoordinatorReques
             }
             detail={`${ctx.t("blockerCard.risk")}: ${option.risk}`}
             selected={selected === option.label}
-            onPress={() => setChosen(option.label)}
+            onPress={() => setChosen({ label: option.label, at: analysis.at })}
             theme={ctx.theme}
           />
         ))}

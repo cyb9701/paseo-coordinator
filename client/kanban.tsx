@@ -6,7 +6,7 @@ import { CompactRequest, FinishedRequests, RequestRow, isActiveRequest, requestC
 import { Text, View } from "react-native";
 import { AgentCard } from "./agent-card";
 import { COLUMN_KEYS, type ColumnKey, columnColor, columnRank } from "./agent-state";
-import { useClassifier } from "./pending-store";
+import { useClassifier, usePending } from "./pending-store";
 import { formatAgo } from "./time";
 import { ProjectTag, type ViewContext } from "./ui";
 import { WorkspacePlace } from "./workspace-place";
@@ -189,13 +189,14 @@ function CompactBoard({ board, rows, totals, ctx }: { board: Board; rows: readon
 export function KanbanBoard({ ctx }: { ctx: ViewContext }) {
   const { board, rows, totals: agentTotals } = useBoard(ctx.hostId);
   const { state } = useCoordinatorState();
+  const { pending } = usePending();
   const requests = state?.requests ?? [];
   const active = requests.filter(isActiveRequest).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const finished = requests.filter((request) => !isActiveRequest(request)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   // 헤더 숫자는 요청 카드와 직접 띄운 에이전트 카드를 합쳐 센다.
   const totals = new Map(agentTotals);
   for (const request of active) {
-    for (const [column, items] of requestCells(request)) totals.set(column, (totals.get(column) ?? 0) + items.length);
+    for (const [column, items] of requestCells(request, (id) => pending.has(id))) totals.set(column, (totals.get(column) ?? 0) + items.length);
   }
   if (ctx.compact) {
     return (

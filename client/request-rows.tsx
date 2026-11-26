@@ -2,9 +2,11 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
+import { CancelRequestButton } from "./cancel-request";
 import { type CoordinatorRequest, type Task, cancelRequestRpc, completionNeedsDecision, requestProjectIds, revisePlanRpc } from "../shared/model";
 import { COLUMN_KEYS, type ColumnKey, columnColor } from "./agent-state";
 import { DecisionHistory } from "./decision-history";
+import { usePending } from "./pending-store";
 import { requestNeedsReaction } from "./coordinator-state";
 import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
@@ -17,8 +19,11 @@ export type RequestItem = { kind: "planning" } | { kind: "question" } | { kind: 
  * 작업이 놓일 컬럼. 워커가 막힘을 보고했으면, 코디네이터가 판단하는 동안은 '코디네이터 처리 중',
  * 결정 카드가 나오면 '내 결정 필요'다. 완료를 보고하고 머지를 기다리는 작업도 '내 결정 필요'다.
  */
-function taskColumn(task: Task): ColumnKey | null {
+function taskColumn(task: Task, waitsOnPermission: boolean): ColumnKey | null {
   if (task.blocker) return task.blocker.coordinator ? "react" : "auto";
+  // 워커가 권한 요청을 기다리면 서버의 작업 상태는 running 이지만 사람을 기다린다. 인박스는 '내 결정 필요'로 세는데 보드는 '작업 중'에
+  // 두어 두 화면이 어긋났다 (2026-11-26 전수 검사).
+  if (waitsOnPermission && task.status === "running") return "react";
   // 완료를 보고한 작업. PR 머지나 남은 변경 처리는 사람의 결정이고, PR 도 남은 변경도 없으면 나중에 확인하면 된다.
   if (task.status === "review" && task.completion && !task.completion.closedAt) return completionNeedsDecision(task) ? "react" : "review";
   return TASK_COLUMNS[task.status];
@@ -35,7 +40,11 @@ const TASK_COLUMNS: Record<Task["status"], ColumnKey | null> = {
 };
 
 /** 요청 하나를 (컬럼 → 카드) 로 나눈다. 헤더의 컬럼별 숫자도 이 결과로 센다. */
-export function requestCells(request: CoordinatorRequest): Map<ColumnKey, RequestItem[]> {
+/**
+ * waitsOnPermission: 그 에이전트가 권한 요청을 기다리는지. 인박스와 같은 구독(usePending)에서 온다.
+ * 확인하지 않은 자동 결정이 걸린 작업은 확인 필요에도 걸친다. 카드가 겹치면 더 왼쪽 칸에 둔다 (DESIGN.md 진행 현황).
+ */
+export function requestCells(request: CoordinatorRequest, waitsOnPermission: (agentId: string) => boolean = () => false): Map<ColumnKey, RequestItem[]> {
   const cells = new Map<ColumnKey, RequestItem[]>();
   const add = (column: ColumnKey, item: RequestItem) => cells.set(column, [...(cells.get(column) ?? []), item]);
   // 멈춘 코디네이터는 사람이 다시 시도해야 이어진다. '계획 중'으로 두면 일하는 것처럼 보인다.
@@ -44,7 +53,9 @@ export function requestCells(request: CoordinatorRequest): Map<ColumnKey, Reques
   if (requestNeedsReaction(request)) add("react", { kind: "question" });
   if (request.status === "answered") add("review", { kind: "answer" });
   for (const task of request.tasks) {
-    const column = taskColumn(task);
+    let column = taskColumn(task, Boolean(task.agentId && waitsOnPermission(task.agentId)));
+    const unreviewed = task.autoDecisions.some((decision) => !decision.reviewedAt && !decision.reverted);
+    if (unreviewed && (column === "running" || column === "waiting" || column === "auto")) column = "review";
     if (column) add(column, { kind: "task", task });
   }
   return cells;
@@ -231,12 +242,13 @@ function RequestCell({ request, ctx }: { request: CoordinatorRequest; ctx: ViewC
             onPress={() => setRevising((value) => !value)}
           />
           )}
-          <CtaButton
+          <CancelRequestButton
+            request={request}
             size="sm"
             label={ctx.t("requestRow.cancel")}
-            disabled={cancelMutation.isPending}
-            theme={ctx.theme}
-            onPress={() => cancelMutation.mutate()}
+            busy={cancelMutation.isPending}
+            onConfirm={() => cancelMutation.mutate()}
+            ctx={ctx}
           />
         </View>
       ) : null}
@@ -284,7 +296,8 @@ function RequestCell({ request, ctx }: { request: CoordinatorRequest; ctx: ViewC
 
 /** 보드의 요청 한 줄. 왼쪽 칸은 요청, 나머지 칸은 상태 컬럼이다. */
 export function RequestRow({ request, ctx, firstColumnWidth }: { request: CoordinatorRequest; ctx: ViewContext; firstColumnWidth: number }) {
-  const cells = requestCells(request);
+  const { pending } = usePending();
+  const cells = requestCells(request, (id) => pending.has(id));
   const urgent = COLUMN_KEYS.find((key) => (cells.get(key)?.length ?? 0) > 0) ?? "waiting";
   return (
     <View
@@ -312,7 +325,8 @@ export function RequestRow({ request, ctx, firstColumnWidth }: { request: Coordi
 
 /** 좁은 화면용. 요청마다 상태와 카드를 위아래로 쌓는다. */
 export function CompactRequest({ request, ctx }: { request: CoordinatorRequest; ctx: ViewContext }) {
-  const cells = requestCells(request);
+  const { pending } = usePending();
+  const cells = requestCells(request, (id) => pending.has(id));
   return (
     <View style={{ gap: 8, padding: 10, borderRadius: 8, borderWidth: 1, borderColor: ctx.theme.colors.border }}>
       <RequestCell request={request} ctx={ctx} />

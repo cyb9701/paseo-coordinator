@@ -2,6 +2,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Text, TextInput, View } from "react-native";
+import { CancelRequestButton } from "./cancel-request";
 import { type CoordinatorRequest, answerQuestionsRpc, cancelRequestRpc, revisePlanRpc, requestProjectIds } from "../shared/model";
 import { columnColor } from "./agent-state";
 import { ProjectChips } from "./project-chip";
@@ -141,7 +142,7 @@ export function QuestionCard({ request, ctx }: { request: CoordinatorRequest; ct
           theme={ctx.theme}
           onPress={() => setInstructing((value) => !value)}
         />
-        <CtaButton label={ctx.t("questionCard.cancel")} disabled={busy} theme={ctx.theme} onPress={() => action.mutate("cancel")} />
+        <CancelRequestButton request={request} label={ctx.t("questionCard.cancel")} busy={busy} onConfirm={() => action.mutate("cancel")} ctx={ctx} />
       </View>
       {instructing ? (
         <View style={{ gap: 8 }}>

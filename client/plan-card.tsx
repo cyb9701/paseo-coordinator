@@ -3,6 +3,7 @@ import { useProject, useProjects, useRpc, useWorkspace } from "@getpaseo/plugin/
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Text, TextInput, View } from "react-native";
+import { CancelRequestButton } from "./cancel-request";
 import { type CoordinatorRequest, type Task, acknowledgeRpc, cancelRequestRpc, revisePlanRpc, requestProjectIds } from "../shared/model";
 import { columnColor } from "./agent-state";
 import { ProjectChips } from "./project-chip";
@@ -190,7 +191,7 @@ export function StartedCard({ request, ctx }: { request: CoordinatorRequest; ctx
           theme={ctx.theme}
           onPress={() => setRevising((value) => !value)}
         />
-        <CtaButton label={ctx.t("planCard.cancel")} disabled={busy} theme={ctx.theme} onPress={() => action.mutate("cancel")} />
+        <CancelRequestButton request={request} label={ctx.t("planCard.cancel")} busy={busy} onConfirm={() => action.mutate("cancel")} ctx={ctx} />
       </View>
       {revising ? (
         <View style={{ gap: 8 }}>

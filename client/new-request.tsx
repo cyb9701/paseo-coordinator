@@ -1,11 +1,10 @@
 import type { ProjectRef, WorkspaceRef } from "@getpaseo/plugin/client";
 import { useProject, useProjects, useRpc, useSettings, useWorkspace, useWorkspaces } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { Text, TextInput, View } from "react-native";
 import { createRequestRpc, pluginWorkspaceIds } from "../shared/model";
 import { coordinatorSettings } from "../shared/settings";
-import { BranchPicker } from "./branch-picker";
 import { useCoordinatorState } from "./coordinator-state";
 import { ChoiceBox, CtaButton, type ViewContext } from "./ui";
 import { shortPath } from "./workspace-place";
@@ -23,34 +22,6 @@ function ProjectToggle({
 }) {
   const name = useProject(projectRef, (p) => p.displayName);
   return <ChoiceBox label={name ?? projectRef.id} selected={selected} multiple onPress={onToggle} theme={ctx.theme} />;
-}
-
-/** 고른 프로젝트마다 기준 브랜치를 고른다. 비워 두면 코디네이터가 정한다. */
-function BaseBranchField({
-  projectRef,
-  value,
-  onChange,
-  ctx,
-}: {
-  projectRef: ProjectRef;
-  value: string | null;
-  onChange(branch: string | null): void;
-  ctx: ViewContext;
-}) {
-  const name = useProject(projectRef, (p) => p.displayName);
-  return (
-    <Field label={ctx.t("request.baseBranch", { project: name ?? projectRef.id })} hint={ctx.t("request.baseBranchHint")} ctx={ctx}>
-      <BranchPicker
-        hostId={ctx.hostId}
-        projectId={projectRef.id}
-        value={value}
-        onChange={onChange}
-        autoLabel={() => ctx.t("request.baseBranchAuto")}
-        theme={ctx.theme}
-        t={ctx.t}
-      />
-    </Field>
-  );
 }
 
 function WorkspaceChoice({
@@ -78,8 +49,10 @@ function WorkspaceChoice({
 }
 
 /**
- * 고른 프로젝트마다 워커가 일할 곳을 고른다. 기본은 새 worktree 다. 내 워크스페이스를 고르면 워커가 그 안에서 새 세션으로
- * 일한다 (2026-11-26 사용자 결정). 플러그인이 다른 작업에 만든 worktree 와 코디네이터 워크스페이스는 보이지 않는다.
+ * 고른 프로젝트마다 워커가 일할 곳을 고른다. 기본은 새 worktree 와 새 브랜치다. 내 워크스페이스를 고르면 워커가 그 안에서 새 세션으로
+ * 일한다 (2026-11-26 사용자 결정). worktree 와 브랜치는 1:1 이라, 새 worktree 를 고르면 새 브랜치를 만든다. 그래서 기준 브랜치는
+ * 따로 고르지 않는다. 기준은 코디네이터 → 설정의 프로젝트별 기준 브랜치 → 원격 기본 브랜치 순으로 정한다 (2026-11-26 사용자 결정).
+ * 플러그인이 다른 작업에 만든 worktree 와 코디네이터 워크스페이스는 보이지 않는다.
  */
 function WorkspaceField({
   projectRef,
@@ -100,7 +73,11 @@ function WorkspaceField({
     where: (w) => w.projectId === projectRef.id && w.kind !== "directory" && !w.archivingAt && !w.background && !pluginIds.has(w.id),
     orderBy: ["lastPromptAt", "desc"],
   });
-  if (refs.length === 0) return null;
+  // 고른 워크스페이스가 목록에서 사라지면(archive 등) 선택을 푼다. 그대로 두면 보이지 않는 id 가 전송돼 서버가 거절했다.
+  const missing = value !== null && !refs.some((ref) => ref.id === value);
+  useEffect(() => {
+    if (missing) onChange(null);
+  }, [missing, onChange]);
   return (
     <Field label={ctx.t("request.workspace", { project: name ?? projectRef.id })} hint={ctx.t("request.workspaceHint")} ctx={ctx}>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
@@ -133,7 +110,6 @@ export function NewRequestPanel({ ctx, locale, onClose }: { ctx: ViewContext; lo
   const [text, setText] = useState("");
   const [doneCriteria, setDoneCriteria] = useState("");
   const [projectIds, setProjectIds] = useState<string[]>([]);
-  const [baseBranches, setBaseBranches] = useState<Record<string, string>>({});
   const [workspaces, setWorkspaces] = useState<Record<string, string>>({});
   const submit = useMutation({
     mutationFn: () =>
@@ -141,9 +117,8 @@ export function NewRequestPanel({ ctx, locale, onClose }: { ctx: ViewContext; lo
         text,
         doneCriteria: doneCriteria.trim() || null,
         projectIds,
-        // 고른 뒤 해제한 프로젝트의 브랜치는 보내지 않는다. server 는 요청에 없는 프로젝트의 브랜치를 거절한다.
-        // 기존 워크스페이스를 고른 프로젝트는 그 워크스페이스의 브랜치에서 일하므로 기준 브랜치를 보내지 않는다.
-        baseBranches: Object.fromEntries(Object.entries(baseBranches).filter(([id]) => projectIds.includes(id) && !workspaces[id])),
+        baseBranches: {},
+        // 고른 뒤 해제한 프로젝트의 워크스페이스는 보내지 않는다. server 는 요청에 없는 프로젝트의 선택을 거절한다.
         workspaces: Object.fromEntries(Object.entries(workspaces).filter(([id]) => projectIds.includes(id))),
         locale,
       }),
@@ -200,10 +175,15 @@ export function NewRequestPanel({ ctx, locale, onClose }: { ctx: ViewContext; lo
                 projectRef={ref}
                 selected={projectIds.includes(ref.id)}
                 onToggle={() =>
+                {
+                  // 해제한 프로젝트의 작업 위치 선택은 지운다. 다시 골랐을 때 예전 선택이 남아 있지 않게 한다.
+                  if (projectIds.includes(ref.id)) {
+                    setWorkspaces(({ [ref.id]: _removed, ...rest }) => rest);
+                  }
                   setProjectIds((current) =>
                     current.includes(ref.id) ? current.filter((id) => id !== ref.id) : [...current, ref.id],
-                  )
-                }
+                  );
+                }}
                 ctx={ctx}
               />
             ))}
@@ -213,32 +193,18 @@ export function NewRequestPanel({ ctx, locale, onClose }: { ctx: ViewContext; lo
       {allowedRefs
         .filter((ref) => projectIds.includes(ref.id))
         .map((ref) => (
-          <View key={ref.key} style={{ gap: 16 }}>
-            <WorkspaceField
-              projectRef={ref}
-              value={workspaces[ref.id] ?? null}
-              onChange={(workspaceId) =>
-                setWorkspaces((current) => {
-                  const { [ref.id]: _removed, ...rest } = current;
-                  return workspaceId ? { ...rest, [ref.id]: workspaceId } : rest;
-                })
-              }
-              ctx={ctx}
-            />
-            {workspaces[ref.id] ? null : (
-              <BaseBranchField
-                projectRef={ref}
-                value={baseBranches[ref.id] ?? null}
-                onChange={(branch) =>
-                  setBaseBranches((current) => {
-                    const { [ref.id]: _removed, ...rest } = current;
-                    return branch ? { ...rest, [ref.id]: branch } : rest;
-                  })
-                }
-                ctx={ctx}
-              />
-            )}
-          </View>
+          <WorkspaceField
+            key={ref.key}
+            projectRef={ref}
+            value={workspaces[ref.id] ?? null}
+            onChange={(workspaceId) =>
+              setWorkspaces((current) => {
+                const { [ref.id]: _removed, ...rest } = current;
+                return workspaceId ? { ...rest, [ref.id]: workspaceId } : rest;
+              })
+            }
+            ctx={ctx}
+          />
         ))}
       <Field label={ctx.t("request.doneCriteria")} ctx={ctx}>
         <TextInput
