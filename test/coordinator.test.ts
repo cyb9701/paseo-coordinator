@@ -485,6 +485,8 @@ describe("A 등급 변경 전 조사", () => {
     assert.notEqual(asked.isError, true);
     assert.equal((await store.read()).requests[0]!.status, "needs_input");
     await answerQuestions({ id: "r1", answers: [{ question: "무엇을 지울까요?", answer: "추천 항목만" }] }, store);
+    // 코디네이터는 알림을 받으면 요청을 다시 읽고 계획한다. 읽지 않은 답으로 세운 계획은 거절된다.
+    await tool("coordinator_get_request").execute({ requestId: "r1" }, context);
 
     const planned = await tool("coordinator_submit_plan").execute(changePlan(), context);
     assert.notEqual(planned.isError, true, String(planned.text));

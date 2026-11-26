@@ -273,11 +273,21 @@ export class ReviewRunner {
     // 읽은 뒤 저장하기 전에 사람이 카드에서 먼저 정했거나 워커가 다시 보고했을 수 있다. 같은 블로커의 같은 검토일 때만 마무리한다.
     // 아니면 사람의 결정과 자동 답이 함께 가거나, 새 보고가 조용히 사라진다 (2026-11-26 전수 검사).
     const sameReview = (task: Task) => task.blocker?.at === blocker.at && task.blocker.review?.status === "running";
-    if (passed) {
+    // 검토가 도는 5~12분 사이에 사람이 이 규칙의 결정을 되돌렸거나, 설정에서 자동 답변을 껐거나, 규칙이 자동 정지됐거나, 요청이
+    // 멈췄을 수 있다. 통과해도 적용 직전에 사전 검사를 다시 한다 (RULES.md §8). 걸리면 사람 카드로 보낸다 (2026-11-26 전수 검사).
+    let stopReason: string | null =
+      passed && (await readSettings(this.settings).then((values) => values.autoDecisions === false, () => true))
+        ? "Automatic answers were switched off in settings while the review ran."
+        : null;
+    if (passed && !stopReason) {
       const message = `[Decision from the coordinator, verified by ${review.required} independent reviewers, on what you reported: "${blocker.summary}"]\n${proposal.answer}\nContinue your task with this decision.`;
-      const applied = await this.store.update((state) => {
-        const target = state.requests.find((request) => request.id === requestId)?.tasks.find((task) => task.number === taskNumber);
-        if (!target || !sameReview(target)) return { state, result: false };
+      const applied = await this.store.update<boolean | string>((state) => {
+        const current = state.requests.find((request) => request.id === requestId);
+        const target = current?.tasks.find((task) => task.number === taskNumber);
+        if (!current || !target || !sameReview(target)) return { state, result: false };
+        if (current.status !== "running") return { state, result: `The request is ${current.status}.` };
+        const blocked = this.precheck(state, current, target, proposal.rule);
+        if (blocked) return { state, result: blocked };
         return {
         result: true,
         state: {
@@ -319,12 +329,15 @@ export class ReviewRunner {
         },
         };
       });
-      if (applied) {
+      if (applied === true) {
         await this.channel.flush(paseo, requestId, taskNumber).catch((error: unknown) =>
           console.error(`[coordinator] could not send the reviewed answer for ${requestId}:${taskNumber}; it stays queued`, error),
         );
+      } else if (typeof applied === "string") {
+        stopReason = applied;
       }
-    } else {
+    }
+    if (!passed || stopReason) {
       // 사람 카드로 돌린다. 코디네이터의 제안을 선택지 하나로 두고, 검토자의 우려를 '확인할 것'에 그대로 넣는다.
       // 사람이 읽는 카드 문구는 요청 언어를 따른다. 검토자의 우려 원문은 검토자가 쓴 그대로 둔다.
       const ko = found.request.language === "ko";
@@ -336,6 +349,7 @@ export class ReviewRunner {
         if (item.verdict === "PASS") return [];
         return item.objections.length ? item.objections.map((text) => `${label} ${item.verdict}: ${text}`) : [`${label}: ${item.verdict}`];
       });
+      if (stopReason) objections.unshift(ko ? `검토는 통과했지만 적용 직전 확인에 걸렸어요: ${stopReason}` : `The review passed, but the check right before applying stopped it: ${stopReason}`);
       await this.patchBlocker(requestId, taskNumber, (current) => current.at !== blocker.at || current.review?.status !== "running" ? current : ({
         ...current,
         objections,
@@ -385,7 +399,11 @@ export class ReviewRunner {
       description: "Submit your verdict after recording your own answer and checking the evidence.",
       input: z.object({
         verdict: z.enum(["PASS", "FAIL", "UNSURE"]),
-        checks: z.array(z.object({ name: z.enum(CHECKS), pass: z.boolean(), reason: z.string().trim().min(1) })).length(CHECKS.length),
+        // 이름마다 한 번씩이어야 한다. 길이만 보면 같은 점검 하나를 여섯 번 내도 통과했다 (2026-11-26 전수 검사).
+        checks: z
+          .array(z.object({ name: z.enum(CHECKS), pass: z.boolean(), reason: z.string().trim().min(1) }))
+          .length(CHECKS.length)
+          .refine((checks) => new Set(checks.map((check) => check.name)).size === CHECKS.length, { message: `Give each check once: ${CHECKS.join(", ")}.` }),
         objections: z.array(z.string().trim().min(1)).default([]),
       }),
       execute: async (input, { agent, paseo }) => {

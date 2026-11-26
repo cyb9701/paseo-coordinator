@@ -419,6 +419,8 @@ describe("기존 워크스페이스 지정", () => {
         result: undefined,
       }));
       await answerQuestions({ id: "r1", answers: [{ question: "q", answer: "예" }] }, store);
+      // 코디네이터는 알림을 받으면 요청을 다시 읽고 계획한다.
+      await runtime.tools().find((item) => item.name === "coordinator_get_request")!.execute({ requestId: "r1" }, context);
     };
     await ask("기존 워크스페이스에서 할까요?");
     const unseen = await submit.execute(plan, context);

@@ -368,9 +368,11 @@ describe("운영 작업", () => {
     assert.match(String(early.text), /Operation tasks/);
     // 대상을 보여 주지 않은 질문의 답으로는 시작하지 않는다.
     await answerQuestions({ id: "r1", answers: [{ question: "q", answer: "승인" }] }, await askAt(store, "브랜치를 정리할까요?"));
+    await tool("coordinator_get_request").execute({ requestId: "r1" }, context);
     const unseen = await tool("coordinator_submit_plan").execute(operation, context);
     assert.match(String(unseen.text), /did not list these operation targets/);
     await answerQuestions({ id: "r1", answers: [{ question: "q", answer: "승인" }] }, await askAt(store, "지울 것: 로컬 브랜치 coord/r12-1-jgrq 삭제"));
+    await tool("coordinator_get_request").execute({ requestId: "r1" }, context);
     const accepted = await tool("coordinator_submit_plan").execute(operation, context);
     assert.notEqual(accepted.isError, true, String(accepted.text));
     assert.equal((await first(store)).tasks[0]!.kind, "operation");
@@ -849,6 +851,7 @@ describe("최종 검사에서 찾은 문제", () => {
       state: { ...value, requests: value.requests.map((item) => ({ ...item, feedback: [{ text: "q 도? → 예", at: now(), kind: "answer" as const }] })) },
       result: undefined,
     }));
+    await runtime.tools().find((item) => item.name === "coordinator_get_request")!.execute({ requestId: "r1" }, { paseo, agent: { id: "c1" } } as Fake);
     const added = await add.execute(input, { paseo, agent: { id: "c1" } } as Fake);
     assert.notEqual(added.isError, true, String(added.text));
     assert.deepEqual((await first(store)).projectIds, ["p", "q"]);

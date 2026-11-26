@@ -28,8 +28,9 @@ import { type StateStore, dataDirectory } from "./store";
 import type { ReviewRunner } from "./review";
 import { type WorkerChannel, queued } from "./worker-channel";
 import { preapprovedOptions } from "./preapprove";
-import { listBranches, listTreeAt, readBlobAt, resolveBaseRef, treePath } from "./branches";
+import { listBranches, listTreeAt, readBlobAt, remoteDefaultBranch, resolveBaseRef, treePath } from "./branches";
 import { uncommittedChanges } from "./completion";
+import { run } from "./run";
 import { listExistingWorkspaces, pluginWorkspaceIds, readCheckout, workspaceProblem } from "./existing-workspace";
 
 type Settings = PluginSettings<typeof settingsSchema>;
@@ -41,13 +42,25 @@ const READ_LIMIT = 24_000;
 const LIST_LIMIT = 200;
 
 // RULES.md H2 의 비밀 파일. 코디네이터 읽기 도구로도 읽지 않는다.
-// .git 아래(원격 URL 에 토큰이 든 config 등)와 흔한 비밀·자격 파일 이름도 막는다.
+// .git 아래(원격 URL 에 토큰이 든 config 등)와 흔한 비밀·자격 파일 이름도 막는다. .envrc, key.properties, AuthKey_*.p8,
+// client_secret*.json, firebase-adminsdk*.json, .pgpass, kubeconfig 가 빠져 있어 .envrc 의 AWS 키가 그대로 읽혔다 (2026-11-26 전수 검사).
 const SECRET_FILE =
-  /^(\.env(\..*)?|.*\.(pem|key|p12|pfx|jks|keystore|tfvars|tfstate)|id_(rsa|ed25519|ecdsa|dsa)(\.pub)?|credentials(\.json)?|\.npmrc|\.netrc|\.pypirc|\.git-credentials|\.dev\.vars|secrets?\..*|service-account.*\.json)$/i;
+  /^(\.env(\..*|rc|-.*)?|.*\.(pem|key|p8|p12|pfx|jks|keystore|tfvars|tfstate|keychain)|id_(rsa|ed25519|ecdsa|dsa)(\.pub)?|credentials(\.json)?|\.npmrc|\.netrc|\.pypirc|\.pgpass|\.git-credentials|\.dev\.vars|\.secrets?|secrets?\..*|service-account.*\.json|client_secret.*\.json|.*adminsdk.*\.json|key\.properties|kubeconfig(\..*)?)$/i;
 
 function isSecretPath(root: string, target: string): boolean {
   const parts = relative(root, target).split(sep);
   return parts.includes(".git") || SECRET_FILE.test(basename(target));
+}
+
+/**
+ * git 이 무시하는 파일인지. 로컬 설정과 비밀은 대개 .gitignore 에 있다. 이름 목록만으로는 모든 비밀 파일을 알 수 없어, 디스크에서
+ * 읽을 때는 무시되는 파일도 읽지 않는다. git 이 아니거나 확인하지 못하면 false.
+ */
+async function isIgnoredByGit(root: string, target: string): Promise<boolean> {
+  return run("git", ["check-ignore", "-q", "--", relative(root, target)], root).then(
+    () => true,
+    () => false,
+  );
 }
 
 /** 파일 앞부분만 읽는다. 큰 파일을 통째로 메모리에 올리지 않고, NUL 바이트가 있으면 바이너리로 본다. */
@@ -525,8 +538,10 @@ export class CoordinatorRuntime {
       execute: async (input, context) => {
         const requestId = (input as { requestId?: unknown } | null)?.requestId;
         if (typeof requestId === "string") {
+          // 코디네이터가 정해지지 않은 요청도 막는다. 코디네이터 id 는 첫 메시지를 보내기 전에 저장되므로 자기 요청은 늘 정해져 있다.
+          // 비어 있을 때 열어 두면, 막 만든 요청이나 코디네이터 생성이 실패한 요청에 다른 코디네이터가 답을 넣었다 (2026-11-26 전수 검사).
           const owner = (await this.store.read()).requests.find((request) => request.id === requestId)?.coordinatorAgentId;
-          if (owner && owner !== context.agent.id) {
+          if (owner !== context.agent.id) {
             return { text: `Request ${requestId} belongs to another coordinator. Work only on your own request.`, isError: true };
           }
         }
@@ -859,10 +874,11 @@ export class CoordinatorRuntime {
       execute: async ({ projectId }, { paseo }) => {
         const project = (await allowedProjects(paseo, this.settings)).find((item) => item.id === projectId);
         if (!project) return { text: `Project ${projectId} is not allowed in coordinator settings.`, isError: true };
-        const [workspaces, state, agents] = await Promise.all([
+        const [workspaces, state, agents, defaultBranch] = await Promise.all([
           listExistingWorkspaces(paseo, projectId).catch(() => null),
           this.store.read(),
           paseo.agents.list({ filter: { statuses: ["running", "initializing"] }, page: { limit: 200 } }).catch(() => null),
+          remoteDefaultBranch(project.path).catch(() => null),
         ]);
         if (!workspaces) return { text: `Could not list the workspaces of ${project.name}.`, isError: true };
         const pluginIds = pluginWorkspaceIds(state);
@@ -880,6 +896,7 @@ export class CoordinatorRuntime {
               const notes = [
                 problem ? `not usable: ${problem}` : null,
                 !problem && !checkout?.branch ? "detached HEAD, not usable" : null,
+                !problem && checkout?.branch && checkout.branch === defaultBranch ? "on the default branch: code tasks only if the human chooses it" : null,
                 dirty ? "uncommitted changes" : null,
                 working ? `${working} agent(s) working` : null,
               ].filter(Boolean);
@@ -916,7 +933,9 @@ export class CoordinatorRuntime {
         }
         const target = await resolveInside(project.path, path);
         if (!target) return { text: `${path} is not inside project ${project.name}.`, isError: true };
-        if (isSecretPath(await realpath(project.path), target)) return { text: `${path} may hold secrets and is not readable.`, isError: true };
+        const realRoot = await realpath(project.path);
+        if (isSecretPath(realRoot, target)) return { text: `${path} may hold secrets and is not readable.`, isError: true };
+        if (await isIgnoredByGit(realRoot, target)) return { text: `${path} is ignored by git and may hold local secrets; it is not readable.`, isError: true };
         const info = await stat(target).catch(() => null);
         if (!info?.isFile()) return { text: `${path} is not a file.`, isError: true };
         const head = await readHead(target, info.size);
@@ -935,18 +954,17 @@ export class CoordinatorRuntime {
         "Read a request exactly as the human wrote it, with feedback, the current plan if any, and the projects you may use.",
       input: z.object({ requestId: z.string() }),
       execute: async ({ requestId }, { paseo }) => {
-        const request = (await this.store.read()).requests.find((item) => item.id === requestId);
-        if (!request) return { text: `Unknown request ${requestId}`, isError: true };
         // 코디네이터가 읽었다는 기록. 실행 중 요청에 온 지시를 처리했는지 이것으로 본다 (collectDue).
-        // 코디네이터가 다시 일하므로 멈춤 기록도 지운다.
+        // 코디네이터가 다시 일하므로 멈춤 기록도 지운다. 읽기와 기록을 한 번에 한다. 따로 하면 그사이 저장된 지시가 돌려준 내용에는
+        // 없는데 '읽음'으로 기록됐다 (2026-11-26 전수 검사).
         const readAt = new Date().toISOString();
-        await this.store.update((state) => ({
-          state: {
-            ...state,
-            requests: state.requests.map((item) => (item.id === requestId ? { ...item, coordinatorReadAt: readAt, stall: null } : item)),
-          },
-          result: undefined,
-        }));
+        const request = await this.store.update((state) => {
+          const found = state.requests.find((item) => item.id === requestId);
+          if (!found) return { state, result: null };
+          const stamped = { ...found, coordinatorReadAt: readAt, stall: null };
+          return { state: { ...state, requests: state.requests.map((item) => (item.id === requestId ? stamped : item)) }, result: stamped };
+        });
+        if (!request) return { text: `Unknown request ${requestId}`, isError: true };
         const projects = await allowedProjects(paseo, this.settings);
         const usable = request.projectIds.length > 0 ? projects.filter((p) => request.projectIds.includes(p.id)) : projects;
         return {
@@ -1038,10 +1056,14 @@ export class CoordinatorRuntime {
         const project = (await allowedProjects(paseo, this.settings)).find((item) => item.id === projectId);
         if (!project) return { text: `Project ${projectId} is not allowed in coordinator settings.`, isError: true };
         // 심볼릭 링크로 프로젝트 밖 파일을 읽지 않게 read_file 과 같은 경계 검사를 거친다.
+        // README 를 .git/config 로 가는 심볼릭 링크로 두면 원격 URL 의 토큰이 나왔다 (2026-11-26 전수 검사). read_file 과 같은 검사를 거친다.
+        const realRoot = await realpath(project.path);
         const readInside = async (name: string) => {
           const target = await resolveInside(project.path, name).catch(() => null);
-          if (!target) return null;
-          const head = await readHead(target, (await stat(target).catch(() => null))?.size ?? 0);
+          if (!target || isSecretPath(realRoot, target) || (await isIgnoredByGit(realRoot, target))) return null;
+          const info = await stat(target).catch(() => null);
+          if (!info?.isFile()) return null;
+          const head = await readHead(target, info.size);
           return head && head !== "binary" ? head.text : null;
         };
         const [readme, pkg, entries] = await Promise.all([
@@ -1083,7 +1105,7 @@ export class CoordinatorRuntime {
       name: "coordinator_ask_human",
       title: "Ask the human",
       description:
-        "Send the human a question card when the request is ambiguous, needs a human choice (product or UX direction, data structure, library, public API), or is grade A and the real change must start. Give context, concrete questions, options and your recommendation. Do not ask about things you can decide yourself.",
+        "Send the human a question card when the request is ambiguous, needs a human choice (product or UX direction, data structure, library, public API), or is grade A and the real change must start. It is also how the human approves operation targets and running in one of their existing workspaces: write each target or workspace directory word for word in the context. Give context, concrete questions, options and your recommendation. Do not ask about things you can decide yourself.",
       input: z.object({
         requestId: z.string(),
         title: z.string().trim().min(1),
@@ -1228,6 +1250,8 @@ export class CoordinatorRuntime {
     request: CoordinatorRequest,
     tasks: readonly z.infer<typeof taskInput>[],
     projects: Awaited<ReturnType<typeof allowedProjects>>,
+    /** 작업 추가일 때만 true. 계획 제출에서 요청의 기존 작업은 이번 계획이 대신할 작업이라 승인 근거가 되지 않는다. */
+    reuseApproval = false,
   ): Promise<{ problems: string[]; approvals: string[] }> {
     const problems: string[] = [];
     const approvals = new Set<string>();
@@ -1243,12 +1267,34 @@ export class CoordinatorRuntime {
       const workspaceId = human ?? task.workspaceId;
       if (workspaceId) {
         if (task.baseBranch) problems.push(`Task ${task.number}: a task in an existing workspace works on the branch checked out there; omit baseBranch.`);
+        // 사람이 이 프로젝트의 기준 브랜치를 골랐으면 코디네이터가 워크스페이스로 바꿀 수 없다. 받으면 사람의 기준이 조용히 버려졌다.
+        if (!human && request.baseBranches[task.projectId]) {
+          problems.push(`Task ${task.number}: the human chose base branch ${request.baseBranches[task.projectId]} for project ${task.projectId}; do not move it to an existing workspace.`);
+          continue;
+        }
         const workspace = workspaces.find((item) => item.id === workspaceId);
         const problem = workspaceProblem(workspace, workspaceId, task.projectId, pluginIds);
-        if (problem) problems.push(`Task ${task.number}: ${problem}.`);
-        else if (!human && !request.tasks.some((other) => other.status !== "canceled" && other.existingWorkspaceId === workspaceId)) {
-          approvals.add(workspace!.directory);
+        if (problem) {
+          problems.push(`Task ${task.number}: ${problem}.`);
+          continue;
         }
+        // 기본 브랜치는 워커 브랜치가 될 수 없다 (RULES.md §1). 사람이 직접 고른 워크스페이스만 예외다.
+        const root = projects.find((project) => project.id === task.projectId)?.path;
+        if (!human && (task.kind ?? "code") === "code" && root) {
+          const [checkout, defaultBranch] = await Promise.all([
+            readCheckout(workspace!.directory).catch(() => null),
+            remoteDefaultBranch(root).catch(() => null),
+          ]);
+          if (checkout?.branch && checkout.branch === defaultBranch) {
+            problems.push(
+              `Task ${task.number}: workspace ${workspaceId} is on the default branch ${defaultBranch}; workers do not commit on it. Use a new worktree, or ask the human to choose that workspace in the new request panel if this is intended.`,
+            );
+            continue;
+          }
+        }
+        const approvedBefore =
+          reuseApproval && request.tasks.some((other) => other.status !== "canceled" && other.existingWorkspaceId === workspaceId);
+        if (!human && !approvedBefore) approvals.add(workspace!.directory);
         continue;
       }
       // 사람이 새 요청 창에서 고른 기준 브랜치는 코디네이터가 바꾸지 못한다. 적은 브랜치는 저장소에 있어야 한다.
@@ -1280,7 +1326,8 @@ export class CoordinatorRuntime {
           .describe("readOnly only: this investigation is the first step of a change the human asked for, not an answer to a question. Give the grade of that change."),
         title: z.string().trim().min(1),
         grade: z.enum(GRADES).optional(),
-        gradeReasons: z.array(z.string().trim().min(1)).min(1),
+        // 읽기 조사에는 등급이 없어 근거를 빈 채로 둘 수 있다. 변경 요청만 아래에서 하나 이상을 요구한다.
+        gradeReasons: z.array(z.string().trim().min(1)).default([]),
         recommendation: z.string().trim().min(1),
         risks: z.array(z.string()).default([]),
         unknowns: z.array(z.string()).default([]),
@@ -1300,6 +1347,7 @@ export class CoordinatorRuntime {
         const checked = await this.taskProblems(paseo, request, input.tasks, projects);
         const problems = [...validatePlan(input, request.language, usable, [], request.workspaces), ...checked.problems];
         if (!input.readOnly && !input.grade) problems.push("A change request needs a grade.");
+        if (!input.readOnly && input.gradeReasons.length === 0) problems.push("A change request needs gradeReasons: which axis set the grade, with the fact behind it.");
         if (input.beforeChange && !input.readOnly) problems.push("beforeChange is only for a readOnly investigation.");
         if (input.beforeChange && !input.grade) problems.push("beforeChange needs the grade of the change that follows the investigation.");
         if (input.readOnly && !input.beforeChange && input.grade) {
@@ -1329,11 +1377,12 @@ export class CoordinatorRuntime {
         const now = new Date().toISOString();
         const feedbackCount = request.feedback.length;
         // 검증하는 사이(await) 요청이 취소되거나 새 지시가 왔으면 저장하지 않는다. 취소한 요청이 되살아나 워커가 생긴다.
-        const saved = await this.store.update((current) => {
+        const saved = await this.store.update<Task[] | "unread" | null>((current) => {
           const latest = current.requests.find((entry) => entry.id === request.id);
           if (latest?.status !== "planning" || hasLiveTasks(latest) || latest.feedback.length !== feedbackCount) {
             return { state: current, result: null };
           }
+          if (unreadByCoordinator(latest)) return { state: current, result: "unread" as const };
           return {
             state: {
               ...current,
@@ -1352,7 +1401,7 @@ export class CoordinatorRuntime {
                       risks: input.risks,
                       unknowns: input.unknowns,
                       plannedAt: now,
-                      tasks: input.tasks.map((task) => newTask(request, task)),
+                      tasks: withInheritedWorkspaces(input.tasks.map((task) => newTask(request, task))),
                     }
                   : item,
               ),
@@ -1361,6 +1410,9 @@ export class CoordinatorRuntime {
             result: latest.tasks,
           };
         });
+        if (saved === "unread") {
+          return { text: "A new instruction from the human arrived after you last read the request. Read it with coordinator_get_request and plan again with it in mind.", isError: true };
+        }
         if (!saved) return { text: `Request ${request.id} changed while you were planning (canceled, or a new instruction arrived); read it again with coordinator_get_request.`, isError: true };
         // 조사 워커는 plan 모드라 worktree 에 남긴 변경이 없다. 보고는 investigation 과 answer 에 이미 옮겼다.
         await cleanupTaskWorkspaces(paseo, saved);
@@ -1408,7 +1460,7 @@ export class CoordinatorRuntime {
         const outside = [...new Set(input.tasks.map((task) => task.projectId))].filter(
           (id) => request.projectIds.length > 0 && !request.projectIds.includes(id),
         );
-        const checked = await this.taskProblems(paseo, request, input.tasks, projects);
+        const checked = await this.taskProblems(paseo, request, input.tasks, projects, true);
         const problems = [
           ...validatePlan({ title: request.title ?? request.id, tasks: input.tasks }, request.language, usable, request.tasks, request.workspaces),
           ...(outside.length > 0 && !humanAnsweredSince(request, request.plannedAt)
@@ -1421,9 +1473,10 @@ export class CoordinatorRuntime {
         if (problems.length > 0) return { text: `Tasks rejected:\n- ${problems.join("\n- ")}`, isError: true };
         const now = new Date().toISOString();
         const count = request.tasks.length;
-        const saved = await this.store.update((current) => {
+        const saved = await this.store.update<boolean | "unread">((current) => {
           const latest = current.requests.find((entry) => entry.id === request.id);
           if (latest?.status !== "running" || latest.tasks.length !== count) return { state: current, result: false };
+          if (unreadByCoordinator(latest)) return { state: current, result: "unread" as const };
           return {
             state: {
               ...current,
@@ -1434,13 +1487,13 @@ export class CoordinatorRuntime {
                       // 시작 카드가 다시 확인 필요로 뜬다. 사람은 더해진 작업을 본다.
                       plannedAt: now,
                       projectIds: item.projectIds.length > 0 ? [...new Set([...item.projectIds, ...outside])] : item.projectIds,
-                      tasks: [
+                      tasks: withInheritedWorkspaces([
                         ...item.tasks,
                         ...input.tasks.map((task) => ({
                           ...newTask(request, task),
                           decisions: [{ summary: `Added by the coordinator: ${input.reason}`, by: "coordinator" as const, at: now, qa: [] }],
                         })),
-                      ],
+                      ]),
                     }
                   : item,
               ),
@@ -1448,6 +1501,9 @@ export class CoordinatorRuntime {
             result: true,
           };
         });
+        if (saved === "unread") {
+          return { text: "A new instruction from the human arrived after you last read the request. Read it with coordinator_get_request and plan again with it in mind.", isError: true };
+        }
         if (!saved) return { text: `Request ${request.id} changed while you were adding tasks; read it again with coordinator_get_request.`, isError: true };
         this.onPlanStarted(paseo);
         return { text: `Added tasks ${input.tasks.map((task) => task.number).join(", ")} to ${request.id}. The human sees them on the start card.` };
@@ -1464,7 +1520,7 @@ export class CoordinatorRuntime {
       name: "coordinator_cancel_tasks",
       title: "Cancel tasks",
       description:
-        "Cancel tasks of a running request that have not finished, when the human told you to drop that work. Tasks that depend on them are canceled too, and their workers are stopped. Finished tasks waiting for the human's merge card cannot be canceled here. A pull request a canceled task already opened stays open on GitHub: tell the human so in your final note.",
+        "Cancel tasks of a running request that have not finished, when the human told you to drop that work. Tasks that depend on them are canceled too, and their workers are stopped. Finished tasks waiting for the human's merge card cannot be canceled here. A pull request a canceled task already opened stays open on GitHub: tell the human so in your final note. Canceling every remaining task cancels the whole request, so to replace work add the new tasks with coordinator_add_tasks first, then cancel the old ones.",
       input: z.object({
         requestId: z.string(),
         taskNumbers: z.array(z.number().int().positive()).min(1),
@@ -1545,6 +1601,34 @@ const taskInput = z.object({
     ),
 });
 
+/**
+ * 코디네이터가 마지막으로 요청을 읽은 뒤에 온 사람의 지시가 있는가. 계획이나 작업 추가는 plannedAt 을 지금으로 바꾸고, 그 시각보다
+ * 앞선 지시는 처리한 것으로 본다(unreadInstructionAt). 읽지 않은 지시가 있는데 저장하면 그 지시('STOP' 같은)가 조용히 사라졌다
+ * (2026-11-26 전수 검사).
+ */
+function unreadByCoordinator(request: CoordinatorRequest): boolean {
+  const last = request.feedback.at(-1)?.at;
+  const read = request.coordinatorReadAt ?? request.notifiedAt;
+  return Boolean(last && (!read || last > read));
+}
+
+/**
+ * 앞 작업의 worktree 를 이어 쓰는 코드 작업에 그 작업의 기존 워크스페이스를 미리 적는다. 배정기도 시작할 때 물려받지만, 그 전에는
+ * 시작 카드와 보드에 어디서 일할지 보이지 않았다 (2026-11-26 전수 검사).
+ */
+function withInheritedWorkspaces(tasks: Task[]): Task[] {
+  const result = [...tasks];
+  for (let index = 0; index < result.length; index += 1) {
+    const task = result[index]!;
+    if (task.kind === "operation" || task.existingWorkspaceId || task.status === "canceled") continue;
+    const from = result
+      .filter((dep) => task.dependsOn.includes(dep.number) && dep.projectId === task.projectId && dep.kind !== "operation" && dep.status !== "canceled")
+      .sort((a, b) => b.number - a.number)[0];
+    if (from?.existingWorkspaceId) result[index] = { ...task, existingWorkspaceId: from.existingWorkspaceId };
+  }
+  return result;
+}
+
 function newTask(request: CoordinatorRequest, task: z.infer<typeof taskInput>): Task {
   return {
     ...task,
@@ -1590,7 +1674,7 @@ export function humanGateProblems(
   if (operations.length > 0) {
     // 답한 질문 카드에 대상이 그대로 적혀 있어야 사람이 그 대상을 승인한 것이다. '무언가에 답했다'만 보면 대상을 보여 주지 않은
     // 질문의 답으로도 통과했다 (2026-11-26 최종 검사).
-    const missing = shown === null ? [] : operations.flatMap((task) => (task.targets ?? []).filter((target) => !shown.includes(normalize(target))));
+    const missing = shown === null ? [] : operations.flatMap((task) => (task.targets ?? []).filter((target) => !containsBounded(shown, normalize(target))));
     if (!answered || shown === null) {
       problems.push(
         "Operation tasks act outside their worktree: ask the human with coordinator_ask_human, listing each operation task's targets word for word in the context, and plan them after the answer.",
@@ -1602,7 +1686,7 @@ export function humanGateProblems(
     }
   }
   if (workspaceDirectories.length > 0) {
-    const missing = shown === null ? [] : workspaceDirectories.filter((directory) => !shown.includes(normalize(directory)));
+    const missing = shown === null ? [] : workspaceDirectories.filter((directory) => !containsBounded(shown, normalize(directory)));
     if (!answered || shown === null) {
       problems.push(
         `Working in the human's existing workspace needs their approval: ask with coordinator_ask_human, writing each workspace directory word for word (${workspaceDirectories.join(", ")}), and plan after the answer.`,
@@ -1612,6 +1696,23 @@ export function humanGateProblems(
     }
   }
   return problems;
+}
+
+/**
+ * needle 이 text 안에 '한 덩어리로' 들어 있는가. 그냥 포함 여부로 보면 질문에 /x/app-feature 를 보여 주고 답을 받았는데 /x/app 이
+ * 승인되거나, develop 으로 dev 가, coord/r15-10-ab 로 coord/r15-1 이 승인됐다 (2026-11-26 전수 검사). 앞뒤가 경로·이름에 쓰는 글자가
+ * 아니어야 한다. 한글, 공백, 따옴표, 괄호, 쉼표, 문장 끝 마침표는 경계다.
+ */
+export function containsBounded(text: string, needle: string): boolean {
+  if (!needle) return false;
+  for (let at = text.indexOf(needle); at !== -1; at = text.indexOf(needle, at + 1)) {
+    const before = at > 0 ? text[at - 1]! : "";
+    const after = text.slice(at + needle.length, at + needle.length + 2);
+    const beforeOk = !/[A-Za-z0-9_./-]/.test(before);
+    const afterOk = !/^[A-Za-z0-9_/-]/.test(after) && !/^\.[A-Za-z0-9_]/.test(after);
+    if (beforeOk && afterOk) return true;
+  }
+  return false;
 }
 
 /** 공백 차이를 무시하고 비교한다. 대상 문자열이 질문에 그대로 들어 있는지 볼 때 쓴다. */
@@ -1655,6 +1756,7 @@ export function validatePlan(
     kind?: "code" | "operation";
     status?: string;
     existingWorkspaceId?: string | null;
+    completion?: { closedAt: string | null } | null;
   }[] = [],
   /** 사람이 새 요청 창에서 고른 기존 워크스페이스(projectId → workspaceId). */
   humanWorkspaces: Readonly<Record<string, string>> = {},
@@ -1674,6 +1776,10 @@ export function validatePlan(
     }
     for (const dependency of task.dependsOn) {
       if (dependency >= task.number) problems.push(`Task ${task.number}: dependsOn may only list earlier tasks (got ${dependency}).`);
+      // 취소된 작업은 끝나지 않으므로, 기대는 작업이 영원히 기다리고 요청도 끝나지 않았다 (2026-11-26 전수 검사).
+      if (existing.some((other) => other.number === dependency && other.status === "canceled")) {
+        problems.push(`Task ${task.number}: task ${dependency} was canceled; do not depend on it.`);
+      }
     }
     if (task.kind === "operation" && !(task.targets ?? []).length) {
       problems.push(`Task ${task.number}: an operation task must list its targets.`);
@@ -1697,6 +1803,17 @@ export function validatePlan(
     if (followers.length > 1) {
       problems.push(
         `Tasks ${followers.join(", ")} all continue task ${from} in the same project, so they would share one worktree. Chain them (each after the previous one) or merge them into one task.`,
+      );
+    }
+  }
+  // 이미 완료를 보고한 작업(카드가 열렸거나 머지됨)의 worktree 는 이어 쓰지 않는다. 이어 쓰면 두 작업이 한 worktree·PR 에 묶이고,
+  // 앞 카드를 닫을 때 일하는 중인 뒤 작업이 완료가 되며 worktree 가 지워졌다 (2026-11-26 전수 검사).
+  for (const task of plan.tasks) {
+    const from = continuesFrom(task);
+    const earlier = from === null ? undefined : existing.find((other) => other.number === from);
+    if (earlier && (earlier.status === "review" || earlier.status === "done" || earlier.completion?.closedAt)) {
+      problems.push(
+        `Task ${task.number} would continue task ${from}'s worktree, but task ${from} already reported done. To change its work while its card is open, use coordinator_message_worker; to build on merged work, do not depend on task ${from} (the base branch has it).`,
       );
     }
   }
