@@ -124,10 +124,23 @@ function branchFor(request: CoordinatorRequest, task: Task): string {
  * poteto 의 worker.md 는 킥오프가 명시적으로 말할 때만 규칙을 덮어쓴다 (RULES.md §11 등급별 덮어쓰기).
  * poteto 의 Always pause 목록과 H2 의 차이(PR 머지, DB 쓰기, worktree 밖 쓰기, 비밀 파일)를 여기서 막는다.
  */
-function potetoOverride(grade: CoordinatorRequest["grade"], branch: string, existing: boolean): string[] {
-  const reach = existing
-    ? "Go as far as committing on this branch. Do not push it or open a pull request: it is the human's branch."
-    : "Go as far as pushing this branch and opening a pull request from it.";
+function potetoOverride(
+  grade: CoordinatorRequest["grade"],
+  branch: string,
+  finish: "pullRequest" | "existing" | "successor" | "localBase",
+): string[] {
+  // 끝내는 방법은 같은 킥오프의 규칙과 같아야 한다. 늘 'push 하고 PR' 이라고 쓰면, 뒤 작업이 이어 쓰는 작업과 로컬 기준 브랜치
+  // 작업에서 바로 위의 'push 하지 마' 와 부딪혔다 (2026-11-26 전수 검사).
+  const reach =
+    finish === "pullRequest"
+      ? "Go as far as pushing this branch and opening a pull request from it."
+      : `Go as far as committing on this branch. Do not push it or open a pull request: ${
+          finish === "existing"
+            ? "it is the human's branch"
+            : finish === "successor"
+              ? "the next task continues on it and opens the pull request"
+              : "its base branch exists only on this machine"
+        }.`;
   return [
     "",
     `This kickoff overrides worker.md as follows. Your working branch is ${branch}. ${reach} Do not merge pull requests (including stacked ones or auto-merge), push to any other branch, write to any database in any environment, deploy, send external messages, write outside this worktree, or access secret files. If you need any of those, report it with the report_blocker tool and stop. Make reversible implementation choices yourself and list what you chose and why in report_done.`,
@@ -215,7 +228,9 @@ function kickoff(
         : existing
           ? `- When the task is done, verified and committed on ${branch}, call the report_done tool as your last action, written in ${language}. Done means your verification passed and nothing you changed is left uncommitted.`
           : `- When the task is done and verified${successor ? " and committed" : ", pushed, with the pull request open"}, call the report_done tool as your last action, written in ${language}. Done means your verification passed${successor ? "" : " and the pull request exists"}. Never merge it: the human merges from a card. If the human's request says not to commit, push or open a pull request, follow the request and quote it as noPullRequestReason in report_done.`,
-    ...(poteto && !operation ? potetoOverride(request.grade, branch, Boolean(existing)) : []),
+    ...(poteto && !operation
+      ? potetoOverride(request.grade, branch, existing ? "existing" : successor ? "successor" : base && !base.remote ? "localBase" : "pullRequest")
+      : []),
   ].join("\n");
 }
 
@@ -472,7 +487,9 @@ export class Dispatcher {
       .filter((request) => request.status === "running")
       .flatMap((request) =>
         request.tasks
-          .filter((task) => task.agentId && !task.blocker && (task.status === "running" || task.outbox.length > 0))
+          // 턴 처리가 이미 잡고 있는 워커는 건너뛴다. 그 처리 안에서 이 검사가 돌 때 같은 워커의 턴을 다시 기다리면, 자기 lock 을
+          // 기다리느라 배정 흐름 전체가 멈췄다 (2026-11-26 전수 검사).
+          .filter((task) => task.agentId && !task.blocker && (task.status === "running" || task.outbox.length > 0) && !this.turnLocks.has(task.agentId))
           .map((task) => ({ request, task })),
       );
     await Promise.all(
@@ -480,6 +497,20 @@ export class Dispatcher {
         const snapshot = await paseo.agents.ref(task.agentId!).refresh().catch(() => null);
         if (!snapshot) return;
         const agent = snapshot.agent;
+        // 사람이 워커 세션을 닫거나 archive 하면 idle 도 error 도 아니어서, 작업이 '작업 중'에 영원히 남았다 (2026-11-26 전수 검사).
+        if (agent.archivedAt || agent.status === "closed") {
+          if (task.status === "running") {
+            await this.patchTask(request.id, task.number, {
+              status: "blocked",
+              note: say(
+                request.language,
+                "The worker's session was closed. Restart the task to send it a message again, or cancel it.",
+                "워커 세션이 닫혔어요. 다시 시작하면 그 세션에 다시 보내고, 필요 없으면 취소해 주세요.",
+              ),
+            });
+          }
+          return;
+        }
         if (agent.status === "running" || (agent.pendingPermissions?.length ?? 0) > 0) return;
         // 쉬는 워커에게 보내지 못한 메시지가 남아 있으면 보낸다 (턴 종료 hook 이 유실된 경우).
         if (task.outbox.length > 0) {
@@ -563,10 +594,18 @@ export class Dispatcher {
     }
     // 사람의 기존 워크스페이스에서 일하는 작업. 앞 작업이 그 워크스페이스에서 일했으면 이어 쓰는 뒤 작업도 거기서 일한다.
     const existingId = continuesFrom ? continuesFrom.existingWorkspaceId : task.existingWorkspaceId;
-    const existing = existingId ? await this.existingFor(paseo, request, task, existingId) : null;
+    const existing = existingId ? await this.existingFor(paseo, request, task, existingId, project.projectRootPath) : null;
     if (existing === "busy") return;
     const branch = existing ? existing.branch : (continuesFrom?.branch ?? branchFor(request, task));
-    const base = existing ? null : await this.baseFor(request, continuesFrom ?? task, values, project.projectRootPath);
+    // 이어 쓰는 작업은 이미 있는 worktree 를 쓴다. 그사이 기준 브랜치가 머지되고 지워졌어도 막지 않고 기록된 이름을 쓴다.
+    // 막으면 다시 시작해도 같은 이유로 실패했다 (2026-11-26 전수 검사).
+    const base = existing
+      ? null
+      : continuesFrom
+        ? await this.baseFor(request, continuesFrom, values, project.projectRootPath).catch(() =>
+            continuesFrom.baseBranch ? { branch: continuesFrom.baseBranch, refName: `origin/${continuesFrom.baseBranch}`, remote: true } : null,
+          )
+        : await this.baseFor(request, task, values, project.projectRootPath);
     // 두 번 배정되지 않게 워커를 만들기 전에 먼저 실행 중으로 표시한다. 저장하는 순간에 요청과 작업이 그대로인지 확인한다
     // (취소되거나 다시 계획됐으면 시작하지 않는다). 이후 기록은 이 브랜치로 표시한 작업에만 한다.
     const claimed = await this.store.update((state) => {
@@ -639,7 +678,14 @@ export class Dispatcher {
     });
     // 운영 작업은 코드를 바꾸지 않아 poteto 의 구현 흐름이 맞지 않는다.
     const poteto = values.poteto && task.kind !== "operation" ? await this.potetoFor(paseo, request, provider, agent.id) : { use: false, note: null };
-    await paseo.agents.ref(agent.id).send(kickoff(request, task, branch, continuesFrom, poteto.use, base, existing?.workspace ?? null));
+    // 킥오프를 보내지 못하면 이 워커는 기록되지 않는다. 그대로 두면 아무도 모르는 세션이 남고(사람의 워크스페이스라면 그 안에),
+    // 실제로는 전달됐다면 기록되지 않은 워커가 일한다. 정리하고 막힘으로 둔다 (2026-11-26 전수 검사).
+    try {
+      await paseo.agents.ref(agent.id).send(kickoff(request, task, branch, continuesFrom, poteto.use, base, existing?.workspace ?? null));
+    } catch (error) {
+      await paseo.agents.ref(agent.id).archive().catch(() => undefined);
+      throw error;
+    }
     // 킥오프를 보낸 뒤에 기록한다. 먼저 기록하면 보정 검사(reconcile)가 프롬프트 전의 쉬는 워커를 끝난 것으로 본다.
     // 그사이 요청이 취소됐거나 다시 계획됐으면 이 워커는 맡을 작업이 없다. 정리한다.
     if (!(await this.patchClaimed(request.id, task.number, branch, { agentId: agent.id, poteto: poteto.use, note: poteto.note }))) {
@@ -659,6 +705,7 @@ export class Dispatcher {
     request: CoordinatorRequest,
     task: Task,
     workspaceId: string,
+    root: string,
   ): Promise<{ workspace: ExistingWorkspace; branch: string; head: string } | "busy"> {
     const [workspaces, state] = await Promise.all([listExistingWorkspaces(paseo, task.projectId), this.store.read()]);
     const workspace = workspaces.find((item) => item.id === workspaceId);
@@ -673,7 +720,7 @@ export class Dispatcher {
       );
     }
     if (request.kind !== "read") {
-      const busy = await busyReason(paseo, workspace, request.language);
+      const busy = await busyReason(paseo, workspace, request.language, state, { requestId: request.id, taskNumber: task.number });
       if (busy) {
         if (task.note !== busy) await this.patchTask(request.id, task.number, { note: busy });
         return "busy";
@@ -688,6 +735,20 @@ export class Dispatcher {
           `${workspace.name} 이 브랜치에 있지 않아요(detached HEAD). 브랜치를 checkout 한 뒤 작업을 다시 시작해 주세요.`,
         ),
       );
+    }
+    // 기본 브랜치는 워커 브랜치가 될 수 없다 (RULES.md §1). 사람이 새 요청 창에서 직접 고른 워크스페이스만 예외다. 코디네이터가 고른
+    // 워크스페이스가 main 체크아웃이면 워커가 로컬 기본 브랜치에 바로 커밋했다 (2026-11-26 전수 검사).
+    if (request.kind === "change" && task.kind === "code" && request.workspaces[task.projectId] !== workspaceId) {
+      const defaultBranch = await remoteDefaultBranch(root).catch(() => null);
+      if (defaultBranch && checkout.branch === defaultBranch) {
+        throw new Error(
+          say(
+            request.language,
+            `${workspace.name} is on the default branch ${defaultBranch}; workers do not commit on it. Choose that workspace yourself in the new request panel if this is intended, or cancel the task.`,
+            `${workspace.name} 은 기본 브랜치 ${defaultBranch} 에 있어요. 워커는 기본 브랜치에 커밋하지 않아요. 의도한 것이면 새 요청 창에서 직접 그 워크스페이스를 고르고, 아니면 작업을 취소해 주세요.`,
+          ),
+        );
+      }
     }
     return { workspace, branch: checkout.branch, head: checkout.head };
   }
@@ -832,17 +893,26 @@ export class Dispatcher {
     });
   }
 
+  /**
+   * 작업 상태를 쓴다. 요청이 실행 중이고 작업이 취소되거나 끝나지 않았을 때만 쓴다. 워커의 턴 처리는 작업을 읽은 뒤 워커 조회를
+   * await 하는데, 그사이 취소된 작업을 review 나 blocked 로 덮어써 취소한 작업에 머지 카드가 떴다 (2026-11-26 전수 검사).
+   */
   private patchTask(requestId: string, number: number, patch: TaskPatch): Promise<void> {
-    return this.store.update((state) => ({
-      state: {
-        ...state,
-        requests: state.requests.map((request) =>
-          request.id === requestId
-            ? { ...request, tasks: request.tasks.map((task) => (task.number === number ? { ...task, ...patch } : task)) }
-            : request,
-        ),
-      },
-      result: undefined,
-    }));
+    return this.store.update((state) => {
+      const target = state.requests.find((request) => request.id === requestId);
+      const task = target?.tasks.find((item) => item.number === number);
+      if (target?.status !== "running" || !task || task.status === "canceled" || task.status === "done") return { state, result: undefined };
+      return {
+        state: {
+          ...state,
+          requests: state.requests.map((request) =>
+            request.id === requestId
+              ? { ...request, tasks: request.tasks.map((item) => (item.number === number ? { ...item, ...patch } : item)) }
+              : request,
+          ),
+        },
+        result: undefined,
+      };
+    });
   }
 }

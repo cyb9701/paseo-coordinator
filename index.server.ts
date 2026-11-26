@@ -132,8 +132,11 @@ export default function contribute(server: PluginServerContext) {
       for (const task of canceled.tasks) {
         const review = task.blocker?.review;
         if (review?.status === "running") await reviews.abandon(paseo, canceled.id, task.number, review.reviewers.map((item) => item.agentId));
-        if (task.agentId && task.status !== "done") await paseo.agents.ref(task.agentId).archive().catch(logFailure("archive worker"));
+        // 끝난(done) 작업의 세션도 닫는다. 이어 쓰기로 끝난 앞 작업의 세션이 사람의 워크스페이스에 영영 남았다 (2026-11-26 전수 검사).
+        if (task.agentId) await paseo.agents.ref(task.agentId).archive().catch(logFailure("archive worker"));
       }
+      // 읽기 조사는 plan 모드라 남길 변경이 없다. 답을 확인할 때처럼 조사 worktree 와 브랜치를 정리한다.
+      if (canceled.kind === "read") cleanupTaskWorkspaces(paseo, canceled.tasks).catch(logFailure("clean up investigations"));
     }
     return result;
   });

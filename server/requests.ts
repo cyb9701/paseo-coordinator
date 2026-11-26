@@ -1,7 +1,7 @@
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { RpcInput } from "@getpaseo/plugin";
 import type { CoordinatorRequest, cancelRequestRpc, createRequestRpc, recordInstructionRpc } from "../shared/model";
-import { continuedBy, dependentsOf, hasStarted, openCard, withCardQa } from "../shared/model";
+import { completionNeedsDecision, continuedBy, dependentsOf, hasStarted, openCard, withCardQa } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
 import type { StateStore } from "./store";
 import { queued } from "./worker-channel";
@@ -98,9 +98,25 @@ export async function createRequest(
   });
 }
 
+/**
+ * 요청을 취소한다. 사람의 결정을 기다리는 완료 카드(PR 머지, PR 에 없는 변경)가 있으면 취소하지 않는다. 취소하면 카드가 화면에서
+ * 사라지고 PR 은 GitHub 에 열린 채 남는다 (2026-11-26 전수 검사). 작업 취소(cancelTasksIn)와 같은 보호다.
+ */
 export async function cancelRequest({ id }: RpcInput<typeof cancelRequestRpc>, store: StateStore) {
   await store.update((state) => {
-    if (!state.requests.some((request) => request.id === id)) throw new Error(`Unknown request ${id}`);
+    const target = state.requests.find((request) => request.id === id);
+    if (!target) throw new Error(`Unknown request ${id}`);
+    const waiting = target.tasks.filter((task) => task.status === "review" && !task.completion?.closedAt && completionNeedsDecision(task));
+    if (target.status === "running" && waiting.length > 0) {
+      const names = waiting.map((task) => (task.completion?.pr ? `${task.number} (PR #${task.completion.pr.number})` : String(task.number))).join(", ");
+      throw new Error(
+        say(
+          target.language,
+          `Task ${names} has finished work waiting on your card. Merge it or close the pull request on GitHub and close the card first; canceling now would leave it out of sight.`,
+          `작업 ${names} 의 끝난 결과가 카드에서 결정을 기다려요. 먼저 머지하거나, GitHub 에서 PR 을 닫고 카드를 정리해 주세요. 지금 취소하면 그 결과가 화면에서 사라져요.`,
+        ),
+      );
+    }
     return {
       state: {
         ...state,

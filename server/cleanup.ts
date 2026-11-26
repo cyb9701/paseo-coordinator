@@ -1,6 +1,6 @@
 import type { PaseoApi } from "./paseo-api";
 import type { Task } from "../shared/model";
-import { deleteBranchIfPublished } from "./completion";
+import { deleteBranchIfPublished, uncommittedChanges, worktreeOf } from "./completion";
 
 /**
  * 읽기 조사처럼 끝난 뒤 남길 것이 없는 작업의 워크스페이스와 로컬 브랜치를 정리한다.
@@ -19,6 +19,11 @@ export async function cleanupTaskWorkspaces(paseo: PaseoApi, tasks: readonly Tas
     }
     if (!task.workspaceId || seen.has(task.workspaceId)) continue;
     seen.add(task.workspaceId);
+    // 조사 워커는 plan 모드지만, 그 worktree 를 사람이나 다른 세션이 썼을 수 있다. 커밋하지 않은 변경이 있거나 확인하지 못하면
+    // 지우지 않는다. 지우면 그 변경이 사라진다 (2026-11-26 전수 검사).
+    const directory = await worktreeOf(paseo, task).catch(() => undefined);
+    if (directory === undefined) continue;
+    if (directory && (await uncommittedChanges(directory).catch(() => "unknown"))) continue;
     const archived = await paseo.workspaces
       .ref(task.workspaceId)
       .archive()

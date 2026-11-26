@@ -1,5 +1,6 @@
 /// <reference types="node" />
 
+import { existsSync } from "node:fs";
 import type { PaseoApi } from "./paseo-api";
 import { defineAgentTool } from "@getpaseo/plugin/server";
 import { z } from "zod";
@@ -14,10 +15,14 @@ export const REPORT_DONE_TOOL = "report_done";
 
 type PullRequest = NonNullable<NonNullable<Task["completion"]>["pr"]>;
 
-const PR_FIELDS = "number,url,title,state,baseRefName,headRefName,additions,deletions,changedFiles,mergeable,statusCheckRollup";
+const PR_FIELDS =
+  "number,url,title,state,baseRefName,headRefName,headRefOid,headRepository,headRepositoryOwner,additions,deletions,changedFiles,mergeable,statusCheckRollup";
 
-type RawPr = Omit<PullRequest, "checks" | "readAt"> & {
+type RawPr = Omit<PullRequest, "checks" | "readAt" | "headRefOid" | "headRepository"> & {
   statusCheckRollup?: { conclusion?: string | null; state?: string | null; status?: string | null }[] | null;
+  headRefOid?: string | null;
+  headRepository?: { name?: string } | null;
+  headRepositoryOwner?: { login?: string } | null;
 };
 
 function toPullRequest(raw: RawPr): PullRequest {
@@ -45,6 +50,8 @@ function toPullRequest(raw: RawPr): PullRequest {
     mergeable: raw.mergeable,
     checks: rollup.length ? `passed ${counts.passed}, failed ${counts.failed}, pending ${counts.pending}` : null,
     readAt: new Date().toISOString(),
+    headRefOid: raw.headRefOid ?? null,
+    headRepository: raw.headRepositoryOwner?.login && raw.headRepository?.name ? `${raw.headRepositoryOwner.login}/${raw.headRepository.name}` : null,
   };
 }
 
@@ -61,7 +68,8 @@ async function findPullRequest(cwd: string, branch: string): Promise<PullRequest
  * 무관한 파일을 커밋하도록 떠밀렸다 (2026-11-26 전수 검사).
  */
 export async function uncommittedChanges(cwd: string): Promise<string | null> {
-  const lines = (await run("git", ["status", "--porcelain"], cwd))
+  // 저장소 설정 status.showUntrackedFiles=no 면 새 파일이 보이지 않아, 정리하면서 그 파일이 사라졌다 (2026-11-26 전수 검사).
+  const lines = (await run("git", ["status", "--porcelain", "--untracked-files=normal"], cwd))
     .split("\n")
     .map((line) => line.trimEnd())
     .filter((line) => line.trim() && line !== "?? paseo.json");
@@ -99,26 +107,52 @@ async function readPullRequest(cwd: string, url: string): Promise<PullRequest> {
   return toPullRequest(JSON.parse(await run("gh", ["pr", "view", url, "--json", PR_FIELDS], cwd)) as RawPr);
 }
 
+const refExists = (cwd: string, ref: string) => run("git", ["rev-parse", "--verify", "--quiet", ref], cwd).then(() => true, () => false);
+
 /**
- * worktree 에 PR 에 담기지 않은 변경이 남았는지. 커밋하지 않은 파일, 또는 원격의 다른 브랜치(main 포함)에 없는 커밋.
+ * worktree 에 PR 에 담기지 않은 변경이 남았는지. 커밋하지 않은 파일, 또는 기준 브랜치에 없는 커밋.
  * PR 없이 '끝났다'고 보고한 워커가 정말 바꾼 것이 없는지 확인할 때 쓴다.
+ * 기준 브랜치(원격과 로컬)에서부터 센다. 예전처럼 '어느 원격에든 있으면 게시됨'으로 세면, 워커가 다른 원격 브랜치로 push 하고
+ * PR 을 열지 않은 작업이 '바뀐 것 없음'이 되어 확인 한 번에 worktree 와 함께 정리됐다 (2026-11-26 전수 검사).
  */
 async function unpublishedWork(cwd: string, branch: string, baseBranch: string | null): Promise<string | null> {
   const dirty = await uncommittedChanges(cwd);
   if (dirty) return dirty;
-  // 기준 브랜치가 원격에 없는 로컬 브랜치면 그 커밋은 워커가 만든 것이 아니다. 빼야 워커의 커밋만 센다.
-  const localBase = baseBranch && (await run("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${baseBranch}`], cwd).then(() => true, () => false));
+  // 기준 브랜치가 로컬에만 있으면 그 커밋은 워커가 만든 것이 아니다. 빼야 워커의 커밋만 센다.
+  const bases = baseBranch
+    ? (
+        await Promise.all(
+          [`refs/remotes/origin/${baseBranch}`, `refs/heads/${baseBranch}`].map(async (ref) => ((await refExists(cwd, ref)) ? ref : null)),
+        )
+      ).filter((ref): ref is string => ref !== null)
+    : [];
   const ahead = Number(
-    // --remotes 앞의 --exclude 패턴은 refs/remotes/ 를 뺀 이름으로 써야 걸린다 (git 문서; refs/remotes/… 로 쓰면 아무것도 제외되지 않았다).
     (
       await run(
         "git",
-        ["rev-list", "--count", "HEAD", "--not", `--exclude=origin/${branch}`, "--remotes", ...(localBase ? [`refs/heads/${baseBranch}`] : [])],
+        // 기준을 모르는 예전 기록은 원격 어딘가에 있는 커밋을 게시된 것으로 본다. --exclude 는 refs/remotes/ 를 뺀 이름으로 써야 걸린다.
+        bases.length ? ["rev-list", "--count", "HEAD", "--not", ...bases] : ["rev-list", "--count", "HEAD", "--not", `--exclude=origin/${branch}`, "--remotes"],
         cwd,
       )
     ).trim(),
   );
   return ahead > 0 ? `${ahead} commit(s) on ${branch} that no pull request carries` : null;
+}
+
+/** ancestor 가 descendant 의 조상(또는 같은 커밋)인지. 커밋이 없거나 확인하지 못하면 false. */
+async function isAncestor(cwd: string, ancestor: string, descendant: string): Promise<boolean> {
+  return run("git", ["merge-base", "--is-ancestor", ancestor, descendant], cwd).then(
+    () => true,
+    () => false,
+  );
+}
+
+/** 지금 checkout 된 브랜치. detached HEAD 면 null. */
+async function currentBranch(cwd: string): Promise<string | null> {
+  return run("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], cwd).then(
+    (out) => out.trim() || null,
+    () => null,
+  );
 }
 
 export { continuedBy };
@@ -166,7 +200,9 @@ export const reportDoneInput = z.object({
     .min(1)
     .nullable()
     .default(null)
-    .describe("Only when the human's request says not to commit, push or open a pull request: quote that sentence of the request word for word."),
+    .describe(
+      "When the human's request says not to commit, push or open a pull request, quote that sentence of the request word for word. When your kickoff says the base branch is local only, say so.",
+    ),
 });
 
 /** 따옴표와 공백 차이를 무시하고 비교한다. 워커가 인용 부호를 붙이거나 줄바꿈을 바꿔도 같은 문장으로 본다. */
@@ -205,6 +241,10 @@ export async function recordCompletion(
   if (request.kind === "read") {
     return { text: "This is a read-only investigation: end with your report as plain text instead.", isError: true };
   }
+  // 취소됐거나 끝난 작업의 워커가 늦게 보낸 보고다. 받으면 취소한 작업에 머지 카드가 뜬다 (2026-11-26 전수 검사).
+  if (request.status !== "running" || (task.status !== "running" && task.status !== "blocked")) {
+    return { text: `This task is ${task.status === "running" ? "no longer active" : task.status}; nothing was reported. End your turn.`, isError: true };
+  }
   if (!task.branch) return { text: "This task has no branch recorded; report it with report_blocker.", isError: true };
   let pr: PullRequest | null = null;
   let unpublished: string | null = null;
@@ -234,21 +274,36 @@ export async function recordCompletion(
           isError: true,
         };
       }
-      const current = await run("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], agent.cwd).then((out) => out.trim(), () => null);
+      const current = await currentBranch(agent.cwd);
       if (current !== task.branch) {
         return {
           text: `This workspace is on ${current ?? "a detached HEAD"}, not ${task.branch}. Do not switch branches in the human's workspace; report it with report_blocker.`,
           isError: true,
         };
       }
+      // 시작할 때의 HEAD 가 지금 HEAD 의 조상이 아니면 reset·rebase·amend 로 사람의 기록이 바뀐 것이다. '바뀐 것 없음'으로 받으면
+      // 사람의 커밋이 사라진 것을 아무도 모른다 (2026-11-26 전수 검사).
+      if (task.startCommit && !(await isAncestor(agent.cwd, task.startCommit, "HEAD"))) {
+        return {
+          text: `The history of ${task.branch} changed under you: ${task.startCommit.slice(0, 7)}, where you started, is no longer in it (reset, rebase or amend). Do not rewrite the human's commits; report it with report_blocker.`,
+          isError: true,
+        };
+      }
       if (!continuedBy(request, task)) {
-        // 같은 워크스페이스를 이어 쓴 앞 작업들의 커밋도 이 카드가 보여 준다. 가장 먼저 시작한 작업의 HEAD 부터 센다.
-        const start = request.tasks
-          .filter((item) => item.existingWorkspaceId === task.existingWorkspaceId && item.startCommit && item.status !== "canceled")
+        // 같은 워크스페이스를 이어 쓴 앞 작업들의 커밋도 이 카드가 보여 준다. 이 사슬에서 가장 먼저 시작한 작업의 HEAD 부터 센다.
+        // 워크스페이스 단위로 세면 이전 요청의 작업이나 사람의 커밋까지 이 작업의 커밋으로 보였다.
+        const start = chainEndingAt(request, task)
+          .filter((item) => item.startCommit)
           .sort((a, b) => a.number - b.number)[0]?.startCommit;
         const commits = start ? Number((await run("git", ["rev-list", "--count", `${start}..HEAD`], agent.cwd)).trim()) : 0;
         noPrSource = commits > 0 ? "existingWorkspace" : "noChanges";
       }
+    } else if ((await currentBranch(agent.cwd)) !== task.branch) {
+      // 다른 브랜치로 옮긴 worktree 는 이 작업의 커밋과 PR 을 판정할 수 없다. 그대로 받으면 '바뀐 것 없음'으로 정리될 수 있다.
+      return {
+        text: `This worktree is not on ${task.branch}. Switch back to ${task.branch} (git switch ${task.branch}) and call report_done again, or report with report_blocker.`,
+        isError: true,
+      };
     } else if (!continuedBy(request, task)) {
       pr = await findPullRequest(agent.cwd, task.branch);
       if (!pr) {
@@ -276,6 +331,12 @@ export async function recordCompletion(
         }
       } else if (pr.state !== "OPEN") {
         return { text: `The pull request for ${task.branch} is ${pr.state}. Open a new one, then call report_done again.`, isError: true };
+      } else if (task.baseBranch && pr.baseRefName !== task.baseBranch) {
+        // 다른 브랜치를 대상으로 연 PR 을 머지하면 기준 브랜치의 커밋까지 엉뚱한 곳에 들어간다 (2026-11-26 전수 검사).
+        return {
+          text: `Pull request #${pr.number} targets ${pr.baseRefName}, but this task's base is ${task.baseBranch}. Change it (gh pr edit ${pr.number} --base ${task.baseBranch}), then call report_done again.`,
+          isError: true,
+        };
       } else {
         const differs = await differsFromPr(agent.cwd, pr.url);
         if (differs) {
@@ -324,10 +385,26 @@ export function reportDoneTool(store: StateStore) {
     name: REPORT_DONE_TOOL,
     title: "Report the task done",
     description:
-      "Call this once your task is finished and verified, as your last action before ending the turn. If you are the last task on your branch, push the branch and open a pull request first: the plugin finds the pull request by your branch. Operation tasks have no pull request. Give what you did, how you verified it (commands and results), the reversible choices you made yourself with why, and anything left.",
+      "Call this once your task is finished and verified, as your last action before ending the turn. If your kickoff tells you to open a pull request, push the branch and open it first: the plugin finds the pull request by your branch. Operation tasks, tasks in the human's existing workspace, tasks on a local-only base branch and tasks that another task continues finish without a pull request, as your kickoff says. Give what you did, how you verified it (commands and results), the reversible choices you made yourself with why, and anything left.",
     input: reportDoneInput,
     execute: (input, { agent }) => recordCompletion(store, agent, input),
   });
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * 작업의 worktree 폴더. 워커 세션의 cwd 를 먼저 보고, 세션이 없으면 워크스페이스의 폴더를 본다. 폴더가 디스크에 없으면(이미 지워짐)
+ * 잃을 것이 없으므로 null. 조회가 실패하면 던진다. 실패를 '없음'으로 치면 확인 없이 머지·정리한다.
+ */
+export async function worktreeOf(paseo: PaseoApi, task: Task): Promise<string | null> {
+  let directory: string | null = null;
+  const snapshot = task.agentId ? await paseo.agents.ref(task.agentId).refresh() : null;
+  if (snapshot) directory = snapshot.agent.cwd ?? null;
+  else if (task.workspaceId) directory = (await paseo.workspaces.ref(task.workspaceId).refresh())?.workspaceDirectory ?? null;
+  return directory && existsSync(directory) ? directory : null;
 }
 
 /**
@@ -354,15 +431,28 @@ export class CompletionRunner {
     }
     const lang = request.language;
     if (input.action === "revise") return this.revise(paseo, request, task, input.instruction);
+    // gh 를 부르는 몇 초 사이에 코디네이터 메시지나 되돌리기로 작업이 다시 일하게 될 수 있다. 그때 머지하고 정리하면 막 재개한
+    // 워커의 worktree 가 지워진다 (2026-11-26 전수 검사). 머지와 정리 직전에 카드가 그대로인지 다시 본다.
+    const stillOpen = async () => {
+      const latest = (await this.store.read()).requests.find((item) => item.id === request.id)?.tasks.find((item) => item.number === task.number);
+      return latest?.status === "review" && !latest.completion?.closedAt && latest.completion?.at === completion.at;
+    };
+    const changed = () => new Error(say(lang, "The task changed while the card was being closed. Look at it again.", "카드를 닫는 사이 작업이 바뀌었어요. 다시 확인해 주세요."));
 
     const projects = (await paseo.projects.list()).projects;
     const root = projects.find((item) => item.projectId === task.projectId)?.projectRootPath;
     if (!root) throw new Error(say(lang, `Project ${task.projectId} is not registered on this host.`, `프로젝트 ${task.projectId} 가 이 호스트에 등록돼 있지 않아요.`));
+    // 확인하지 못한 것을 '차이 없음'으로 치면 push 하지 않은 커밋이 머지·정리와 함께 사라진다 (2026-11-26 전수 검사). 확인이 실패하면 멈춘다.
+    const worktree = await worktreeOf(paseo, task).catch((error: unknown) => {
+      throw new Error(say(lang, `Could not find the worker's worktree: ${message(error)}`, `워커의 worktree 를 확인하지 못했어요: ${message(error)}`));
+    });
+    let mergedHead: string | null = null;
+    let closedUnmerged = false;
     if (completion.pr) {
-      // 카드가 뜬 뒤 워커가 더 고쳤을 수 있다. worktree 가 남아 있으면 PR 과 같은지 다시 본다.
-      const worktree = task.agentId ? (await paseo.agents.ref(task.agentId).refresh().catch(() => null))?.agent.cwd : null;
       if (worktree) {
-        const differs = await differsFromPr(worktree, completion.pr.url).catch(() => null);
+        const differs = await differsFromPr(worktree, completion.pr.url).catch((error: unknown) => {
+          throw new Error(say(lang, `Could not compare the worktree with the pull request: ${message(error)}`, `worktree 와 PR 을 비교하지 못했어요: ${message(error)}`));
+        });
         if (differs) {
           throw new Error(
             say(
@@ -374,14 +464,33 @@ export class CompletionRunner {
         }
       }
       const pr = await readPullRequest(root, completion.pr.url);
-      if (pr.state === "CLOSED") throw new Error(say(lang, `Pull request #${pr.number} was closed without merging.`, `PR #${pr.number} 이 머지되지 않고 닫혔어요.`));
       if (pr.state === "OPEN") {
+        // 카드가 보여 준 커밋만 머지한다. 보고 뒤에 워커가 더 push 했으면 사람이 보지 않은 커밋이다.
+        if (completion.pr.headRefOid && pr.headRefOid && pr.headRefOid !== completion.pr.headRefOid) {
+          throw new Error(
+            say(
+              lang,
+              `Pull request #${pr.number} has new commits since the worker reported (${completion.pr.headRefOid.slice(0, 7)} → ${pr.headRefOid.slice(0, 7)}). Send the worker an instruction to report again so the card shows what will be merged.`,
+              `워커가 보고한 뒤 PR #${pr.number} 에 새 커밋이 올라왔어요 (${completion.pr.headRefOid.slice(0, 7)} → ${pr.headRefOid.slice(0, 7)}). 수정 지시로 다시 보고하게 해서, 머지할 내용을 카드에서 확인해 주세요.`,
+            ),
+          );
+        }
+        if (task.baseBranch && pr.baseRefName !== task.baseBranch) {
+          throw new Error(
+            say(
+              lang,
+              `Pull request #${pr.number} targets ${pr.baseRefName}, not ${task.baseBranch}. Ask the worker to change its base.`,
+              `PR #${pr.number} 의 대상이 ${task.baseBranch} 가 아니라 ${pr.baseRefName} 이에요. 수정 지시로 대상 브랜치를 고치게 해 주세요.`,
+            ),
+          );
+        }
         if (pr.mergeable === "CONFLICTING") {
           throw new Error(
             say(lang, `Pull request #${pr.number} has conflicts with ${pr.baseRefName}. Ask the worker to fix them.`, `PR #${pr.number} 이 ${pr.baseRefName} 과 충돌해요. 수정 지시로 워커에게 고쳐 달라고 해 주세요.`),
           );
         }
-        await run("gh", ["pr", "merge", pr.url, "--squash"], root);
+        if (!(await stillOpen())) throw changed();
+        await run("gh", ["pr", "merge", pr.url, "--squash", ...(pr.headRefOid ? ["--match-head-commit", pr.headRefOid] : [])], root);
         // merge queue 가 있는 저장소에서는 명령이 성공해도 대기열에 들어갔을 뿐이다. 그때 브랜치를 지우면 PR 이 닫힌다.
         // 머지가 확인될 때까지 카드를 닫지 않는다. 다시 누르면 이미 머지된 PR 로 보고 정리만 한다.
         const after = await readPullRequest(root, completion.pr.url);
@@ -394,73 +503,101 @@ export class CompletionRunner {
             ),
           );
         }
+        mergedHead = after.headRefOid ?? pr.headRefOid;
+      } else if (pr.state === "MERGED") {
+        mergedHead = pr.headRefOid;
+      } else {
+        // 사람이 GitHub 에서 PR 을 닫았다. 예전에는 머지 버튼이 매번 오류를 내서 이 카드를 닫을 길이 없었고, 이 작업에 기대는
+        // 작업도 영원히 기다렸다 (2026-11-26 전수 검사). 머지하지 않고 카드만 닫는다. 변경이 남은 worktree 와 브랜치는 그대로 둔다.
+        closedUnmerged = true;
       }
-      // 저장소 설정으로 이미 지워졌으면 실패해도 된다.
-      await run("gh", ["api", "-X", "DELETE", `repos/{owner}/{repo}/git/refs/heads/${pr.headRefName}`], root).catch(() => undefined);
+      if (mergedHead !== null) {
+        // 저장소 설정으로 이미 지워졌으면 실패해도 된다. fork 에서 연 PR 이면 head 저장소의 브랜치를 지운다.
+        const repo = pr.headRepository ?? "{owner}/{repo}";
+        await run("gh", ["api", "-X", "DELETE", `repos/${repo}/git/refs/heads/${pr.headRefName}`], root).catch(() => undefined);
+      }
     }
-    // 이 브랜치를 같이 쓴 작업(앞 작업들)도 함께 끝낸다. 워크스페이스는 하나다.
-    // 취소된 작업은 취소로 남긴다. 완료로 바꾸면 하지 않은 일이 끝난 것처럼 보인다.
-    // 사람의 기존 워크스페이스는 이 요청의 다른 작업(뒤에 올 운영 작업 등)도 쓰므로, 이 작업으로 이어진 사슬만 끝낸다.
-    const sharing = task.existingWorkspaceId
-      ? chainEndingAt(request, task)
-          .filter((item) => item.status === "done")
-          .map((item) => item.number)
-      : request.tasks
-          .filter((item) => item.workspaceId && item.workspaceId === task.workspaceId && item.status !== "canceled")
-          .map((item) => item.number);
-    const numbers = [...new Set([task.number, ...sharing])];
+    // PR 없이 끝난 카드는 보고 뒤에 worktree 에 변경이 생겼을 수 있다(워커가 다시 일했거나 사람이 썼다). 정리 직전에 다시 보고, 있으면 남긴다.
+    let kept: string | null = completion.unpublished;
+    if (!completion.pr && !task.existingWorkspaceId && worktree && !kept) {
+      kept = await (task.kind === "operation" || !task.branch ? uncommittedChanges(worktree) : unpublishedWork(worktree, task.branch, task.baseBranch)).catch(
+        (error: unknown) => `could not check the worktree: ${message(error)}`,
+      );
+    }
+    if (closedUnmerged) kept = kept ?? `pull request #${completion.pr!.number} was closed without merging`;
+    // 이 브랜치를 같이 쓴 작업(앞 작업들)도 함께 끝낸다. 이 작업까지 worktree 를 넘겨준 사슬만 끝낸다. 워크스페이스 id 로 묶으면
+    // 같은 worktree 를 이어 받은 뒤 작업이 일하는 중에 완료가 됐다 (2026-11-26 전수 검사). 취소된 작업은 취소로 남긴다.
+    const numbers = chainEndingAt(request, task)
+      .filter((item) => item.number === task.number || item.status === "done")
+      .map((item) => item.number);
     const at = new Date().toISOString();
-    await this.store.update((current) => ({
-      state: {
-        ...current,
-        requests: patchTask(current, request.id, numbers, (item) => ({
-          ...item,
-          status: "done" as const,
-          note: null,
-          completion: item.completion ? { ...item.completion, closedAt: at } : item.completion,
-          decisions:
-            item.number === task.number
-              ? [
-                  ...item.decisions,
-                  {
-                    summary: completion.pr
-                      ? `Merged #${completion.pr.number} (squash)`
-                      : completion.noPrSource === "existingWorkspace"
-                        ? `Confirmed the commits on ${task.branch}`
-                      : completion.noPrSource === "operation"
-                        ? "Confirmed the finished operation task"
-                        : completion.noPrReason
-                          ? `Confirmed without a pull request: ${completion.noPrReason}`
-                          : "Confirmed: finished without changes",
-                    by: "human" as const,
-                    at,
-                    qa: answeredQa(completion.qa),
-                  },
-                ]
-              : item.decisions,
-        })),
-      },
-      result: undefined,
-    }));
+    const summary = closedUnmerged
+      ? `Closed: pull request #${completion.pr!.number} was closed without merging; the workspace is kept`
+      : completion.pr
+        ? `Merged #${completion.pr.number} (squash)`
+        : completion.noPrSource === "existingWorkspace"
+          ? `Confirmed the commits on ${task.branch}`
+          : completion.noPrSource === "operation"
+            ? "Confirmed the finished operation task"
+            : completion.noPrReason
+              ? `Confirmed without a pull request: ${completion.noPrReason}`
+              : "Confirmed: finished without changes";
+    // 머지는 이미 일어났으면 기록해야 한다. 머지가 없는 카드는 그사이 작업이 바뀌었으면 닫지 않는다.
+    const saved = await this.store.update((current) => {
+      const latest = current.requests.find((item) => item.id === request.id)?.tasks.find((item) => item.number === task.number);
+      const open = latest?.status === "review" && !latest.completion?.closedAt && latest.completion?.at === completion.at;
+      if (!open && mergedHead === null) return { state: current, result: false };
+      return {
+        state: {
+          ...current,
+          requests: patchTask(current, request.id, numbers, (item) => ({
+            ...item,
+            status: "done" as const,
+            note: null,
+            completion: item.completion ? { ...item.completion, closedAt: at } : item.completion,
+            decisions:
+              item.number === task.number
+                ? [
+                    ...item.decisions,
+                    {
+                      summary: kept && !closedUnmerged && !completion.unpublished ? `${summary}; kept the workspace: ${kept}` : summary,
+                      by: "human" as const,
+                      at,
+                      qa: answeredQa(completion.qa),
+                    },
+                  ]
+                : item.decisions,
+          })),
+        },
+        result: open,
+      };
+    });
+    if (!saved && mergedHead === null) throw changed();
     // 사람의 기존 워크스페이스와 그 브랜치는 사람의 것이다. 워커 세션만 닫는다.
     if (task.existingWorkspaceId) {
       const agentIds = request.tasks.filter((item) => numbers.includes(item.number) && item.agentId).map((item) => item.agentId!);
       for (const agentId of agentIds) await paseo.agents.ref(agentId).archive().catch(() => undefined);
     }
-    // PR 에 담기지 않은 변경이 남았으면 워크스페이스를 지우지 않는다. 지우면 그 변경이 사라진다.
-    else if (task.workspaceId && !completion.unpublished) {
+    // PR 에 담기지 않은 변경이 남았으면 워크스페이스를 지우지 않는다. 지우면 그 변경이 사라진다. 저장하는 사이 작업이 다시 일하게
+    // 됐으면(saved false) 그 워커의 worktree 이므로 지우지 않는다.
+    else if (task.workspaceId && !kept && saved) {
       const archived = await paseo.workspaces
         .ref(task.workspaceId)
         .archive()
         .then(() => true)
         .catch((error: unknown) => (console.error(`[coordinator] could not archive workspace ${task.workspaceId}`, error), false));
-      // 머지된 브랜치는 로컬에도 남길 이유가 없다. worktree 가 지워진 뒤에만 지울 수 있다.
-      // squash 머지라 git 은 머지된 것으로 알아보지 못하므로 -D 로 지운다. 내용은 기준 브랜치의 squash 커밋에 있다.
-      if (archived && completion.pr && task.branch) {
-        await run("git", ["branch", "-D", task.branch], root).catch((error: unknown) =>
-          console.error(`[coordinator] could not delete local branch ${task.branch}`, error),
-        );
-      } else if (archived && task.branch) {
+      if (archived && mergedHead !== null && task.branch) {
+        // 머지된 브랜치는 로컬에도 남길 이유가 없다. worktree 가 지워진 뒤에만 지울 수 있다. squash 머지라 git 은 머지된 것으로
+        // 알아보지 못하므로 -D 로 지운다. 다만 로컬 브랜치에 머지된 PR 에 없는 커밋이 있으면 남긴다.
+        const tip = await run("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${task.branch}`], root).then((out) => out.trim(), () => null);
+        if (tip && (tip === mergedHead || (await isAncestor(root, tip, mergedHead)))) {
+          await run("git", ["branch", "-D", task.branch], root).catch((error: unknown) =>
+            console.error(`[coordinator] could not delete local branch ${task.branch}`, error),
+          );
+        } else if (tip) {
+          console.error(`[coordinator] kept local branch ${task.branch}: it has commits the merged pull request does not`);
+        }
+      } else if (archived && task.branch && !completion.pr) {
         // PR 없이 끝난 작업의 브랜치도 남기지 않는다. 다만 원격 어디에도 없는 커밋이 있으면 지우지 않는다 (r15 뒤 coord/r15-*
         // 브랜치 16개가 남았다, 2026-11-26).
         await deleteBranchIfPublished(root, task.branch);

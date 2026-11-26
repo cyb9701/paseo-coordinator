@@ -123,6 +123,13 @@ export const pullRequestSchema = z.object({
   /** 체크 요약. 'passed 3, failed 1, pending 0' 처럼 플러그인이 만든다. 체크가 없으면 null. */
   checks: z.string().nullable(),
   readAt: z.string(),
+  /**
+   * 보고할 때 PR 의 마지막 커밋. 머지는 이 커밋일 때만 한다. 카드가 뜬 뒤 워커가 더 push 하면 사람이 보지 않은 커밋이 머지될 수
+   * 있었다 (2026-11-26 전수 검사). 예전 카드에는 없다.
+   */
+  headRefOid: z.string().nullable().default(null),
+  /** PR 의 head 브랜치가 있는 저장소(owner/name). 머지 뒤 원격 브랜치를 지울 때 쓴다. fork 에서 연 PR 이면 기본 저장소와 다르다. */
+  headRepository: z.string().nullable().default(null),
 });
 
 /**

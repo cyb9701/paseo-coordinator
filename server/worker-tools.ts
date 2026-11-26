@@ -34,6 +34,8 @@ export async function recordBlocker(
       ...request,
       tasks: request.tasks.map((task) => {
         if (task.agentId !== agentId) return task;
+        // 취소됐거나 끝난 작업의 워커가 멈추기 직전에 보낸 보고다. 받으면 취소한 작업이 결정 카드로 되살아난다 (2026-11-26 전수 검사).
+        if (request.status !== "running" || (task.status !== "running" && task.status !== "blocked")) return task;
         const review = task.blocker?.review;
         hit = {
           requestId: request.id,
@@ -83,7 +85,7 @@ export function reportBlockerTool(
     input: reportBlockerInput,
     execute: async (input, { agent, paseo }) => {
       const found = await recordBlocker(store, agent.id, input);
-      if (!found) return { text: "You are not a coordinator worker; nothing was reported.", isError: true };
+      if (!found) return { text: "Nothing was reported: you are not an active coordinator worker (your task may have been canceled or finished). End your turn.", isError: true };
       if (found.reviewers.length) onReviewReplaced(paseo, found.requestId, found.taskNumber, found.reviewers);
       onReported(paseo);
       return { text: "Reported to the coordinator. Stop now and end your turn; the decision will arrive in this conversation." };

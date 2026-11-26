@@ -1,4 +1,5 @@
 import type { PaseoApi } from "./paseo-api";
+import type { CoordinatorState } from "../shared/model";
 import { uncommittedChanges } from "./completion";
 import { run } from "./run";
 import { say } from "./say";
@@ -36,7 +37,8 @@ export async function listExistingWorkspaces(paseo: PaseoApi, projectId?: string
       projectId: entry.projectId,
       name: entry.title ?? entry.name,
       kind: entry.workspaceKind,
-      directory: entry.workspaceDirectory ?? entry.projectRootPath,
+      // 폴더가 없는 워크스페이스를 프로젝트 루트로 대신하면 엉뚱한 폴더의 브랜치와 변경을 확인한다. 비워 두고 쓸 수 없다고 본다.
+      directory: entry.workspaceDirectory ?? "",
     }));
 }
 
@@ -50,6 +52,7 @@ export function workspaceProblem(
   if (!workspace) return `workspace ${workspaceId} is not an active workspace on this host`;
   if (workspace.projectId !== projectId) return `workspace ${workspaceId} belongs to project ${workspace.projectId}, not ${projectId}`;
   if (!GIT_KINDS.has(workspace.kind)) return `workspace ${workspaceId} is not a git checkout`;
+  if (!workspace.directory) return `workspace ${workspaceId} has no directory`;
   if (pluginIds.has(workspaceId)) return `workspace ${workspaceId} is a worktree the plugin made for another task`;
   return null;
 }
@@ -79,7 +82,27 @@ export async function busyReason(
   paseo: PaseoApi,
   workspace: ExistingWorkspace,
   language: "en" | "ko",
+  state: Pick<CoordinatorState, "requests">,
+  self: { requestId: string; taskNumber: number },
 ): Promise<string | null> {
+  // 한 워크스페이스는 한 번에 한 워커만 쓴다. 지금 쉬고 있어도 막힘 카드나 완료 카드를 기다리는 작업은 사람이 답하면 다시 일한다.
+  // 실행 중인 에이전트만 세면 그사이 다른 요청의 워커가 들어와 두 워커가 같은 작업 트리를 고쳤다 (2026-11-26 전수 검사).
+  for (const request of state.requests) {
+    if (request.status !== "running") continue;
+    const holder = request.tasks.find(
+      (task) =>
+        (task.existingWorkspaceId === workspace.id || task.workspaceId === workspace.id) &&
+        (task.status === "running" || task.status === "blocked" || (task.status === "review" && !task.completion?.closedAt)) &&
+        !(request.id === self.requestId && task.number === self.taskNumber),
+    );
+    if (holder) {
+      return say(
+        language,
+        `Waiting: task ${holder.number} (${holder.name}) of ${request.id} is still open in ${workspace.name}. This task starts when that one is finished or its card is closed.`,
+        `기다리는 중: ${workspace.name} 에서 ${request.id} 의 작업 ${holder.number} (${holder.name}) 이 아직 끝나지 않았어요. 그 작업이 끝나거나 카드를 닫으면 시작해요.`,
+      );
+    }
+  }
   // 확인하지 못했으면 시작하지 않고 기다린다. 막힘으로 두면 잠깐의 연결 문제로 사람이 다시 시작을 눌러야 한다.
   const listed = await paseo.agents.list({ filter: { statuses: ["running", "initializing"] }, page: { limit: 200 } }).catch(() => null);
   if (!listed) {
@@ -91,7 +114,11 @@ export async function busyReason(
   }
   const working = listed.entries
     .map((entry) => entry.agent)
-    .filter((agent) => !agent.archivedAt && (agent.workspaceId === workspace.id || agent.cwd === workspace.directory));
+    .filter(
+      (agent) =>
+        !agent.archivedAt &&
+        (agent.workspaceId === workspace.id || agent.cwd === workspace.directory || agent.cwd.startsWith(`${workspace.directory}/`)),
+    );
   if (working.length > 0) {
     const names = working.map((agent) => agent.title ?? agent.id).join(", ");
     return say(
