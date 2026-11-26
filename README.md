@@ -4,12 +4,9 @@ A [Paseo](https://paseo.sh) plugin that keeps you from becoming the bottleneck w
 
 [한국어 소개](OVERVIEW.ko.md)
 
-<p>
-  <img src="assets/merge-card.png" alt="Merge card: the request, the task, the worker's report with verification and its own choices, the pull request, and a squash-merge button" width="49%">
-  <img src="assets/worker-question-card.png" alt="Worker question card: the request, what the worker reported, the coordinator's view with rules, options with result, risk and undo, and decision buttons" width="49%">
-</p>
+![Progress board: one row per request with its grade and projects, and task cards in columns ordered by how much they wait on you](assets/progress-board.png)
 
-*Left: a merge card after a worker finished. Right: a worker question that needed a person.*
+*Progress board. Each request is a row; its tasks sit in the column that says who they are waiting on: you, the coordinator and its reviewers, a worker, or nothing yet.*
 
 ## How it works
 
@@ -40,9 +37,19 @@ Grade A changes always wait for you. Automatic answers for a rule stop after you
 | Pull requests to merge | |
 | Stopped tasks, permission requests and errors | |
 
+<p>
+  <img src="assets/inbox-needs-reaction.png" alt="Needs reaction: a coordinator question card with options and a recommendation for each question, followed by a worker question card" width="49%">
+  <img src="assets/inbox-to-review.png" alt="To review: an automatic decision card with its evidence and three passing reviewers, an answer card for a read-only request, and a started-request card with the plan" width="49%">
+</p>
+
 Every card reads top to bottom: your request, the task, what was found, the recommendation with evidence, risks and how to undo it, then the decision and its buttons. You can pick the recommendation, write your own instruction, or ask the coordinator first; the questions and answers stay in the task's decision record.
 
-The progress board shows each request as a row, with columns ordered by how much they wait on you.
+<p>
+  <img src="assets/worker-question-card.png" alt="Worker question card: what the worker reported and checked, the coordinator's view with the rule that sent it to you, options with result, risk and undo, and a question already answered by the coordinator" width="49%">
+  <img src="assets/merge-card.png" alt="Merge card: the worker's report with verification and the choices it made on its own, the pull request with its size and checks, and a squash-merge button" width="49%">
+</p>
+
+*Left: a worker question that needs a person, with a question you already asked the coordinator. Right: a finished task waiting for you to merge its pull request.*
 
 ## Requirements
 
@@ -61,11 +68,21 @@ A registry listing is under review ([getpaseo/plugins#3341](https://github.com/g
 
 ## Setup
 
-Open the Coordinator screen from the sidebar and go to **Settings** (top right):
+Open **Coordinator** from the sidebar. The badge counts cards that need your reaction.
+
+<img src="assets/sidebar.png" alt="Sidebar with the Coordinator item and a badge showing 4" width="240">
+
+Go to **Settings** (top right):
 
 1. Choose the projects the coordinator may use. With none selected it starts no workers.
 2. Pick the model and effort for the coordinator, the workers and the reviewers.
 3. Choose whether workers use `/poteto-mode`, and the output language for workspace names and cards.
+
+<img src="assets/settings.png" alt="Settings: coordinator model and effort, worker model and effort, the /poteto-mode switch, and reviewer models" width="60%">
+
+Then press **+ New request**, describe what you want, and optionally pick projects and a done criterion. Leave projects empty to let the coordinator choose among the allowed ones.
+
+<img src="assets/new-request.png" alt="New request panel: a text box for the request, project choices limited to the allowed projects, and an optional done criterion" width="60%">
 
 Change workers run in Claude auto mode, so your Claude permission rules still decide which commands ask you. Add `ask` rules for anything you want to see first, such as `Bash(gh pr merge *)`. Workers are told never to merge, deploy, write to databases or push to other branches, and to report such needs instead.
 

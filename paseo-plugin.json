@@ -3,8 +3,12 @@
   "name": "Coordinator",
   "description": "Turns one request into coordinated coding-agent work across your projects and brings you only the decisions that need a person.",
   "media": [
+    "assets/inbox-needs-reaction.png",
+    "assets/progress-board.png",
+    "assets/worker-question-card.png",
     "assets/merge-card.png",
-    "assets/worker-question-card.png"
+    "assets/new-request.png",
+    "assets/settings.png"
   ],
   "requirements": {
     "paseo": ">=0.17.4"
