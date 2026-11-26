@@ -4,14 +4,14 @@ import { useState } from "react";
 import { Text, TextInput, View } from "react-native";
 import { type CoordinatorRequest, acknowledgeRpc, revisePlanRpc, requestProjectIds } from "../shared/model";
 import { columnColor } from "./agent-state";
-import { Lines, Row } from "./plan-card";
 import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
-import { Chip, CtaButton, type ViewContext } from "./ui";
+import { Chip, CtaButton, Decide, Fold, Lines, Row, type ViewContext } from "./ui";
 
 /**
  * 답변 카드 (확인 필요). 읽기 요청에 코디네이터가 직접 쓴 답이다. 등급도 승인도 없다 (RULES.md §2.0).
- * 읽는 순서: 내 요청 → 추가 질문 → 답변 → 읽은 파일 → 해석과 가정 → 결정할 것 → 버튼.
+ * 읽는 순서: 내 요청 → 추가 질문 → 답변 → 해석과 가정 → 자세히 보기(읽은 파일) → 결정할 것 → 버튼.
+ * 해석과 가정은 접지 않는다. 답이 틀릴 수 있는 곳이라 끝내기 전에 봐야 한다 (RULES.md §12 확인할 것).
  */
 export function AnswerCard({ request, ctx }: { request: CoordinatorRequest; ctx: ViewContext }) {
   const acknowledge = useRpc(acknowledgeRpc);
@@ -66,24 +66,21 @@ export function AnswerCard({ request, ctx }: { request: CoordinatorRequest; ctx:
           {answer.text}
         </Text>
       </Row>
-      {answer.sources.length > 0 ? (
-        <Row label={ctx.t("answerCard.sources")} ctx={ctx}>
-          <Lines items={answer.sources} ctx={ctx} />
-        </Row>
-      ) : null}
       {answer.unknowns.length > 0 ? (
         <Row label={ctx.t("answerCard.unknowns")} ctx={ctx}>
           <Lines items={answer.unknowns} ctx={ctx} />
         </Row>
       ) : null}
+      <Fold
+        ctx={ctx}
+        items={[
+          answer.sources.length > 0
+            ? { label: ctx.t("answerCard.sources"), count: answer.sources.length, content: <Lines items={answer.sources} ctx={ctx} /> }
+            : null,
+        ]}
+      />
 
-      <View style={{ borderTopWidth: 1, borderColor: ctx.theme.colors.border, paddingTop: 12 }}>
-        <Row label={ctx.t("inbox.decide")} ctx={ctx}>
-          <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>
-            {ctx.t("answerCard.decide")}
-          </Text>
-        </Row>
-      </View>
+      <Decide question={ctx.t("answerCard.decide")} ctx={ctx} />
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         <CtaButton label={ctx.t("answerCard.acknowledge")} tone="primary" disabled={busy} theme={ctx.theme} onPress={() => action.mutate("ack")} />
         <CtaButton

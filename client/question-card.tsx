@@ -4,15 +4,15 @@ import { useState } from "react";
 import { Text, TextInput, View } from "react-native";
 import { type CoordinatorRequest, answerQuestionsRpc, cancelRequestRpc, revisePlanRpc, requestProjectIds } from "../shared/model";
 import { columnColor } from "./agent-state";
-import { Lines, Row } from "./plan-card";
 import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
-import { Chip, ChoiceBox, CtaButton, type ViewContext } from "./ui";
+import { Chip, ChoiceBox, CtaButton, Decide, Fold, Lines, Row, type ViewContext } from "./ui";
 
 /**
  * 질문 카드 (내 결정 필요). 코디네이터가 스스로 정할 수 없는 것만 묻는다 (RULES.md §2.0):
  * 요청을 두 가지 이상으로 읽을 수 있을 때, 사람이 정할 선택이 있을 때, A 등급의 실제 변경을 시작할 때.
- * 읽는 순서: 내 요청 → 추가 지시 → 배경 → 질문 → 결정할 것 → 버튼 (DESIGN.md 카드 읽는 순서).
+ * 읽는 순서: 내 요청 → 추가 지시 → 배경 → 자세히 보기(조사 보고) → 결정할 것(질문과 선택지) → 버튼 (DESIGN.md 카드 읽는 순서).
+ * 내 요청은 접지 않는다. 요청을 어떻게 읽을지 묻는 카드라서 원문과 바로 비교해야 한다 (RULES.md H1).
  */
 export function QuestionCard({ request, ctx }: { request: CoordinatorRequest; ctx: ViewContext }) {
   const answerRpc = useRpc(answerQuestionsRpc);
@@ -22,7 +22,6 @@ export function QuestionCard({ request, ctx }: { request: CoordinatorRequest; ct
   const [typed, setTyped] = useState<Record<string, string>>({});
   const [instructing, setInstructing] = useState(false);
   const [instruction, setInstruction] = useState("");
-  const [showReport, setShowReport] = useState(false);
   const question = request.question;
   const action = useMutation({
     mutationFn: async (kind: "answer" | "instruct" | "cancel") => {
@@ -84,27 +83,27 @@ export function QuestionCard({ request, ctx }: { request: CoordinatorRequest; ct
       <Row label={ctx.t("questionCard.context")} ctx={ctx}>
         <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body }}>{question.context}</Text>
       </Row>
-      {/* A 등급 변경 전 조사의 원문. 배경은 코디네이터의 요약이라, 근거를 직접 보고 고를 수 있게 원문을 펼쳐 볼 수 있게 둔다. */}
-      {request.investigation ? (
-        <Row label={ctx.t("questionCard.investigation")} ctx={ctx}>
-          <View style={{ gap: 8, alignItems: "flex-start" }}>
-            <CtaButton
-              label={showReport ? ctx.t("questionCard.hideInvestigation") : ctx.t("questionCard.showInvestigation")}
-              theme={ctx.theme}
-              onPress={() => setShowReport((value) => !value)}
-            />
-            {showReport ? (
-              <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.5) }}>
-                {request.investigation.text}
-              </Text>
-            ) : null}
-          </View>
-        </Row>
-      ) : null}
-      <Row label={ctx.t("questionCard.questions")} ctx={ctx}>
+      {/* A 등급 변경 전 조사의 원문. 배경은 코디네이터의 요약이라, 근거를 직접 보고 고를 수 있게 원문을 접어 둔다. */}
+      <Fold
+        ctx={ctx}
+        items={[
+          request.investigation
+            ? {
+                label: ctx.t("questionCard.investigation"),
+                content: (
+                  <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.5) }}>
+                    {request.investigation.text}
+                  </Text>
+                ),
+              }
+            : null,
+        ]}
+      />
+
+      <Decide ctx={ctx}>
         {question.questions.map((item) => (
           <View key={item.question} style={{ gap: 8, marginBottom: 6 }}>
-            <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600" }}>{item.question}</Text>
+            <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>{item.question}</Text>
             <View style={{ gap: 6 }}>
               {item.options.map((option) => (
                 <ChoiceBox
@@ -127,15 +126,7 @@ export function QuestionCard({ request, ctx }: { request: CoordinatorRequest; ct
             />
           </View>
         ))}
-      </Row>
-
-      <View style={{ borderTopWidth: 1, borderColor: ctx.theme.colors.border, paddingTop: 12 }}>
-        <Row label={ctx.t("inbox.decide")} ctx={ctx}>
-          <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>
-            {ctx.t("questionCard.decide")}
-          </Text>
-        </Row>
-      </View>
+      </Decide>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         <CtaButton
           label={ctx.t("questionCard.send")}

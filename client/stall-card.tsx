@@ -3,10 +3,9 @@ import { useMutation } from "@tanstack/react-query";
 import { Text, View } from "react-native";
 import { type CoordinatorRequest, requestProjectIds, retryCoordinatorRpc } from "../shared/model";
 import { columnColor } from "./agent-state";
-import { Row } from "./plan-card";
 import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
-import { Chip, CtaButton, type ViewContext } from "./ui";
+import { Chip, CtaButton, Decide, Row, type ViewContext } from "./ui";
 
 /**
  * 코디네이터 멈춤 카드 (내 결정 필요). 코디네이터는 사람 화면에 보이지 않는 에이전트라, 만들기에 실패하거나 에러로 멈추거나
@@ -50,11 +49,7 @@ export function StallCard({ request, ctx }: { request: CoordinatorRequest; ctx: 
       <Row label={ctx.t("stallCard.reason")} ctx={ctx}>
         <Text selectable style={{ color: ctx.theme.colors.statusDanger, fontSize: ctx.fonts.body }}>{stall.reason}</Text>
       </Row>
-      <View style={{ borderTopWidth: 1, borderColor: ctx.theme.colors.border, paddingTop: 12 }}>
-        <Row label={ctx.t("inbox.decide")} ctx={ctx}>
-          <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>{ctx.t("stallCard.decide")}</Text>
-        </Row>
-      </View>
+      <Decide question={ctx.t("stallCard.decide")} ctx={ctx} />
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         <CtaButton label={ctx.t("stallCard.retry")} tone="primary" disabled={action.isPending} theme={ctx.theme} onPress={() => action.mutate()} />
         {request.coordinatorAgentId && ctx.navigation ? (

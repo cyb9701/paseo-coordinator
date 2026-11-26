@@ -172,7 +172,7 @@ function QuestionForm({
     <View style={{ gap: 14 }}>
       {items.map((item) => (
         <View key={item.question} style={{ gap: 8 }}>
-          <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600" }}>
+          <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>
             {item.question}
             {item.multiSelect ? `  ${ctx.t("inbox.multiSelect")}` : ""}
           </Text>
@@ -351,26 +351,30 @@ function DecisionCard({ request, agent, ctx }: { request: PermissionRequest; age
         />
       ) : null}
       {plan ? <Section label={ctx.t("inbox.plan")} ctx={ctx} value={<CodeBox text={plan} ctx={ctx} maxHeight={320} />} /> : null}
-      {/* 사실과 계획을 먼저 읽고, 결정할 것은 버튼(질문이면 선택지) 바로 위에 둔다. */}
+      {/*
+        사실과 계획을 먼저 읽고, 결정할 것은 버튼 바로 위에 둔다. 질문이면 '답을 기다린다'는 안내 대신 질문 자체가 결정할 것이다.
+        안내 문구를 가장 크게 보이면 진짜 질문이 그 아래로 밀린다 (2026-11-26 사용자 피드백).
+      */}
       <Section
         label={ctx.t("inbox.decide")}
         ctx={ctx}
         value={
-          <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>
-            {decisionPrompt(request, ctx.t)}
-          </Text>
+          questions.length > 0 ? (
+            <QuestionForm
+              items={questions}
+              selected={selected}
+              typed={typed}
+              onToggle={toggle}
+              onType={(question, text) => setTyped((current) => ({ ...current, [question]: text }))}
+              ctx={ctx}
+            />
+          ) : (
+            <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>
+              {decisionPrompt(request, ctx.t)}
+            </Text>
+          )
         }
       />
-      {questions.length > 0 ? (
-        <QuestionForm
-          items={questions}
-          selected={selected}
-          typed={typed}
-          onToggle={toggle}
-          onType={(question, text) => setTyped((current) => ({ ...current, [question]: text }))}
-          ctx={ctx}
-        />
-      ) : null}
       {request.kind !== "tool" && request.kind !== "plan" && request.kind !== "question" && request.description ? (
         <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{request.description}</Text>
       ) : null}

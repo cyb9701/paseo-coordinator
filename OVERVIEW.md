@@ -14,7 +14,7 @@ Coordinator turns one written request into work done by coding agents across you
 - Needs my decision: questions from the coordinator (including approving operation tasks), worker questions that need you, failed reviews, pull requests to merge, finished work left outside a pull request, stopped tasks, a stopped coordinator, and permission requests from agents. The sidebar badge counts only these.
 - To review: requests the coordinator started on its own, answers to read-only requests, decisions made automatically after review, and tasks that finished without a pull request and left nothing behind. "Mark all reviewed" closes all of these except answers, because confirming an answer ends its request.
 
-Every card reads top to bottom: your request, the task, what was found, the recommendation with evidence and risks, then the decision and its buttons.
+Every card reads top to bottom: your request and what is happening, anything to check (reviewer objections, assumptions, work left), then the decision and its buttons. The decision is the actual question, with the recommended option marked and a one-line risk for each option. Evidence such as the worker's full report, verification, choices the worker made and how to undo each option is folded under **Details**.
 
 ## Setup
 

@@ -4,10 +4,9 @@ import { useState } from "react";
 import { Text, TextInput, View } from "react-native";
 import { type CoordinatorRequest, type Task, revertRoute, reviewAutoDecisionRpc } from "../shared/model";
 import { columnColor } from "./agent-state";
-import { Lines, Row } from "./plan-card";
 import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
-import { Chip, CtaButton, type ViewContext } from "./ui";
+import { Chip, CtaButton, Decide, Fold, Lines, Row, type ViewContext } from "./ui";
 
 type AutoDecision = Task["autoDecisions"][number];
 
@@ -16,7 +15,8 @@ type AutoDecision = Task["autoDecisions"][number];
  * 사람은 나중에 보고 확인하거나, 되돌리고 다른 지시를 보낸다. 되돌린 기록이 쌓이면 그 규칙이 꺼진다 (RULES.md §5).
  * 작업이 끝나 지시를 보낼 워커가 없으면 되돌리기 대신 '잘못된 결정으로 표시'만 보인다. 되돌린 것처럼 보이면 안 된다
  * (2026-11-26 전수 검사: 머지한 작업의 되돌리기가 정리된 워커에게 가고 카드는 닫혔다). 서버와 같은 revertRoute 로 판단한다.
- * 읽는 순서: 내 요청 → 이 작업 → 워커 질문 → 코디네이터 답 → 근거 → 검토 → 되돌리는 법 → 결정할 것 → 버튼.
+ * 읽는 순서: 내 요청 → 워커 질문 → 코디네이터 답(규칙, 검토 결과) → 자세히 보기(근거, 검토자별 판정, 되돌리는 법) → 결정할 것 → 버튼.
+ * 되돌리는 법은 되돌리기를 열 때 입력칸 위에도 보인다. 그때 필요한 정보라서다.
  */
 export function AutoDecisionCard({
   request,
@@ -76,34 +76,31 @@ export function AutoDecisionCard({
       <Row label={ctx.t("autoCard.request")} ctx={ctx}>
         <Text selectable style={body}>{request.text}</Text>
       </Row>
-      <Row label={ctx.t("autoCard.task")} ctx={ctx}>
-        <Text style={{ ...body, fontWeight: "600" }}>{`${task.number} ${task.name}`}</Text>
-      </Row>
       <Row label={ctx.t("autoCard.question")} ctx={ctx}>
         <Text selectable style={body}>{decision.question}</Text>
       </Row>
       <Row label={ctx.t("autoCard.answer")} ctx={ctx}>
         <Text selectable style={{ ...body, fontWeight: "600" }}>{decision.answer}</Text>
-        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{ctx.t("autoCard.rule", { rule: decision.rule })}</Text>
+        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
+          {`${ctx.t("autoCard.rule", { rule: decision.rule })} · ${ctx.t("autoCard.review")} PASS ${passed}/${decision.verdicts.length}`}
+        </Text>
       </Row>
-      <Row label={ctx.t("autoCard.evidence")} ctx={ctx}>
-        <Lines items={decision.evidence.map((item) => `${item.fact} (${item.source})`)} ctx={ctx} />
-      </Row>
-      <Row label={ctx.t("autoCard.review")} ctx={ctx}>
-        <Text style={body}>{`PASS ${passed}/${decision.verdicts.length}`}</Text>
-        <Lines items={decision.verdicts.map((item) => `${item.model}: ${item.verdict}`)} ctx={ctx} />
-      </Row>
-      <Row label={ctx.t("autoCard.undo")} ctx={ctx}>
-        <Text selectable style={body}>{decision.undo}</Text>
-      </Row>
+      <Fold
+        ctx={ctx}
+        items={[
+          decision.evidence.length > 0
+            ? {
+                label: ctx.t("autoCard.evidence"),
+                count: decision.evidence.length,
+                content: <Lines items={decision.evidence.map((item) => `${item.fact} (${item.source})`)} ctx={ctx} />,
+              }
+            : null,
+          { label: ctx.t("autoCard.review"), content: <Lines items={decision.verdicts.map((item) => `${item.model}: ${item.verdict}`)} ctx={ctx} /> },
+          { label: ctx.t("autoCard.undo"), content: <Text selectable style={body}>{decision.undo}</Text> },
+        ]}
+      />
 
-      <View style={{ borderTopWidth: 1, borderColor: ctx.theme.colors.border, paddingTop: 12 }}>
-        <Row label={ctx.t("inbox.decide")} ctx={ctx}>
-          <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>
-            {ctx.t("autoCard.decide")}
-          </Text>
-        </Row>
-      </View>
+      <Decide question={ctx.t("autoCard.decide")} ctx={ctx} />
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         <CtaButton label={ctx.t("autoCard.acknowledge")} tone="primary" disabled={busy} theme={ctx.theme} onPress={() => action.mutate(null)} />
         <CtaButton
@@ -123,6 +120,11 @@ export function AutoDecisionCard({
       {routeNote ? <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{routeNote}</Text> : null}
       {reverting ? (
         <View style={{ gap: 8 }}>
+          {markOnly ? null : (
+            <Text selectable style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
+              {`${ctx.t("autoCard.undo")}: ${decision.undo}`}
+            </Text>
+          )}
           <TextInput
             value={text}
             onChangeText={setText}

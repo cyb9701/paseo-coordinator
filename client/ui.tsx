@@ -1,6 +1,7 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/ui";
+import { type ReactNode, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { type Fonts, useFonts } from "./fonts";
 import type { T } from "./i18n";
@@ -252,6 +253,107 @@ export function GradeBadge({ grade, label, theme }: { grade: Grade | null; label
       }}
     >
       <Text style={{ color: filled ? theme.colors.surface0 : color, fontSize: fonts.meta, fontWeight: "700" }}>{label}</Text>
+    </View>
+  );
+}
+
+/** 카드의 한 구역. 왼쪽에 이름, 오른쪽에 내용. 좁은 화면에서는 이름이 위로 간다. */
+export function Row({ label, children, ctx }: { label: string; children: ReactNode; ctx: ViewContext }) {
+  return (
+    <View style={{ flexDirection: ctx.compact ? "column" : "row", gap: ctx.compact ? 4 : 12 }}>
+      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, width: ctx.compact ? undefined : 84 }}>{label}</Text>
+      <View style={{ flex: 1, gap: 4 }}>{children}</View>
+    </View>
+  );
+}
+
+export function Lines({ items, ctx, muted = false }: { items: readonly string[]; ctx: ViewContext; muted?: boolean }) {
+  const style = muted
+    ? { color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }
+    : { color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body };
+  return (
+    <>
+      {items.map((item, index) => (
+        <Text key={index} selectable style={style}>
+          {`• ${item}`}
+        </Text>
+      ))}
+    </>
+  );
+}
+
+export interface FoldItem {
+  label: string;
+  /** 닫혀 있을 때 이름 옆에 보일 개수. 위험처럼 몇 개인지가 펼칠지 정하는 단서가 될 때 쓴다. */
+  count?: number;
+  content: ReactNode;
+}
+
+/**
+ * 결정 카드의 펼침 층 (DESIGN.md 결정 카드). 카드는 처음에 상황, 결정할 것, 버튼만 보이고 근거와 원문은 여기에 접어 둔다.
+ * 모든 항목을 펼쳐 두자 결정 하나에 읽을 것이 너무 많아 판단이 늦어졌다 (2026-11-26 사용자 피드백).
+ * 지우지 않고 접는 이유는, 규칙이 카드에 보이라고 정한 정보(워커가 고른 것 RULES.md §10, 자동 결정의 판정 §8)가 있기 때문이다.
+ * 닫혀 있어도 무엇이 들어 있는지 알 수 있게 구역 이름을 버튼 옆에 보인다.
+ */
+export function Fold({ items, ctx }: { items: readonly (FoldItem | null | false)[]; ctx: ViewContext }) {
+  const [open, setOpen] = useState(false);
+  const shown = items.filter((item): item is FoldItem => Boolean(item));
+  if (shown.length === 0) return null;
+  const hint = shown.map((item) => (item.count ? `${item.label} ${item.count}` : item.label)).join(" · ");
+  return (
+    <View style={{ gap: 10 }}>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+        <CtaButton
+          size="sm"
+          label={open ? `▾ ${ctx.t("fold.hide")}` : `▸ ${ctx.t("fold.show")}`}
+          accessibilityLabel={`${open ? ctx.t("fold.hide") : ctx.t("fold.show")}: ${hint}`}
+          theme={ctx.theme}
+          onPress={() => setOpen((value) => !value)}
+        />
+        {open ? null : (
+          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, flexShrink: 1 }}>{hint}</Text>
+        )}
+      </View>
+      {open ? (
+        <View
+          style={{
+            gap: 12,
+            padding: 12,
+            borderRadius: 8,
+            borderWidth: 1,
+            borderColor: ctx.theme.colors.border,
+            backgroundColor: ctx.theme.colors.surface0,
+          }}
+        >
+          {shown.map((item) => (
+            <Row key={item.label} label={item.label} ctx={ctx}>
+              {item.content}
+            </Row>
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+/**
+ * 카드의 결정 구역. 구분선 위는 상황, 아래는 결정이다. 결정할 것은 버튼 바로 위에 둔다. 위에서부터 읽으면 상황을 이해한 자리에서
+ * 바로 고르고 누를 수 있게 하기 위해서다 (2026-11-25, 2026-11-26 사용자 피드백). question 에는 '선택지를 고르세요' 같은 안내가 아니라
+ * 실제로 정할 것을 쓴다. 안내 문구를 가장 크게 보이자 진짜 질문이 카드 중간에 묻혔다.
+ */
+export function Decide({ question, children, ctx }: { question?: string | null; children?: ReactNode; ctx: ViewContext }) {
+  return (
+    <View style={{ borderTopWidth: 1, borderColor: ctx.theme.colors.border, paddingTop: 12 }}>
+      <Row label={ctx.t("inbox.decide")} ctx={ctx}>
+        <View style={{ gap: 8 }}>
+          {question ? (
+            <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>
+              {question}
+            </Text>
+          ) : null}
+          {children}
+        </View>
+      </Row>
     </View>
   );
 }

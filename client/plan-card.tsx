@@ -1,71 +1,49 @@
 import type { ProjectRef } from "@getpaseo/plugin/client";
 import { useProject, useProjects, useRpc } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
-import { type ReactNode, useState } from "react";
+import { useState } from "react";
 import { Text, TextInput, View } from "react-native";
 import { type CoordinatorRequest, type Task, acknowledgeRpc, cancelRequestRpc, revisePlanRpc, requestProjectIds } from "../shared/model";
 import { columnColor } from "./agent-state";
 import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
-import { Chip, CtaButton, GradeBadge, type ViewContext } from "./ui";
-
-export function Row({ label, children, ctx }: { label: string; children: ReactNode; ctx: ViewContext }) {
-  return (
-    <View style={{ flexDirection: ctx.compact ? "column" : "row", gap: ctx.compact ? 4 : 12 }}>
-      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, width: ctx.compact ? undefined : 84 }}>{label}</Text>
-      <View style={{ flex: 1, gap: 4 }}>{children}</View>
-    </View>
-  );
-}
-
-export function Lines({ items, ctx }: { items: readonly string[]; ctx: ViewContext }) {
-  return (
-    <>
-      {items.map((item, index) => (
-        <Text key={index} selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body }}>
-          {`• ${item}`}
-        </Text>
-      ))}
-    </>
-  );
-}
+import { Chip, CtaButton, Decide, Fold, GradeBadge, Lines, Row, type ViewContext } from "./ui";
 
 function ProjectName({ projectRef }: { projectRef: ProjectRef }) {
   const name = useProject(projectRef, (project) => project.displayName);
   return <>{name ?? projectRef.id}</>;
 }
 
-function TaskBlock({ task, ctx }: { task: Task; ctx: ViewContext }) {
+/** 계획의 작업 한 줄. 처음에는 무엇을 어느 프로젝트에서 어떤 순서로 하는지만 보인다. 범위와 완료 기준은 TaskDetail 로 접어 둔다. */
+function TaskLine({ task, ctx }: { task: Task; ctx: ViewContext }) {
   const projects = useProjects({ hosts: [ctx.hostId], where: (project) => project.ref.id === task.projectId });
   const muted = { color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta } as const;
   return (
-    <View
-      style={{
-        gap: 4,
-        padding: 10,
-        borderRadius: 8,
-        borderWidth: 1,
-        borderColor: ctx.theme.colors.border,
-        backgroundColor: ctx.theme.colors.surface0,
-      }}
-    >
-      <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+    <View style={{ gap: 2 }}>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "baseline", gap: 8 }}>
         <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600" }}>{`${task.number} ${task.name}`}</Text>
         <Text style={muted}>{projects[0] ? <ProjectName projectRef={projects[0]} /> : task.projectId}</Text>
-        {task.dependsOn.length > 0 ? (
-          <Text style={muted}>{ctx.t("planCard.dependsOn", { list: task.dependsOn.join(", ") })}</Text>
-        ) : null}
+        {task.dependsOn.length > 0 ? <Text style={muted}>{ctx.t("planCard.dependsOn", { list: task.dependsOn.join(", ") })}</Text> : null}
       </View>
       {task.kind === "operation" ? (
-        // 운영 작업은 worktree 밖을 건드린다. 사람이 승인한 대상이 무엇인지 계획에서 바로 보이게 한다.
+        // 운영 작업은 worktree 밖을 건드린다. 사람이 승인한 대상이 무엇인지 접지 않고 계획에서 바로 보이게 한다 (RULES.md §2.0).
         <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>
           {ctx.t("planCard.operation", { targets: task.targets.join(", ") })}
         </Text>
       ) : null}
-      {task.scope ? <Text style={muted}>{`${ctx.t("planCard.scope")}: ${task.scope}`}</Text> : null}
-      {task.doneCriteria ? <Text style={muted}>{`${ctx.t("planCard.taskDone")}: ${task.doneCriteria}`}</Text> : null}
+    </View>
+  );
+}
+
+function TaskDetail({ task, ctx }: { task: Task; ctx: ViewContext }) {
+  const muted = { color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta } as const;
+  return (
+    <View style={{ gap: 2 }}>
+      <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta, fontWeight: "600" }}>{`${task.number} ${task.name}`}</Text>
+      {task.scope ? <Text selectable style={muted}>{`${ctx.t("planCard.scope")}: ${task.scope}`}</Text> : null}
+      {task.doneCriteria ? <Text selectable style={muted}>{`${ctx.t("planCard.taskDone")}: ${task.doneCriteria}`}</Text> : null}
       {task.requestRefs.length > 0 ? (
-        <Text style={muted}>{`${ctx.t("planCard.covers")}: ${task.requestRefs.map((ref) => `"${ref}"`).join(", ")}`}</Text>
+        <Text selectable style={muted}>{`${ctx.t("planCard.covers")}: ${task.requestRefs.map((ref) => `"${ref}"`).join(", ")}`}</Text>
       ) : null}
     </View>
   );
@@ -128,8 +106,8 @@ export function StartedCard({ request, ctx }: { request: CoordinatorRequest; ctx
       </View>
 
       {/*
-        위에서 아래로 읽으면 배경 → 이해 → 평가 → 결정 순서가 되게 놓는다 (2026-11-25 사용자 피드백).
-        결정할 것과 추천은 버튼 바로 위에 두어, 다 읽은 자리에서 바로 누를 수 있게 한다.
+        위에서 아래로 읽으면 내 요청 → 코디네이터가 읽은 방식 → 계획 → 결정 순서가 된다 (DESIGN.md 카드 읽는 순서).
+        내 요청과 해석은 접지 않는다. 계획이 요청과 어긋나는지 비교하는 카드라서다 (RULES.md H1).
       */}
       <Row label={ctx.t("planCard.context")} ctx={ctx}>
         <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body }}>{request.text}</Text>
@@ -149,37 +127,48 @@ export function StartedCard({ request, ctx }: { request: CoordinatorRequest; ctx
           <Lines items={request.unknowns} ctx={ctx} />
         </Row>
       ) : null}
-      {request.grade ? (
-        <Row label={ctx.t("planCard.gradeReasons")} ctx={ctx}>
-          <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600" }}>
-            {ctx.t("planCard.decideGrade", { grade: request.grade, count: request.tasks.length })}
-          </Text>
-          {request.beforeChange ? (
-            <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{ctx.t("planCard.beforeChange")}</Text>
-          ) : null}
-          <Lines items={request.gradeReasons} ctx={ctx} />
-        </Row>
-      ) : null}
       <Row label={ctx.t("planCard.tasks")} ctx={ctx}>
         {request.tasks.map((task) => (
-          <TaskBlock key={task.number} task={task} ctx={ctx} />
+          <TaskLine key={task.number} task={task} ctx={ctx} />
         ))}
+        {request.beforeChange ? (
+          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{ctx.t("planCard.beforeChange")}</Text>
+        ) : null}
       </Row>
-      {request.risks.length > 0 ? (
-        <Row label={ctx.t("planCard.risks")} ctx={ctx}>
-          <Lines items={request.risks} ctx={ctx} />
-        </Row>
-      ) : null}
-      {request.recommendation ? (
-        <Row label={ctx.t("planCard.recommendation")} ctx={ctx}>
-          <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body }}>{request.recommendation}</Text>
-        </Row>
-      ) : null}
-      <View style={{ borderTopWidth: 1, borderColor: ctx.theme.colors.border, paddingTop: 12 }}>
-        <Row label={ctx.t("inbox.decide")} ctx={ctx}>
-          <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>{ctx.t("planCard.decide")}</Text>
-        </Row>
-      </View>
+      <Fold
+        ctx={ctx}
+        items={[
+          request.grade
+            ? {
+                label: ctx.t("planCard.gradeReasons"),
+                content: (
+                  <>
+                    <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600" }}>
+                      {ctx.t("planCard.decideGrade", { grade: request.grade, count: request.tasks.length })}
+                    </Text>
+                    <Lines items={request.gradeReasons} ctx={ctx} />
+                  </>
+                ),
+              }
+            : null,
+          request.tasks.some((task) => task.scope || task.doneCriteria || task.requestRefs.length > 0)
+            ? {
+                label: ctx.t("planCard.taskDetails"),
+                content: request.tasks.map((task) => <TaskDetail key={task.number} task={task} ctx={ctx} />),
+              }
+            : null,
+          request.risks.length > 0
+            ? { label: ctx.t("planCard.risks"), count: request.risks.length, content: <Lines items={request.risks} ctx={ctx} /> }
+            : null,
+          request.recommendation
+            ? {
+                label: ctx.t("planCard.recommendation"),
+                content: <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body }}>{request.recommendation}</Text>,
+              }
+            : null,
+        ]}
+      />
+      <Decide question={ctx.t("planCard.decide")} ctx={ctx} />
 
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         <CtaButton label={ctx.t("planCard.approve")} tone="primary" disabled={busy} theme={ctx.theme} onPress={() => action.mutate("approve")} />

@@ -56,7 +56,7 @@ The sidebar badge counts only the left column. Buttons say what they do: "End wi
   <img src="assets/inbox-to-review.png" alt="To review: an automatic decision card with its evidence and three passing reviewers, an answer card for a read-only request, and a started-request card with the plan" width="49%">
 </p>
 
-Every card reads top to bottom: your request, the task, what was found, the recommendation with evidence, risks and how to undo it, then the decision and its buttons. You can pick the recommendation, write your own instruction, or ask the coordinator first; the questions and answers stay in the task's decision record.
+Every card reads top to bottom: your request and what is happening, anything to check (reviewer objections, assumptions, work left), then the decision with its options and buttons. The decision is the actual question, with the recommended option marked and a one-line risk for each option. Evidence such as the worker's full report, verification, choices the worker made and how to undo each option sits under **Details**, folded, with the names of its sections next to the button. You can pick the recommendation, write your own instruction, or ask the coordinator first; the questions and answers stay in the task's decision record.
 
 <p>
   <img src="assets/worker-question-card.png" alt="Worker question card: what the worker reported and checked, the coordinator's view with the rule that sent it to you, options with result, risk and undo, and a question already answered by the coordinator" width="49%">
