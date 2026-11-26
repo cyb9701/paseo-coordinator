@@ -87,7 +87,7 @@ function kickoff(request: CoordinatorRequest, task: Task, branch: string, contin
     "- If you need a decision the request and scope do not settle, a change to your scope or approach, or you are stuck, call the report_blocker tool with the facts, the options and your recommendation, then end your turn and wait. Do not ask in plain text: only report_blocker reaches the human as a decision card.",
     readOnly
       ? `- Finish with a short report in ${language}: what you found, where you found it, and what is left unknown.`
-      : `- When the task is done and verified${successor ? " and committed" : ", pushed, with the pull request open"}, call the report_done tool as your last action, written in ${language}. Done means your verification passed${successor ? "" : " and the pull request exists"}. Never merge it: the human merges from a card.`,
+      : `- When the task is done and verified${successor ? " and committed" : ", pushed, with the pull request open"}, call the report_done tool as your last action, written in ${language}. Done means your verification passed${successor ? "" : " and the pull request exists"}. Never merge it: the human merges from a card. If the human's request says not to commit, push or open a pull request, follow the request and quote it as noPullRequestReason in report_done.`,
     ...(poteto ? potetoOverride(request.grade, branch) : []),
   ].join("\n");
 }
@@ -183,7 +183,7 @@ export class Dispatcher {
         paseo,
         request.id,
         task.number,
-        "[From the coordinator plugin] Your turn ended without report_done. If the task is finished and verified, call report_done now (after pushing and opening the pull request if you are the last task on the branch). If you are blocked, call report_blocker instead.",
+        "[From the coordinator plugin] Your turn ended without report_done. If the task is finished and verified, call report_done now (after pushing and opening the pull request if you are the last task on the branch, unless the human's request says not to: then quote it as noPullRequestReason). If you are blocked, call report_blocker instead.",
       );
       return false;
     }

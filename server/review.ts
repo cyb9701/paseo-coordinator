@@ -378,6 +378,10 @@ export class ReviewRunner {
                       decisions: revert
                         ? [...task.decisions, { summary: `Reverted: ${decision.answer} → ${input.revertText}`, by: "human" as const, at, qa: [] }]
                         : task.decisions,
+                      // 이미 끝난 작업이면 다시 실행 중으로 돌린다. 예전 완료 보고가 남으면 머지 카드가 바뀌기 전 내용을 보여준다.
+                      ...(revert && (task.status === "review" || task.status === "done") && !task.completion?.closedAt
+                        ? { status: "running" as const, completion: null, doneNudgedAt: null }
+                        : {}),
                     },
               ),
             },

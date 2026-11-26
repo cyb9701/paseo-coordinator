@@ -135,6 +135,13 @@ export const completionSchema = z.object({
   choices: z.array(z.object({ choice: z.string(), why: z.string() })),
   left: z.array(z.string()),
   pr: pullRequestSchema.nullable(),
+  /** 요청이 커밋·PR 을 하지 말라고 해서 PR 없이 끝낸 이유. 워커가 쓴다. */
+  noPrReason: z.string().nullable().default(null),
+  /**
+   * PR 에 담기지 않은 채 worktree 에 남은 변경 (플러그인이 git 으로 확인). 있으면 확인해도 워크스페이스를 지우지 않는다.
+   * 지우면 커밋하지 않은 작업이 사라지기 때문이다.
+   */
+  unpublished: z.string().nullable().default(null),
   at: z.string(),
   /** 머지했거나(PR 있음) 확인한(PR 없음) 시각. */
   closedAt: z.string().nullable().default(null),

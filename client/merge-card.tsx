@@ -107,14 +107,28 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
             ) : null}
           </>
         ) : (
-          <Text style={body}>{ctx.t("mergeCard.noPr")}</Text>
+          <>
+            <Text style={body}>
+              {completion.noPrReason ? ctx.t("mergeCard.noPrByRequest", { reason: completion.noPrReason }) : ctx.t("mergeCard.noPr")}
+            </Text>
+            {completion.unpublished ? (
+              <>
+                <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>{ctx.t("mergeCard.unpublished")}</Text>
+                <Text selectable style={muted}>{completion.unpublished}</Text>
+              </>
+            ) : null}
+          </>
         )}
       </Row>
 
       <View style={{ borderTopWidth: 1, borderColor: ctx.theme.colors.border, paddingTop: 12 }}>
         <Row label={ctx.t("inbox.decide")} ctx={ctx}>
           <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>
-            {pr ? ctx.t("mergeCard.decide", { base: pr.baseRefName }) : ctx.t("mergeCard.decideNoPr")}
+            {pr
+              ? ctx.t("mergeCard.decide", { base: pr.baseRefName })
+              : completion.unpublished
+                ? ctx.t("mergeCard.decideKeep")
+                : ctx.t("mergeCard.decideNoPr")}
           </Text>
         </Row>
       </View>

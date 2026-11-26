@@ -135,6 +135,13 @@ export function reportDoneTool(store: StateStore) {
       verification: z.array(z.string().trim().min(1)).min(1),
       choices: z.array(z.object({ choice: z.string().trim().min(1), why: z.string().trim().min(1) })).default([]),
       left: z.array(z.string().trim().min(1)).default([]),
+      noPullRequestReason: z
+        .string()
+        .trim()
+        .min(1)
+        .nullable()
+        .default(null)
+        .describe("Only when the human's request says not to commit, push or open a pull request: quote that instruction here."),
     }),
     execute: async (input, { agent }) => {
       const state = await store.read();
@@ -146,12 +153,14 @@ export function reportDoneTool(store: StateStore) {
       }
       if (!task.branch) return { text: "This task has no branch recorded; report it with report_blocker.", isError: true };
       let pr: PullRequest | null = null;
+      let unpublished: string | null = null;
       if (!continuedBy(request, task)) {
         try {
           pr = await findPullRequest(agent.cwd, task.branch);
           if (!pr) {
             const left = await unpublishedWork(agent.cwd, task.branch);
-            if (left) {
+            unpublished = left;
+            if (left && !input.noPullRequestReason) {
               return {
                 text: `There is work on ${task.branch} without a pull request (${left}). Commit, push ${task.branch} and open a pull request against the default branch, then call report_done again.`,
                 isError: true,
@@ -165,12 +174,13 @@ export function reportDoneTool(store: StateStore) {
         }
       }
       const at = new Date().toISOString();
+      const { noPullRequestReason, ...report } = input;
       await store.update((current) => ({
         state: {
           ...current,
           requests: patchTask(current, request.id, [task.number], (item) => ({
             ...item,
-            completion: { ...input, pr, at, closedAt: null },
+            completion: { ...report, pr, noPrReason: pr ? null : noPullRequestReason, unpublished, at, closedAt: null },
           })),
         },
         result: undefined,
@@ -180,7 +190,9 @@ export function reportDoneTool(store: StateStore) {
           ? `Recorded with pull request #${pr.number}. End your turn now; the human decides the merge.`
           : continuedBy(request, task)
             ? "Recorded. The next task continues on this branch and opens the pull request. End your turn now."
-            : "Recorded with no pull request, since nothing changed. End your turn now.",
+            : noPullRequestReason
+              ? "Recorded without a pull request, as the request asked. End your turn now."
+              : "Recorded with no pull request, since nothing changed. End your turn now.",
       };
     },
   });
@@ -240,7 +252,11 @@ export class CompletionRunner {
               ? [
                   ...item.decisions,
                   {
-                    summary: completion.pr ? `Merged #${completion.pr.number} (squash)` : "Confirmed: finished without changes",
+                    summary: completion.pr
+                      ? `Merged #${completion.pr.number} (squash)`
+                      : completion.noPrReason
+                        ? `Confirmed without a pull request: ${completion.noPrReason}`
+                        : "Confirmed: finished without changes",
                     by: "human" as const,
                     at,
                     qa: [],
@@ -251,7 +267,8 @@ export class CompletionRunner {
       },
       result: undefined,
     }));
-    if (task.workspaceId) {
+    // PR 에 담기지 않은 변경이 남았으면 워크스페이스를 지우지 않는다. 지우면 그 변경이 사라진다.
+    if (task.workspaceId && !completion.unpublished) {
       await paseo.workspaces
         .ref(task.workspaceId)
         .archive()
