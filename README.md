@@ -49,18 +49,16 @@ A request that asks for a change never ends as just a report:
 
 The sidebar badge counts only the left column. Buttons say what they do: "End with this answer" closes a read request, "Seen, keep going" leaves a started request running, and "Finish · clean up" closes a task without a pull request. "Mark all reviewed" handles the right column in one go but skips answers, because confirming an answer ends its request. If the coordinator itself stops (it cannot be reached, or keeps ignoring what it was sent), a "Coordinator stopped" card shows why and lets you try again.
 
-*The screenshots below were taken before the left column was renamed from "Needs reaction" to "Needs my decision".*
-
 <p>
-  <img src="assets/inbox-needs-reaction.png" alt="Needs my decision: a coordinator question card with options and a recommendation for each question, followed by a worker question card" width="49%">
-  <img src="assets/inbox-to-review.png" alt="To review: an automatic decision card with its evidence and three passing reviewers, an answer card for a read-only request, and a started-request card with the plan" width="49%">
+  <img src="assets/inbox-needs-reaction.png" alt="Needs my decision: a coordinator question card with your request, the background and two questions with a recommended option each, followed by a worker question card" width="49%">
+  <img src="assets/inbox-to-review.png" alt="To review: an automatic decision card with its rule and three passing reviewers, an answer card for a read-only request, and a started-request card with the plan, each with its details folded" width="49%">
 </p>
 
 Every card reads top to bottom: your request and what is happening, anything to check (reviewer objections, assumptions, work left), then the decision with its options and buttons. The decision is the actual question, with the recommended option marked and a one-line risk for each option. Evidence such as the worker's full report, verification, choices the worker made and how to undo each option sits under **Details**, folded, with the names of its sections next to the button. You can pick the recommendation, write your own instruction, or ask the coordinator first; the questions and answers stay in the task's decision record.
 
 <p>
-  <img src="assets/worker-question-card.png" alt="Worker question card: what the worker reported and checked, the coordinator's view with the rule that sent it to you, options with result, risk and undo, and a question already answered by the coordinator" width="49%">
-  <img src="assets/merge-card.png" alt="Merge card: the worker's report with verification and the choices it made on its own, the pull request with its size and checks, and a squash-merge button" width="49%">
+  <img src="assets/worker-question-card.png" alt="Worker question card: your request, the situation, a question already answered by the coordinator, folded details, then the worker's question with options, their risks and the reasons for the recommendation" width="49%">
+  <img src="assets/merge-card.png" alt="Merge card: your request, the worker's report, work left, the pull request with its size and checks, folded verification and choices, and a squash-merge button" width="49%">
 </p>
 
 *Left: a worker question that needs a person, with a question you already asked the coordinator. Right: a finished task waiting for you to merge its pull request.*
