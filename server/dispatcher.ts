@@ -303,7 +303,7 @@ export class Dispatcher {
         "paseo-coordinator.task": String(task.number),
       },
     });
-    const poteto = await this.potetoFor(paseo, request, provider, agent.id);
+    const poteto = values.poteto ? await this.potetoFor(paseo, request, provider, agent.id) : { use: false, note: null };
     await paseo.agents.ref(agent.id).send(kickoff(request, task, branch, continuesFrom, poteto.use));
     // 킥오프를 보낸 뒤에 기록한다. 먼저 기록하면 보정 검사(reconcile)가 프롬프트 전의 쉬는 워커를 끝난 것으로 본다.
     await this.patchTask(request.id, task.number, { agentId: agent.id, poteto: poteto.use, note: poteto.note });

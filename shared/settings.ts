@@ -24,6 +24,11 @@ export const settingsSchema = z.object({
   coordinator: coordinatorSchema.default({ model: DEFAULT_COORDINATOR_MODEL, effort: "high" }),
   /** 코디네이터가 배정하는 워커. 형식은 코디네이터와 같다. */
   worker: coordinatorSchema.default({ model: DEFAULT_COORDINATOR_MODEL, effort: "high" }),
+  /**
+   * A·B·C 등급 변경 작업 워커를 /poteto-mode 로 시작할지 (RULES.md §11). 켜져 있어도 워커 세션에 pstack 이 없으면 쓰지 않는다.
+   * poteto 는 하위 에이전트를 높은 effort 로 띄워 비용과 시간이 늘어서, 끌 수 있게 둔다.
+   */
+  poteto: z.boolean().default(true),
   reviewers: reviewersSchema.default({ models: DEFAULT_REVIEWER_MODELS, effort: "high" }),
   /** 코디네이터가 워커를 만들 수 있는 프로젝트. 비어 있으면 어디에도 만들지 않는다. */
   allowedProjectIds: z.array(z.string()).default([]),

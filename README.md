@@ -1,12 +1,13 @@
 # Coordinator for Paseo
 
-> Work in progress. Phases 0–2 of [PLAN.md](PLAN.md) are done; the coordinator agent, automatic review, and pstack integration are not built yet.
-
 A Paseo plugin that keeps the human from becoming the bottleneck when many coding agents run at once.
 
-- **Decision inbox**: every agent that is blocked on you (tool permission, question, plan approval, error) shows up as a card you can resolve in place. Results you have not looked at yet are listed separately.
+- **Coordinator**: you send a request, a coordinator agent answers it or splits it into graded tasks for worker agents in the right projects, each in its own worktree and branch.
+- **Decision inbox**: only decisions that need a human reach you, as cards that read from context to decision. Questions the request already settles are answered by the coordinator and checked by independent reviewer agents first. See [RULES.md](RULES.md).
+- **Merge card**: workers finish with verification and a pull request; you squash-merge from the card and the plugin cleans up the branch and workspace.
 - **Progress board**: requests and directly launched agents on rows, with columns ordered by how much they wait on you.
-- **Coordinator (planned)**: you send a request, a coordinator agent splits it into tasks for coding agents in the right projects, and only decisions that need a human reach your inbox. See [RULES.md](RULES.md) for when it may decide on its own.
+
+See [OVERVIEW.md](OVERVIEW.md) for setup, what the plugin reads and sends, and known limits.
 
 ## Install
 

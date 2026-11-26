@@ -373,6 +373,20 @@ export function SettingsView({ theme, hostId, t }: { theme: PluginTheme; hostId:
         t={t}
       />
 
+      <Block title={t("settings.poteto")} hint={t("settings.potetoHint")} theme={theme}>
+        <Wrap>
+          {[true, false].map((on) => (
+            <ChoiceBox
+              key={String(on)}
+              label={on ? t("settings.potetoOn") : t("settings.potetoOff")}
+              selected={draft.poteto === on}
+              onPress={() => update((current) => ({ ...current, poteto: on }))}
+              theme={theme}
+            />
+          ))}
+        </Wrap>
+      </Block>
+
       <Block title={t("settings.reviewers")} hint={t("settings.reviewersHint")} theme={theme}>
         {catalog.data && catalog.data.readOnlyProviders.size === 0 ? (
           <Note text={t("settings.noReadOnlyProvider")} color={theme.colors.statusWarning} />
