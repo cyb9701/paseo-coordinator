@@ -6,7 +6,7 @@ import type { CoordinatorRequest, CoordinatorState, Task } from "../shared/model
 import { AUTO_RULES } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
 import type { StateStore } from "./store";
-import type { WorkerChannel } from "./worker-channel";
+import { type WorkerChannel, queued } from "./worker-channel";
 
 type Settings = PluginSettings<typeof settingsSchema>;
 type Proposal = NonNullable<NonNullable<Task["blocker"]>["proposal"]>;
@@ -101,6 +101,22 @@ function revealProposal(proposal: Proposal): string {
  */
 export class ReviewRunner {
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** 마무리 중인 검토. 검토자 두 명이 거의 동시에 제출하거나 마감 타이머와 겹쳐도 한 번만 마무리한다. */
+  private readonly finalizing = new Set<string>();
+
+  private clearTimer(key: string): void {
+    clearTimeout(this.timers.get(key));
+    this.timers.delete(key);
+  }
+
+  /**
+   * 마무리 전에 블로커가 닫히거나 바뀐 검토를 버린다. 검토자를 정리하지 않으면 남아서 권한 요청이 사람에게 간다.
+   * 사람이 카드에서 먼저 정했거나, 워커가 다시 보고했거나, 요청이 취소된 경우다.
+   */
+  async abandon(paseo: PaseoApi, requestId: string, taskNumber: number, reviewerIds: readonly string[]): Promise<void> {
+    this.clearTimer(`${requestId}:${taskNumber}`);
+    await Promise.all(reviewerIds.map((id) => paseo.agents.ref(id).archive().catch(() => undefined)));
+  }
 
   constructor(
     private readonly store: StateStore,
@@ -169,20 +185,33 @@ export class ReviewRunner {
       const model = values.reviewers.models[index % values.reviewers.models.length]!;
       const provider = model.split("/")[0]!;
       const modes = (await paseo.providers.listModes(provider).catch(() => null))?.modes ?? [];
-      const agent = await workspace.agents.create({
-        // plan 모드라 파일을 바꿀 수 없다. 그래도 오는 쓰기 권한 요청은 플러그인이 거절한다 (index.server.ts).
-        config: { provider: model, modeId: modes.some((mode) => mode.id === "plan") ? "plan" : undefined, thinkingOptionId: effort },
-        title: `review ${requestId}-${taskNumber} #${index + 1}`,
-        labels: { [ROLE_LABEL]: "reviewer", "paseo-coordinator.request": requestId, "paseo-coordinator.task": String(taskNumber) },
-        prompt,
-      });
+      // 프롬프트 없이 만들고 모두 기록한 뒤에 보낸다. 먼저 일을 시작한 검토자는 기록되기 전이라 도구 호출과 권한이
+      // 검토자로 인식되지 않았다.
+      const agent = await workspace.agents
+        .create({
+          // plan 모드라 파일을 바꿀 수 없다. 그래도 오는 쓰기 권한 요청은 플러그인이 거절한다 (index.server.ts).
+          config: { provider: model, modeId: modes.some((mode) => mode.id === "plan") ? "plan" : undefined, thinkingOptionId: effort },
+          title: `review ${requestId}-${taskNumber} #${index + 1}`,
+          labels: { [ROLE_LABEL]: "reviewer", "paseo-coordinator.request": requestId, "paseo-coordinator.task": String(taskNumber) },
+        })
+        .catch((error: unknown) => {
+          console.error(`[coordinator] could not create reviewer ${index + 1} for ${requestId}:${taskNumber}`, error);
+          return null;
+        });
+      if (!agent) break;
       reviewers.push({ agentId: agent.id, model, ownAnswer: null, verdict: null, checks: [], objections: [], at: null });
     }
     await this.patchBlocker(requestId, taskNumber, (blocker) =>
       blocker.review ? { ...blocker, review: { ...blocker.review, reviewers } } : blocker,
     );
     const key = `${requestId}:${taskNumber}`;
-    clearTimeout(this.timers.get(key));
+    if (reviewers.length < required) {
+      // 검토자를 다 만들지 못하면 통과할 수 없다. 만든 검토자를 정리하고 바로 사람 카드로 돌린다.
+      await this.finalize(paseo, requestId, taskNumber, "complete");
+      return;
+    }
+    await Promise.all(reviewers.map((reviewer) => paseo.agents.ref(reviewer.agentId).send(prompt)));
+    this.clearTimer(key);
     this.timers.set(
       key,
       setTimeout(() => {
@@ -207,12 +236,23 @@ export class ReviewRunner {
 
   /** 검토가 끝났다(전원 제출 또는 시간 초과). 전원 PASS 면 워커에게 보내고, 아니면 사람 카드로 돌린다. */
   async finalize(paseo: PaseoApi, requestId: string, taskNumber: number, reason: "complete" | "timeout"): Promise<void> {
+    const key = `${requestId}:${taskNumber}`;
+    if (this.finalizing.has(key)) return;
+    this.finalizing.add(key);
+    try {
+      await this.finalizeOnce(paseo, requestId, taskNumber, reason);
+    } finally {
+      this.finalizing.delete(key);
+    }
+  }
+
+  private async finalizeOnce(paseo: PaseoApi, requestId: string, taskNumber: number, reason: "complete" | "timeout"): Promise<void> {
     const found = await this.find(requestId, taskNumber);
     const blocker = found?.task.blocker;
     const review = blocker?.review;
     const proposal = blocker?.proposal;
     if (!found || !blocker || !review || review.status !== "running" || !proposal) return;
-    clearTimeout(this.timers.get(`${requestId}:${taskNumber}`));
+    this.clearTimer(`${requestId}:${taskNumber}`);
     const passed = review.reviewers.length === review.required && review.reviewers.every((item) => item.verdict === "PASS");
     const at = new Date().toISOString();
     if (passed) {
@@ -228,11 +268,12 @@ export class ReviewRunner {
                   tasks: request.tasks.map((task) =>
                     task.number !== taskNumber
                       ? task
-                      : {
+                      : queued({
                           ...task,
                           status: "running" as const,
                           note: null,
                           blocker: null,
+                          doneNudgedAt: null,
                           decisions: [...task.decisions, { summary: `${blocker.summary} → ${proposal.answer}`, by: "coordinator" as const, at, qa: [] }],
                           autoDecisions: [
                             ...task.autoDecisions,
@@ -249,14 +290,16 @@ export class ReviewRunner {
                               reverted: false,
                             },
                           ],
-                        },
+                        }, message),
                   ),
                 },
           ),
         },
         result: undefined,
       }));
-      await this.channel.deliver(paseo, requestId, taskNumber, message);
+      await this.channel.flush(paseo, requestId, taskNumber).catch((error: unknown) =>
+        console.error(`[coordinator] could not send the reviewed answer for ${requestId}:${taskNumber}; it stays queued`, error),
+      );
     } else {
       // 사람 카드로 돌린다. 코디네이터의 제안을 선택지 하나로 두고, 검토자의 우려를 '확인할 것'에 그대로 넣는다.
       // 사람이 읽는 카드 문구는 요청 언어를 따른다. 검토자의 우려 원문은 검토자가 쓴 그대로 둔다.
@@ -361,6 +404,7 @@ export class ReviewRunner {
     if (!found || !decision) throw new Error("This automatic decision no longer exists.");
     const revert = Boolean(input.revertText?.trim());
     const at = new Date().toISOString();
+    const revertMessage = `[From the human] The earlier automatic decision is withdrawn: "${decision.answer}"\n${input.revertText}\nUndo what that decision changed if needed (${decision.undo}), then continue with this instruction.`;
     await this.store.update((state) => {
       const requests = state.requests.map((request) =>
         request.id !== input.requestId
@@ -370,7 +414,8 @@ export class ReviewRunner {
               tasks: request.tasks.map((task) =>
                 task.number !== input.taskNumber
                   ? task
-                  : {
+                  : (() => {
+                      const updated = {
                       ...task,
                       autoDecisions: task.autoDecisions.map((item) =>
                         item.id === input.id ? { ...item, reviewedAt: at, reverted: item.reverted || revert } : item,
@@ -382,7 +427,10 @@ export class ReviewRunner {
                       ...(revert && (task.status === "review" || task.status === "done") && !task.completion?.closedAt
                         ? { status: "running" as const, completion: null, doneNudgedAt: null }
                         : {}),
-                    },
+                    };
+                      // 되돌린 지시는 상태 변경과 같은 update 에서 outbox 에 넣는다 (WorkerChannel 설명).
+                      return revert ? queued(updated, revertMessage) : updated;
+                    })(),
               ),
             },
       );
@@ -399,11 +447,8 @@ export class ReviewRunner {
       return { state: { ...state, requests, disabledRules }, result: undefined };
     });
     if (revert) {
-      await this.channel.deliver(
-        paseo,
-        input.requestId,
-        input.taskNumber,
-        `[From the human] The earlier automatic decision is withdrawn: "${decision.answer}"\n${input.revertText}\nUndo what that decision changed if needed (${decision.undo}), then continue with this instruction.`,
+      await this.channel.flush(paseo, input.requestId, input.taskNumber).catch((error: unknown) =>
+        console.error(`[coordinator] could not send the revert for ${input.requestId}:${input.taskNumber}; it stays queued`, error),
       );
     }
   }

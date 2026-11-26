@@ -2,18 +2,36 @@
 
 import type { PaseoApi } from "./paseo-api";
 import type { PluginSettings } from "@getpaseo/plugin/server";
-import type { CoordinatorRequest, Task } from "../shared/model";
+import type { CoordinatorRequest, CoordinatorState, Task } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
 import { continuedBy, finishRequestIfDone } from "./completion";
 import { workspaceTitle } from "./coordinator";
 import type { StateStore } from "./store";
-import type { WorkerChannel } from "./worker-channel";
+import { type WorkerChannel, queued } from "./worker-channel";
 
 type Settings = PluginSettings<typeof settingsSchema>;
 type TaskPatch = Partial<Pick<Task, "status" | "workspaceId" | "agentId" | "branch" | "note" | "poteto" | "doneNudgedAt">>;
 
 /** 이 라벨로 워커를 알아본다. 코디네이터 라벨과 같은 키를 쓴다. */
 const ROLE_LABEL = "paseo-coordinator.role";
+
+type TurnOutcome = { kind: "completed" } | { kind: "failed"; error: { message: string } } | { kind: "canceled"; reason: string };
+
+const RECONCILE_INTERVAL_MS = 15_000;
+
+const NUDGE =
+  "[From the coordinator plugin] Your turn ended without report_done. If the task is finished and verified, call report_done now (after pushing and opening the pull request if you are the last task on the branch, unless the human's request says not to: then quote it as noPullRequestReason). If you are blocked, call report_blocker instead.";
+
+function patch(state: CoordinatorState, requestId: string, number: number, change: TaskPatch): CoordinatorState {
+  return {
+    ...state,
+    requests: state.requests.map((request) =>
+      request.id === requestId
+        ? { ...request, tasks: request.tasks.map((task) => (task.number === number ? { ...task, ...change } : task)) }
+        : request,
+    ),
+  };
+}
 
 // 선행 작업이 이 상태면 다음 작업을 시작한다. review 는 워커가 일을 마치고 사람의 확인만 남은 상태다.
 const FINISHED: ReadonlySet<Task["status"]> = new Set(["done", "review"]);
@@ -99,6 +117,9 @@ function kickoff(request: CoordinatorRequest, task: Task, branch: string, contin
 export class Dispatcher {
   private running = false;
   private again = false;
+  /** 워커별로 턴 처리를 한 줄로 세운다. hook 과 보정 검사가 같은 턴을 동시에 처리하지 않게 한다. */
+  private readonly turnLocks = new Map<string, Promise<void>>();
+  private lastReconcile = 0;
 
   constructor(
     private readonly store: StateStore,
@@ -137,18 +158,33 @@ export class Dispatcher {
    * 워커의 턴이 끝났다. 읽기 조사는 끝난 것으로, 변경 작업은 사람의 확인이 남은 것으로 둔다.
    * 그다음 이 작업을 기다리던 작업을 배정하고, 읽기 조사가 모두 끝났으면 보고를 모아 답변으로 만든다.
    */
-  async onWorkerTurn(
+  async onWorkerTurn(paseo: PaseoApi, agentId: string, outcome: TurnOutcome, dispatchNext = true): Promise<void> {
+    const previous = this.turnLocks.get(agentId) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(() => this.settleTurn(paseo, agentId, outcome, dispatchNext));
+    this.turnLocks.set(agentId, next);
+    try {
+      await next;
+    } finally {
+      if (this.turnLocks.get(agentId) === next) this.turnLocks.delete(agentId);
+    }
+  }
+
+  private async settleTurn(
     paseo: PaseoApi,
     agentId: string,
-    outcome: { kind: "completed" } | { kind: "failed"; error: { message: string } } | { kind: "canceled"; reason: string },
+    outcome: TurnOutcome,
     /** 보정 검사에서 부를 때는 false. 배정은 이미 돌고 있는 흐름이 이어서 한다. */
-    dispatchNext = true,
+    dispatchNext: boolean,
   ): Promise<void> {
     const found = await this.findWorker(agentId);
     if (!found || found.request.status !== "running") return;
     const { request, task } = found;
     // 턴 사이에 쌓인 메시지(코디네이터 지시, 사람의 결정)가 있으면 먼저 보낸다. 워커가 이어서 일하므로 상태는 그대로다.
-    if (await this.channel.flush(paseo, request.id, task.number)) return;
+    // 쌓인 메시지가 있는데 보내지 못했으면(워커가 다시 바쁨) 아직 끝난 것이 아니다.
+    if (task.outbox.length > 0) {
+      await this.channel.flush(paseo, request.id, task.number);
+      return;
+    }
     // report_blocker 로 보고하고 멈춘 워커는 결정을 기다리는 중이다. 끝난 것으로 보지 않는다.
     if (task.blocker) return;
     if (outcome.kind === "failed") {
@@ -178,15 +214,29 @@ export class Dispatcher {
       return true;
     }
     if (!task.doneNudgedAt) {
-      await this.patchTask(request.id, task.number, { doneNudgedAt: new Date().toISOString() });
-      await this.channel.deliver(
-        paseo,
-        request.id,
-        task.number,
-        "[From the coordinator plugin] Your turn ended without report_done. If the task is finished and verified, call report_done now (after pushing and opening the pull request if you are the last task on the branch, unless the human's request says not to: then quote it as noPullRequestReason). If you are blocked, call report_blocker instead.",
-      );
+      // 다시 요청하는 메시지는 표시와 같은 update 에서 outbox 에 넣는다 (WorkerChannel 설명).
+      await this.store.update((state) => ({
+        state: {
+          ...state,
+          requests: state.requests.map((item) =>
+            item.id !== request.id
+              ? item
+              : {
+                  ...item,
+                  tasks: item.tasks.map((current) =>
+                    current.number !== task.number ? current : queued({ ...current, doneNudgedAt: new Date().toISOString() }, NUDGE),
+                  ),
+                },
+          ),
+        },
+        result: undefined,
+      }));
+      await this.channel.flush(paseo, request.id, task.number);
       return false;
     }
+    // 다시 요청한 메시지를 처리하는 중일 수 있다. 정말 쉬고 있을 때만 막힘으로 둔다.
+    const snapshot = task.agentId ? await paseo.agents.ref(task.agentId).refresh().catch(() => null) : null;
+    if (!snapshot || snapshot.agent.status === "running" || (snapshot.agent.pendingPermissions?.length ?? 0) > 0) return false;
     await this.patchTask(request.id, task.number, { status: "blocked", note: "The worker ended twice without report_done. Open the worker to see where it stopped." });
     return true;
   }
@@ -197,22 +247,35 @@ export class Dispatcher {
    * 워커가 쉬고 있으면 턴이 끝난 것으로, 에러면 막힌 것으로 처리한다.
    */
   private async reconcile(paseo: PaseoApi): Promise<void> {
+    // hook 유실을 보정하는 검사라 자주 돌 필요가 없다. 워커가 많을 때 턴이 끝날 때마다 모든 워커를 조회하지 않게 간격을 둔다.
+    if (Date.now() - this.lastReconcile < RECONCILE_INTERVAL_MS) return;
+    this.lastReconcile = Date.now();
     const state = await this.store.read();
-    for (const request of state.requests) {
-      if (request.status !== "running") continue;
-      for (const task of request.tasks) {
-        if (task.status !== "running" || !task.agentId || task.blocker || task.outbox.length > 0) continue;
-        const snapshot = await paseo.agents.ref(task.agentId).refresh().catch(() => null);
-        if (!snapshot) continue;
+    const watched = state.requests
+      .filter((request) => request.status === "running")
+      .flatMap((request) =>
+        request.tasks
+          .filter((task) => task.agentId && !task.blocker && (task.status === "running" || task.outbox.length > 0))
+          .map((task) => ({ request, task })),
+      );
+    await Promise.all(
+      watched.map(async ({ request, task }) => {
+        const snapshot = await paseo.agents.ref(task.agentId!).refresh().catch(() => null);
+        if (!snapshot) return;
         const agent = snapshot.agent;
-        if ((agent.pendingPermissions?.length ?? 0) > 0) continue;
-        if (agent.status === "idle") {
-          await this.onWorkerTurn(paseo, task.agentId, { kind: "completed" }, false);
-        } else if (agent.status === "error") {
-          await this.onWorkerTurn(paseo, task.agentId, { kind: "failed", error: { message: agent.lastError ?? "Worker stopped with an error." } }, false);
+        if (agent.status === "running" || (agent.pendingPermissions?.length ?? 0) > 0) return;
+        // 쉬는 워커에게 보내지 못한 메시지가 남아 있으면 보낸다 (턴 종료 hook 이 유실된 경우).
+        if (task.outbox.length > 0) {
+          await this.channel.flush(paseo, request.id, task.number).catch(() => undefined);
+          return;
         }
-      }
-    }
+        if (agent.status === "idle") {
+          await this.onWorkerTurn(paseo, task.agentId!, { kind: "completed" }, false);
+        } else if (agent.status === "error") {
+          await this.onWorkerTurn(paseo, task.agentId!, { kind: "failed", error: { message: agent.lastError ?? "Worker stopped with an error." } }, false);
+        }
+      }),
+    );
   }
 
   private async pass(paseo: PaseoApi): Promise<void> {
@@ -262,9 +325,21 @@ export class Dispatcher {
       request.tasks
         .filter((other) => task.dependsOn.includes(other.number) && other.projectId === task.projectId && other.workspaceId)
         .sort((a, b) => b.number - a.number)[0] ?? null;
+    // 한 작업의 worktree 는 한 작업만 이어 쓴다. 둘이 이어 쓰면 두 워커가 한 worktree 에서 동시에 일하고,
+    // 한쪽을 머지할 때 다른 쪽의 worktree 가 지워진다. 계획 검증(validatePlan)이 막지만 여기서도 한 번 더 막는다.
+    if (continuesFrom && continuedBy(request, continuesFrom)?.number !== task.number) {
+      throw new Error(`Task ${task.number} and another task both continue task ${continuesFrom.number} in the same worktree. Chain them instead.`);
+    }
     const branch = continuesFrom?.branch ?? branchFor(request, task);
-    // 두 번 배정되지 않게 워커를 만들기 전에 먼저 실행 중으로 표시한다.
-    await this.patchTask(request.id, task.number, { status: "running", branch, note: null });
+    // 두 번 배정되지 않게 워커를 만들기 전에 먼저 실행 중으로 표시한다. 저장하는 순간에 요청과 작업이 그대로인지 확인한다
+    // (취소되거나 다시 계획됐으면 시작하지 않는다). 이후 기록은 이 브랜치로 표시한 작업에만 한다.
+    const claimed = await this.store.update((state) => {
+      const current = state.requests.find((item) => item.id === request.id);
+      const target = current?.tasks.find((item) => item.number === task.number);
+      if (current?.status !== "running" || target?.status !== "waiting") return { state, result: false };
+      return { state: patch(state, request.id, task.number, { status: "running", branch, note: null }), result: true };
+    });
+    if (!claimed) return;
     const title = workspaceTitle(request.title ?? request.id, task);
     const workspace = continuesFrom?.workspaceId
       ? paseo.workspaces.ref(continuesFrom.workspaceId)
@@ -283,7 +358,10 @@ export class Dispatcher {
       // 이어 쓰는 워크스페이스는 지금 하는 작업이 보이도록 제목을 바꾼다.
       await workspace.setTitle(title).catch(() => undefined);
     }
-    await this.patchTask(request.id, task.number, { workspaceId: workspace.id });
+    if (!(await this.patchClaimed(request.id, task.number, branch, { workspaceId: workspace.id }))) {
+      if (!continuesFrom) await workspace.archive().catch(() => undefined);
+      return;
+    }
     const provider = values.worker.model.split("/")[0]!;
     const modes = (await paseo.providers.listModes(provider).catch(() => null))?.modes ?? [];
     const has = (id: string) => modes.some((mode) => mode.id === id);
@@ -306,7 +384,11 @@ export class Dispatcher {
     const poteto = values.poteto ? await this.potetoFor(paseo, request, provider, agent.id) : { use: false, note: null };
     await paseo.agents.ref(agent.id).send(kickoff(request, task, branch, continuesFrom, poteto.use));
     // 킥오프를 보낸 뒤에 기록한다. 먼저 기록하면 보정 검사(reconcile)가 프롬프트 전의 쉬는 워커를 끝난 것으로 본다.
-    await this.patchTask(request.id, task.number, { agentId: agent.id, poteto: poteto.use, note: poteto.note });
+    // 그사이 요청이 취소됐거나 다시 계획됐으면 이 워커는 맡을 작업이 없다. 정리한다.
+    if (!(await this.patchClaimed(request.id, task.number, branch, { agentId: agent.id, poteto: poteto.use, note: poteto.note }))) {
+      await paseo.agents.ref(agent.id).archive().catch(() => undefined);
+      return;
+    }
     console.log(`[coordinator] started ${request.id} task ${task.number} as ${agent.id} on ${branch}${poteto.use ? " with /poteto-mode" : ""}`);
   }
 
@@ -364,6 +446,16 @@ export class Dispatcher {
       },
       result: undefined,
     }));
+  }
+
+  /** 요청이 실행 중이고 작업이 아직 이 브랜치로 표시돼 있을 때만 기록한다. 기록했으면 true. */
+  private patchClaimed(requestId: string, number: number, branch: string, change: TaskPatch): Promise<boolean> {
+    return this.store.update((state) => {
+      const current = state.requests.find((item) => item.id === requestId);
+      const target = current?.tasks.find((item) => item.number === number);
+      if (current?.status !== "running" || target?.status !== "running" || target.branch !== branch) return { state, result: false };
+      return { state: patch(state, requestId, number, change), result: true };
+    });
   }
 
   private patchTask(requestId: string, number: number, patch: TaskPatch): Promise<void> {

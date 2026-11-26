@@ -82,6 +82,11 @@ export function StartedCard({ request, ctx }: { request: CoordinatorRequest; ctx
       else if (kind === "revise") await revise({ id: request.id, text });
       else await cancel({ id: request.id });
     },
+    // 보낸 지시가 입력창에 남으면 성공했는지 모르고 다시 보내게 된다.
+    onSuccess: () => {
+      setText("");
+      setRevising(false);
+    },
   });
   const busy = action.isPending;
   const accent = columnColor("review", ctx.theme);

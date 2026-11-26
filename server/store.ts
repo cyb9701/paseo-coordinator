@@ -1,6 +1,6 @@
 /// <reference types="node" />
 
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { type CoordinatorState, stateSchema } from "../shared/model";
@@ -43,14 +43,22 @@ export class StateStore {
         const raw = JSON.parse(await readFile(this.file, "utf8"));
         const parsed = stateSchema.safeParse(raw);
         if (parsed.success) this.state = parsed.data;
-        else console.error("[coordinator] state.json is invalid; starting empty", parsed.error.message);
+        else await this.setAside(`state.json is invalid: ${parsed.error.message}`);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-          console.error("[coordinator] could not read state.json; starting empty", error);
-        }
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") await this.setAside(`could not read state.json: ${String(error)}`);
       }
     })();
     return this.loaded;
+  }
+
+  /**
+   * 읽지 못한 state.json 을 옆에 남기고 빈 상태로 시작한다. 그대로 두면 다음 저장이 원본을 빈 상태로 덮어써
+   * 요청과 결정 기록이 모두 사라진다 (예: 새 버전이 쓴 값을 옛 버전이 읽을 때).
+   */
+  private async setAside(reason: string): Promise<void> {
+    const backup = join(this.directory, `state.json.bad-${Date.now()}`);
+    await copyFile(this.file, backup).catch(() => undefined);
+    console.error(`[coordinator] ${reason}; kept a copy at ${backup} and starting empty`);
   }
 
   async read(): Promise<CoordinatorState> {

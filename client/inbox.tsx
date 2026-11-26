@@ -9,8 +9,9 @@ import { columnColor, isDirectAgent, isVisibleAgent } from "./agent-state";
 import { AnswerCard } from "./answer-card";
 import { BlockerCard } from "./blocker-card";
 import { MergeCard } from "./merge-card";
+import { StoppedCard } from "./stopped-card";
 import { AutoDecisionCard } from "./auto-decision-card";
-import { autoDecisionCards, blockerCards, completionCards, requestNeedsReaction, requestNeedsReview, useCoordinatorState, useSentLog } from "./coordinator-state";
+import { autoDecisionCards, blockerCards, completionCards, stoppedCards, requestNeedsReaction, requestNeedsReview, useCoordinatorState, useSentLog } from "./coordinator-state";
 import { StartedCard } from "./plan-card";
 import { QuestionCard } from "./question-card";
 import { cardCount, useClassifier, usePending } from "./pending-store";
@@ -553,7 +554,8 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
   // 워커 질문: 워커가 보고했고 코디네이터가 결정 카드를 다 쓴 것. 워커 에이전트 자체는 쉬는 중이라 에이전트 카드로는 안 잡힌다.
   const blockers = blockerCards(requests);
   const merges = completionCards(requests);
-  const reactCount = questions.length + blockers.length + merges.length + cardCount(reacting.map((ref) => ref.id), directory);
+  const stopped = stoppedCards(requests);
+  const reactCount = questions.length + blockers.length + merges.length + stopped.length + cardCount(reacting.map((ref) => ref.id), directory);
   const autos = autoDecisionCards(requests);
   const reviewCount = reviews.length + autos.length + reviewing.length;
   return (
@@ -577,6 +579,9 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
         ))}
         {merges.map(({ request, task }) => (
           <MergeCard key={`${request.id}:${task.number}`} request={request} task={task} ctx={ctx} />
+        ))}
+        {stopped.map(({ request, task }) => (
+          <StoppedCard key={`${request.id}:${task.number}`} request={request} task={task} ctx={ctx} />
         ))}
         {reacting.map((ref) => (
           <AgentDecisions key={ref.key} agentRef={ref} ctx={ctx} />

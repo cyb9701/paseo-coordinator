@@ -20,7 +20,10 @@ export function BlockerCard({ request, task, ctx }: { request: CoordinatorReques
   const ask = useRpc(askCoordinatorRpc);
   const blocker = task.blocker;
   const analysis = blocker?.coordinator ?? null;
-  const [selected, setSelected] = useState<string | null>(analysis?.recommended ?? null);
+  const [chosen, setChosen] = useState<string | null>(analysis?.recommended ?? null);
+  // 코디네이터가 카드를 다시 쓰면(질문하기 뒤 등) 예전 선택이 새 선택지에 없을 수 있다. 그때는 새 추천을 고른 것으로 본다.
+  const selected = analysis?.options.some((option) => option.label === chosen) ? chosen : (analysis?.recommended ?? null);
+  const setSelected = setChosen;
   const [panel, setPanel] = useState<"none" | "instruct" | "ask">("none");
   const [text, setText] = useState("");
   const action = useMutation({

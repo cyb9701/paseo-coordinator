@@ -7,7 +7,7 @@ import { z } from "zod";
 import type { CoordinatorRequest, Task } from "../shared/model";
 import { answeredQa } from "./requests";
 import type { StateStore } from "./store";
-import type { WorkerChannel } from "./worker-channel";
+import { type WorkerChannel, queued } from "./worker-channel";
 
 type PullRequest = NonNullable<NonNullable<Task["completion"]>["pr"]>;
 
@@ -64,6 +64,18 @@ async function findPullRequest(cwd: string, branch: string): Promise<PullRequest
   return raw ? toPullRequest(raw) : null;
 }
 
+/**
+ * worktree 가 PR 에 담긴 것과 같은지. 커밋하지 않은 변경이 있거나 HEAD 가 PR 의 마지막 커밋과 다르면 그 차이를 돌려준다.
+ * PR 이 있어도 워커가 고친 뒤 push 하지 않았을 수 있다. 그대로 머지하면 고치기 전 PR 이 들어가고, 정리하면서 그 커밋이 사라진다.
+ */
+async function differsFromPr(cwd: string, url: string): Promise<string | null> {
+  const dirty = (await run("git", ["status", "--porcelain"], cwd)).trim();
+  if (dirty) return `uncommitted changes:\n${dirty.split("\n").slice(0, 10).join("\n")}`;
+  const head = (await run("git", ["rev-parse", "HEAD"], cwd)).trim();
+  const prHead = (JSON.parse(await run("gh", ["pr", "view", url, "--json", "headRefOid"], cwd)) as { headRefOid: string }).headRefOid;
+  return head === prHead ? null : `local HEAD ${head.slice(0, 7)} is not the pull request head ${prHead.slice(0, 7)} (not pushed?)`;
+}
+
 async function readPullRequest(cwd: string, url: string): Promise<PullRequest> {
   return toPullRequest(JSON.parse(await run("gh", ["pr", "view", url, "--json", PR_FIELDS], cwd)) as RawPr);
 }
@@ -76,7 +88,8 @@ async function unpublishedWork(cwd: string, branch: string): Promise<string | nu
   const dirty = (await run("git", ["status", "--porcelain"], cwd)).trim();
   if (dirty) return `uncommitted changes:\n${dirty.split("\n").slice(0, 10).join("\n")}`;
   const ahead = Number(
-    (await run("git", ["rev-list", "--count", "HEAD", "--not", `--exclude=refs/remotes/origin/${branch}`, "--remotes"], cwd)).trim(),
+    // --remotes 앞의 --exclude 패턴은 refs/remotes/ 를 뺀 이름으로 써야 걸린다 (git 문서; refs/remotes/… 로 쓰면 아무것도 제외되지 않았다).
+    (await run("git", ["rev-list", "--count", "HEAD", "--not", `--exclude=origin/${branch}`, "--remotes"], cwd)).trim(),
   );
   return ahead > 0 ? `${ahead} commit(s) on ${branch} that no pull request carries` : null;
 }
@@ -169,6 +182,11 @@ export function reportDoneTool(store: StateStore) {
             }
           } else if (pr.state !== "OPEN") {
             return { text: `The pull request for ${task.branch} is ${pr.state}. Open a new one, then call report_done again.`, isError: true };
+          } else {
+            const differs = await differsFromPr(agent.cwd, pr.url);
+            if (differs) {
+              return { text: `Your worktree is not what pull request #${pr.number} contains (${differs}). Commit and push ${task.branch}, then call report_done again.`, isError: true };
+            }
           }
         } catch (error) {
           return { text: `Could not check the pull request: ${error instanceof Error ? error.message : String(error)}`, isError: true };
@@ -227,6 +245,12 @@ export class CompletionRunner {
     const root = projects.find((item) => item.projectId === task.projectId)?.projectRootPath;
     if (!root) throw new Error(`Project ${task.projectId} is not registered on this host.`);
     if (completion.pr) {
+      // 카드가 뜬 뒤 워커가 더 고쳤을 수 있다. worktree 가 남아 있으면 PR 과 같은지 다시 본다.
+      const worktree = task.agentId ? (await paseo.agents.ref(task.agentId).refresh().catch(() => null))?.agent.cwd : null;
+      if (worktree) {
+        const differs = await differsFromPr(worktree, completion.pr.url).catch(() => null);
+        if (differs) throw new Error(`The worker's worktree has changes the pull request does not (${differs}). Ask the worker to push them first.`);
+      }
       const pr = await readPullRequest(root, completion.pr.url);
       if (pr.state === "CLOSED") throw new Error(`Pull request #${pr.number} was closed without merging.`);
       if (pr.state === "OPEN") {
@@ -293,24 +317,26 @@ export class CompletionRunner {
     await this.store.update((current) => ({
       state: {
         ...current,
-        requests: patchTask(current, request.id, [task.number], (item) => ({
-          ...item,
-          status: "running" as const,
-          completion: null,
-          doneNudgedAt: null,
-          decisions: [
-            ...item.decisions,
-            { summary: `Asked for changes before merge: ${text}`, by: "human" as const, at, qa: answeredQa(item.completion?.qa ?? []) },
-          ],
-        })),
+        requests: patchTask(current, request.id, [task.number], (item) =>
+          queued(
+            {
+              ...item,
+              status: "running" as const,
+              completion: null,
+              doneNudgedAt: null,
+              decisions: [
+                ...item.decisions,
+                { summary: `Asked for changes before merge: ${text}`, by: "human" as const, at, qa: answeredQa(item.completion?.qa ?? []) },
+              ],
+            },
+            `[Change request from the human before merging]\n${text}\nMake the change on the same branch, verify it, push, and call report_done again.`,
+          ),
+        ),
       },
       result: undefined,
     }));
-    await this.channel.deliver(
-      paseo,
-      request.id,
-      task.number,
-      `[Change request from the human before merging]\n${text}\nMake the change on the same branch, verify it, push, and call report_done again.`,
+    await this.channel.flush(paseo, request.id, task.number).catch((error: unknown) =>
+      console.error(`[coordinator] could not send the change request for ${request.id}:${task.number}; it stays queued`, error),
     );
   }
 }

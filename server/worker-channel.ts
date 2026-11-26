@@ -1,60 +1,72 @@
 import type { PaseoApi } from "./paseo-api";
-import type { Task } from "../shared/model";
+import type { CoordinatorState, Task } from "../shared/model";
 import type { StateStore } from "./store";
+
+/** 작업의 outbox 에 메시지를 더한다. 상태를 바꾸는 같은 store.update 안에서 쓴다 (아래 WorkerChannel 설명). */
+export function queued(task: Task, text: string): Task {
+  return { ...task, outbox: [...task.outbox, { text, at: new Date().toISOString() }] };
+}
 
 /**
  * 워커에게 메시지를 보내는 길. 워커가 일하는 중이거나 권한을 기다리는 중에 보내면 진행 중인 턴이 끊기고
- * 대기 중인 권한 요청이 거절된다 (RULES.md §13). 그래서 그때는 작업의 outbox 에 쌓아 두고, 워커의 턴이 끝나면 보낸다.
+ * 대기 중인 권한 요청이 거절된다 (RULES.md §13). 그래서 메시지는 항상 작업의 outbox 를 거쳐, 워커가 쉴 때만 나간다.
  * 플러그인이 보내는 메시지라 Paseo 가 감싸지 않는다.
+ *
+ * 상태를 running 으로 바꾸는 쪽은 같은 store.update 안에서 outbox 에 메시지를 넣어야 한다. 상태를 먼저 바꾸고 나중에
+ * 보내면, 그 사이에 보정 검사(Dispatcher.reconcile)가 쉬고 있는 워커를 '턴이 끝났다'고 판정한다.
  */
 export class WorkerChannel {
   constructor(private readonly store: StateStore) {}
 
+  /** outbox 에 넣고 바로 내보내 본다. 워커가 바쁘면 쌓인 채로 두고, 턴이 끝날 때 나간다. */
   async deliver(paseo: PaseoApi, requestId: string, taskNumber: number, text: string): Promise<"sent" | "queued"> {
-    const task = await this.task(requestId, taskNumber);
-    if (!task?.agentId) throw new Error(`Task ${requestId}/${taskNumber} has no worker yet.`);
-    const snapshot = await paseo.agents.ref(task.agentId).refresh().catch(() => null);
-    const busy =
-      !snapshot || snapshot.agent.status === "running" || (snapshot.agent.pendingPermissions?.length ?? 0) > 0;
-    if (busy) {
-      await this.patch(requestId, taskNumber, (current) => ({
-        outbox: [...current.outbox, { text, at: new Date().toISOString() }],
-      }));
-      return "queued";
-    }
-    await paseo.agents.ref(task.agentId).send(text);
-    return "sent";
+    await this.store.update((state) => ({ state: patchTask(state, requestId, taskNumber, (task) => queued(task, text)), result: undefined }));
+    return (await this.flush(paseo, requestId, taskNumber)) ? "sent" : "queued";
   }
 
-  /** 워커의 턴이 끝났을 때 쌓인 메시지를 한 번에 보낸다. 보냈으면 true. */
+  /**
+   * 쌓인 메시지를 워커가 쉬고 있으면 한 번에 보낸다. 보냈으면 true.
+   * 꺼내기와 비우기를 한 번의 update 로 해서 그 사이에 더해진 메시지를 잃지 않고, 보내기가 실패하면 되돌려 넣는다.
+   */
   async flush(paseo: PaseoApi, requestId: string, taskNumber: number): Promise<boolean> {
-    const task = await this.task(requestId, taskNumber);
-    if (!task?.agentId || task.outbox.length === 0) return false;
-    const text = task.outbox.map((item) => item.text).join("\n\n---\n\n");
-    await this.patch(requestId, taskNumber, () => ({ outbox: [] }));
-    await paseo.agents.ref(task.agentId).send(text);
-    return true;
+    const before = await this.task(requestId, taskNumber);
+    if (!before?.agentId || before.outbox.length === 0) return false;
+    const snapshot = await paseo.agents.ref(before.agentId).refresh().catch(() => null);
+    if (!snapshot || snapshot.agent.status === "running" || (snapshot.agent.pendingPermissions?.length ?? 0) > 0) return false;
+    const taken = await this.store.update((state) => {
+      const task = findTask(state, requestId, taskNumber);
+      if (!task?.agentId || task.outbox.length === 0) return { state, result: null };
+      return { state: patchTask(state, requestId, taskNumber, (current) => ({ ...current, outbox: [] })), result: { agentId: task.agentId, outbox: task.outbox } };
+    });
+    if (!taken) return false;
+    try {
+      await paseo.agents.ref(taken.agentId).send(taken.outbox.map((item) => item.text).join("\n\n---\n\n"));
+      return true;
+    } catch (error) {
+      await this.store.update((state) => ({
+        state: patchTask(state, requestId, taskNumber, (task) => ({ ...task, outbox: [...taken.outbox, ...task.outbox] })),
+        result: undefined,
+      }));
+      throw error;
+    }
   }
 
   private async task(requestId: string, taskNumber: number): Promise<Task | null> {
-    const request = (await this.store.read()).requests.find((item) => item.id === requestId);
-    return request?.tasks.find((task) => task.number === taskNumber) ?? null;
+    return findTask(await this.store.read(), requestId, taskNumber);
   }
+}
 
-  private patch(requestId: string, taskNumber: number, change: (task: Task) => Partial<Task>): Promise<void> {
-    return this.store.update((state) => ({
-      state: {
-        ...state,
-        requests: state.requests.map((request) =>
-          request.id === requestId
-            ? {
-                ...request,
-                tasks: request.tasks.map((task) => (task.number === taskNumber ? { ...task, ...change(task) } : task)),
-              }
-            : request,
-        ),
-      },
-      result: undefined,
-    }));
-  }
+function findTask(state: CoordinatorState, requestId: string, taskNumber: number): Task | null {
+  return state.requests.find((item) => item.id === requestId)?.tasks.find((task) => task.number === taskNumber) ?? null;
+}
+
+function patchTask(state: CoordinatorState, requestId: string, taskNumber: number, change: (task: Task) => Task): CoordinatorState {
+  return {
+    ...state,
+    requests: state.requests.map((request) =>
+      request.id === requestId
+        ? { ...request, tasks: request.tasks.map((task) => (task.number === taskNumber ? change(task) : task)) }
+        : request,
+    ),
+  };
 }

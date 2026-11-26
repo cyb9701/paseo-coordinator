@@ -12,7 +12,12 @@ export function isWorkerSession(labels: Readonly<Record<string, string>>): boole
  * 워커가 막혔을 때 쓰는 도구. 글로 "진행할까요?" 라고 묻고 턴을 끝내면 Paseo 는 그냥 턴 종료로 보고
  * 사람에게 '결과 미확인'으로만 보인다 (DESIGN.md 알려진 한계). 이 도구로 보고하면 코디네이터가 받아 결정 카드를 만든다.
  */
-export function reportBlockerTool(store: StateStore, onReported: (paseo: PaseoApi) => void) {
+export function reportBlockerTool(
+  store: StateStore,
+  onReported: (paseo: PaseoApi) => void,
+  /** 검토가 도는 중에 워커가 다시 보고해 블로커가 바뀌었다. 그 검토자들을 정리한다. */
+  onReviewReplaced: (paseo: PaseoApi, requestId: string, taskNumber: number, reviewerIds: string[]) => void,
+) {
   return defineAgentTool({
     name: "report_blocker",
     title: "Report a blocker",
@@ -28,12 +33,17 @@ export function reportBlockerTool(store: StateStore, onReported: (paseo: PaseoAp
     execute: async (input, { agent, paseo }) => {
       const at = new Date().toISOString();
       const found = await store.update((state) => {
-        let hit = false;
+        let hit: { requestId: string; taskNumber: number; reviewers: string[] } | null = null;
         const requests = state.requests.map((request) => ({
           ...request,
           tasks: request.tasks.map((task) => {
             if (task.agentId !== agent.id) return task;
-            hit = true;
+            const review = task.blocker?.review;
+            hit = {
+              requestId: request.id,
+              taskNumber: task.number,
+              reviewers: review?.status === "running" ? review.reviewers.map((item) => item.agentId) : [],
+            };
             return {
               ...task,
               status: "blocked" as const,
@@ -58,6 +68,8 @@ export function reportBlockerTool(store: StateStore, onReported: (paseo: PaseoAp
         return { state: { ...state, requests }, result: hit };
       });
       if (!found) return { text: "You are not a coordinator worker; nothing was reported.", isError: true };
+      const { requestId, taskNumber, reviewers } = found as { requestId: string; taskNumber: number; reviewers: string[] };
+      if (reviewers.length) onReviewReplaced(paseo, requestId, taskNumber, reviewers);
       onReported(paseo);
       return { text: "Reported to the coordinator. Stop now and end your turn; the decision will arrive in this conversation." };
     },

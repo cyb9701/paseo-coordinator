@@ -21,6 +21,10 @@ export function AnswerCard({ request, ctx }: { request: CoordinatorRequest; ctx:
   const action = useMutation({
     mutationFn: async (kind: "ack" | "ask") =>
       kind === "ack" ? acknowledge({ id: request.id }) : revise({ id: request.id, text }),
+    onSuccess: () => {
+      setText("");
+      setAsking(false);
+    },
   });
   const answer = request.answer;
   if (!answer) return null;

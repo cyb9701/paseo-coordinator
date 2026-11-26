@@ -1,9 +1,10 @@
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { RpcInput } from "@getpaseo/plugin";
 import type { cancelRequestRpc, createRequestRpc, recordInstructionRpc } from "../shared/model";
-import { openCard, withCardQa } from "../shared/model";
+import { hasStarted, openCard, withCardQa } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
 import type { StateStore } from "./store";
+import { queued } from "./worker-channel";
 
 type Settings = PluginSettings<typeof settingsSchema>;
 
@@ -100,11 +101,12 @@ export async function revisePlan({ id, text }: { id: string; text: string }, sto
     const entry = { text, at: new Date().toISOString(), kind: "instruction" as const };
     // 이미 워커가 일하는 요청은 다시 계획하지 않는다(같은 작업이 또 배정된다). 요청은 진행 중인 채로 지시만 남기고,
     // 코디네이터가 읽어서 관련 워커에게 전한다 (coordinator_message_worker).
-    if (request.status === "running" && request.tasks.some((task) => task.agentId)) {
+    // 질문 카드의 '직접 지시'로 왔으면 질문은 이 지시로 대신한다.
+    if (request.status === "running" && hasStarted(request)) {
       return {
         state: {
           ...state,
-          requests: state.requests.map((item) => (item.id === id ? { ...item, feedback: [...item.feedback, entry] } : item)),
+          requests: state.requests.map((item) => (item.id === id ? { ...item, question: null, feedback: [...item.feedback, entry] } : item)),
         },
         result: undefined,
       };
@@ -122,7 +124,10 @@ export async function revisePlan({ id, text }: { id: string; text: string }, sto
   return {};
 }
 
-/** 코디네이터의 질문 카드에 사람이 답했다. 답을 요청에 남기고 코디네이터가 이어서 진행하게 계획 단계로 돌린다. */
+/**
+ * 코디네이터의 질문 카드에 사람이 답했다. 답을 요청에 남긴다. 계획 전 질문이면 계획 단계로 돌리고,
+ * 워커가 이미 일하는 요청의 질문이면 진행 중인 채로 둔다. 코디네이터는 새 지시로 알림을 받아 워커에게 전한다.
+ */
 export async function answerQuestions(
   { id, answers }: { id: string; answers: { question: string; answer: string }[] },
   store: StateStore,
@@ -130,14 +135,17 @@ export async function answerQuestions(
   await store.update((state) => {
     const request = state.requests.find((item) => item.id === id);
     if (!request) throw new Error(`Unknown request ${id}`);
-    if (request.status !== "needs_input") throw new Error(`Request ${id} is ${request.status}, not waiting for answers.`);
+    const running = request.status === "running" && request.question !== null;
+    if (request.status !== "needs_input" && !running) throw new Error(`Request ${id} is ${request.status}, not waiting for answers.`);
     const at = new Date().toISOString();
     const entries = answers.map(({ question, answer }) => ({ text: `${question} → ${answer}`, at, kind: "answer" as const }));
     return {
       state: {
         ...state,
         requests: state.requests.map((item) =>
-          item.id === id ? { ...item, status: "planning" as const, question: null, feedback: [...item.feedback, ...entries] } : item,
+          item.id === id
+            ? { ...item, status: running ? item.status : ("planning" as const), question: null, feedback: [...item.feedback, ...entries] }
+            : item,
         ),
       },
       result: undefined,
@@ -171,13 +179,13 @@ export function answeredQa(qa: readonly { question: string; answer: string | nul
 }
 
 /**
- * 워커 질문 카드에서 사람이 결정했다. 고른 선택지(또는 직접 쓴 지시)를 워커에게 보낼 문장으로 돌려주고,
- * 카드를 닫고 결정을 기록한다. 보내는 일은 호출한 쪽이 워커 통로로 한다.
+ * 워커 질문 카드에서 사람이 결정했다. 고른 선택지(또는 직접 쓴 지시)를 워커의 outbox 에 넣고,
+ * 카드를 닫고 결정을 기록한다. 보내는 일은 호출한 쪽이 WorkerChannel.flush 로 한다.
  */
 export async function resolveBlocker(
   input: { requestId: string; taskNumber: number; choice: string | null; instruction: string | null },
   store: StateStore,
-): Promise<string> {
+): Promise<{ abandonedReviewers: string[] }> {
   return store.update((state) => {
     const request = state.requests.find((item) => item.id === input.requestId);
     const task = request?.tasks.find((item) => item.number === input.taskNumber);
@@ -203,12 +211,24 @@ export async function resolveBlocker(
                 tasks: item.tasks.map((t) =>
                   t.number !== task.number
                     ? t
-                    : { ...t, status: "running" as const, note: null, blocker: null, decisions: [...t.decisions, { summary, by: "human" as const, at, qa: answeredQa(blocker.qa) }] },
+                    : // 메시지는 상태와 같은 update 에서 outbox 에 넣는다. 보내는 일은 호출한 쪽이 flush 로 한다.
+                      queued(
+                        {
+                          ...t,
+                          status: "running" as const,
+                          note: null,
+                          blocker: null,
+                          doneNudgedAt: null,
+                          decisions: [...t.decisions, { summary, by: "human" as const, at, qa: answeredQa(blocker.qa) }],
+                        },
+                        message,
+                      ),
                 ),
               },
         ),
       },
-      result: message,
+      // 검토가 도는 중에 사람이 먼저 정했으면 그 검토자들은 정리해야 한다.
+      result: { abandonedReviewers: blocker.review?.status === "running" ? blocker.review.reviewers.map((item) => item.agentId) : [] },
     };
   });
 }
@@ -236,4 +256,36 @@ export async function askCoordinator(input: { requestId: string; taskNumber: num
     };
   });
   return {};
+}
+
+/** 막힌 작업을 다시 시작한다 (retryTaskRpc). 워커에게 보낼 메시지는 outbox 에 넣고, 보내는 일은 호출한 쪽이 flush 로 한다. */
+export async function retryTask(
+  input: { requestId: string; taskNumber: number; instruction: string | null },
+  store: StateStore,
+): Promise<{ hasWorker: boolean }> {
+  return store.update((state) => {
+    const request = state.requests.find((item) => item.id === input.requestId);
+    const task = request?.tasks.find((item) => item.number === input.taskNumber);
+    if (!request || request.status !== "running" || !task || task.status !== "blocked" || task.blocker) {
+      throw new Error("This task is not waiting to be restarted.");
+    }
+    const at = new Date().toISOString();
+    const text = input.instruction?.trim();
+    const decisions = [...task.decisions, { summary: `Restarted${text ? `: ${text}` : ""}`, by: "human" as const, at, qa: [] }];
+    const next = task.agentId
+      ? queued(
+          { ...task, status: "running" as const, note: null, doneNudgedAt: null, decisions },
+          `[From the human] ${text ?? "Continue your task from where you stopped."}\nWhen it is finished and verified, call report_done; if you need a decision, call report_blocker.`,
+        )
+      : { ...task, status: "waiting" as const, note: null, branch: null, workspaceId: null, decisions };
+    return {
+      state: {
+        ...state,
+        requests: state.requests.map((item) =>
+          item.id !== request.id ? item : { ...item, tasks: item.tasks.map((t) => (t.number === task.number ? next : t)) },
+        ),
+      },
+      result: { hasWorker: Boolean(task.agentId) },
+    };
+  });
 }

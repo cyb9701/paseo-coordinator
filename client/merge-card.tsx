@@ -1,7 +1,7 @@
-import { useRpc } from "@getpaseo/plugin/client";
+import { openExternalUrl, useRpc } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
-import { Linking, Text, TextInput, View } from "react-native";
+import { Text, TextInput, View } from "react-native";
 import { type CoordinatorRequest, type Task, askCoordinatorRpc, closeCompletionRpc } from "../shared/model";
 import { columnColor } from "./agent-state";
 import { DecisionHistory } from "./decision-history";
@@ -21,6 +21,7 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
   const ask = useRpc(askCoordinatorRpc);
   const [panel, setPanel] = useState<"none" | "revise" | "ask">("none");
   const [text, setText] = useState("");
+  const [openError, setOpenError] = useState<string | null>(null);
   const action = useMutation({
     mutationFn: (kind: "merge" | "revise" | "ask") =>
       kind === "ask"
@@ -167,7 +168,13 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
           theme={ctx.theme}
           onPress={() => setPanel((value) => (value === "ask" ? "none" : "ask"))}
         />
-        {pr ? <CtaButton label={ctx.t("mergeCard.openPr")} theme={ctx.theme} onPress={() => void Linking.openURL(pr.url)} /> : null}
+        {pr ? (
+          <CtaButton
+            label={ctx.t("mergeCard.openPr")}
+            theme={ctx.theme}
+            onPress={() => openExternalUrl(pr.url).catch((error: unknown) => setOpenError(error instanceof Error ? error.message : String(error)))}
+          />
+        ) : null}
         {task.agentId && ctx.navigation ? (
           <CtaButton
             label={ctx.t("blockerCard.openWorker")}
@@ -208,9 +215,11 @@ export function MergeCard({ request, task, ctx }: { request: CoordinatorRequest;
           </View>
         </View>
       ) : null}
-      {action.error ? (
+      {action.error || openError ? (
         <Text style={{ color: ctx.theme.colors.statusDanger, fontSize: ctx.fonts.meta }}>
-          {ctx.t("inbox.failed", { message: action.error instanceof Error ? action.error.message : String(action.error) })}
+          {ctx.t("inbox.failed", {
+            message: action.error ? (action.error instanceof Error ? action.error.message : String(action.error)) : (openError ?? ""),
+          })}
         </Text>
       ) : null}
     </View>

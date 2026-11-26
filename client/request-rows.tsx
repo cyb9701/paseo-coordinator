@@ -5,6 +5,7 @@ import { Pressable, Text, View } from "react-native";
 import { type CoordinatorRequest, type Task, cancelRequestRpc, requestProjectIds } from "../shared/model";
 import { COLUMN_KEYS, type ColumnKey, columnColor } from "./agent-state";
 import { DecisionHistory } from "./decision-history";
+import { requestNeedsReaction } from "./coordinator-state";
 import { ProjectChips } from "./project-chip";
 import { formatAgo } from "./time";
 import { CtaButton, GradeBadge, type ViewContext } from "./ui";
@@ -36,7 +37,7 @@ export function requestCells(request: CoordinatorRequest): Map<ColumnKey, Reques
   const cells = new Map<ColumnKey, RequestItem[]>();
   const add = (column: ColumnKey, item: RequestItem) => cells.set(column, [...(cells.get(column) ?? []), item]);
   if (request.status === "planning") add("auto", { kind: "planning" });
-  if (request.status === "needs_input") add("react", { kind: "question" });
+  if (requestNeedsReaction(request)) add("react", { kind: "question" });
   if (request.status === "answered") add("review", { kind: "answer" });
   for (const task of request.tasks) {
     const column = taskColumn(task);

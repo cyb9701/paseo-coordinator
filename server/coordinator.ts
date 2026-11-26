@@ -1,16 +1,16 @@
 /// <reference types="node" />
 
-import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve, sep } from "node:path";
 import type { PaseoApi } from "./paseo-api";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import { type AgentToolDefinition, defineAgentTool } from "@getpaseo/plugin/server";
 import { z } from "zod";
-import { AUTO_RULES, type CoordinatorRequest, type CoordinatorState, GRADES, type Task, cardQa, withCardQa } from "../shared/model";
+import { AUTO_RULES, type CoordinatorRequest, type CoordinatorState, GRADES, type Task, cardQa, hasStarted, withCardQa } from "../shared/model";
 import type { settingsSchema } from "../shared/settings";
 import { type StateStore, dataDirectory } from "./store";
 import type { ReviewRunner } from "./review";
-import type { WorkerChannel } from "./worker-channel";
+import { type WorkerChannel, queued } from "./worker-channel";
 
 type Settings = PluginSettings<typeof settingsSchema>;
 
@@ -21,7 +21,31 @@ const READ_LIMIT = 24_000;
 const LIST_LIMIT = 200;
 
 // RULES.md H2 의 비밀 파일. 코디네이터 읽기 도구로도 읽지 않는다.
-const SECRET_FILE = /^(\.env(\..*)?|.*\.(pem|key|p12|pfx)|id_(rsa|ed25519|ecdsa)(\.pub)?|credentials(\.json)?|\.npmrc|\.netrc)$/i;
+// .git 아래(원격 URL 에 토큰이 든 config 등)와 흔한 비밀·자격 파일 이름도 막는다.
+const SECRET_FILE =
+  /^(\.env(\..*)?|.*\.(pem|key|p12|pfx|jks|keystore|tfvars|tfstate)|id_(rsa|ed25519|ecdsa|dsa)(\.pub)?|credentials(\.json)?|\.npmrc|\.netrc|\.pypirc|\.git-credentials|\.dev\.vars|secrets?\..*|service-account.*\.json)$/i;
+
+function isSecretPath(root: string, target: string): boolean {
+  const parts = relative(root, target).split(sep);
+  return parts.includes(".git") || SECRET_FILE.test(basename(target));
+}
+
+/** 파일 앞부분만 읽는다. 큰 파일을 통째로 메모리에 올리지 않고, NUL 바이트가 있으면 바이너리로 본다. */
+async function readHead(path: string, size: number): Promise<{ text: string; truncated: boolean } | "binary" | null> {
+  const handle = await open(path, "r").catch(() => null);
+  if (!handle) return null;
+  try {
+    // UTF-8 한 글자는 최대 4바이트라, 글자 수 상한의 4배까지 읽으면 상한만큼 글자를 채울 수 있다.
+    const buffer = Buffer.alloc(Math.min(size, READ_LIMIT * 4));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const bytes = buffer.subarray(0, bytesRead);
+    if (bytes.includes(0)) return "binary";
+    const text = bytes.toString("utf8");
+    return { text: text.slice(0, READ_LIMIT), truncated: size > bytesRead || text.length > READ_LIMIT };
+  } finally {
+    await handle.close();
+  }
+}
 
 /**
  * 허용된 프로젝트 안의 경로만 돌려준다. '..' 와 심볼릭 링크로 프로젝트 밖에 닿지 못하게 실제 경로로 비교한다.
@@ -205,7 +229,8 @@ export class CoordinatorRuntime {
   /** 요청을 맡을 코디네이터 에이전트. 없거나 archive 됐으면 새로 만든다. */
   private async agentFor(paseo: PaseoApi, request: CoordinatorRequest): Promise<string> {
     if (request.coordinatorAgentId) {
-      const snapshot = await paseo.agents.ref(request.coordinatorAgentId).refresh().catch(() => null);
+      // refresh 는 에이전트가 없으면 null 을 준다. 예외는 일시 오류라 그대로 던진다. 삼키면 코디네이터가 하나 더 생긴다.
+      const snapshot = await paseo.agents.ref(request.coordinatorAgentId).refresh();
       if (snapshot && !snapshot.agent.archivedAt) return request.coordinatorAgentId;
     }
     const pending = this.agentCreating.get(request.id);
@@ -230,19 +255,35 @@ export class CoordinatorRuntime {
         labels: { [COORDINATOR_LABEL]: "coordinator", "paseo-coordinator.request": request.id },
       });
     };
-    const agent = await create().catch(async (error) => {
-      // 사람이 코디네이터 워크스페이스를 archive 했으면 새로 만들고 한 번 더 시도한다.
-      console.error("[coordinator] could not create the coordinator agent; recreating the workspace", error);
-      await this.store.update((state) => ({ state: { ...state, coordinator: null }, result: undefined }));
+    const agent = await create().catch(async (error: unknown) => {
+      // 사람이 코디네이터 워크스페이스를 archive 했을 때만 새로 만들고 한 번 더 시도한다. 모델 설정 오류처럼 다른 이유로
+      // 실패할 때 워크스페이스를 새로 만들면, 알릴 때마다 워크스페이스가 하나씩 늘어난다.
+      const workspaceId = (await this.store.read()).coordinator?.workspaceId;
+      const listed = await paseo.workspaces.list().catch(() => null);
+      if (!listed || (workspaceId && listed.entries.some((entry) => entry.id === workspaceId))) throw error;
+      console.error("[coordinator] the coordinator workspace is gone; recreating it", error);
+      await this.store.update((state) => ({
+        state: state.coordinator?.workspaceId === workspaceId ? { ...state, coordinator: null } : state,
+        result: undefined,
+      }));
       return create();
     });
-    await this.store.update((state) => ({
-      state: {
-        ...state,
-        requests: state.requests.map((item) => (item.id === request.id ? { ...item, coordinatorAgentId: agent.id } : item)),
-      },
-      result: undefined,
-    }));
+    // 만드는 사이에 요청이 끝났거나 취소됐으면 저장하지 않고 정리한다. 저장하면 retire 가 놓친 코디네이터가 남는다.
+    const stillOpen = await this.store.update((state) => {
+      const current = state.requests.find((item) => item.id === request.id);
+      if (!current || current.status === "done" || current.status === "canceled") return { state, result: false };
+      return {
+        state: {
+          ...state,
+          requests: state.requests.map((item) => (item.id === request.id ? { ...item, coordinatorAgentId: agent.id } : item)),
+        },
+        result: true,
+      };
+    });
+    if (!stillOpen) {
+      await paseo.agents.ref(agent.id).archive().catch(() => undefined);
+      throw new Error(`Request ${request.id} ended while its coordinator was being created.`);
+    }
     console.log(`[coordinator] created coordinator agent ${agent.id} for ${request.id}`);
     return agent.id;
   }
@@ -279,12 +320,21 @@ export class CoordinatorRuntime {
     const due = collectDue(await this.store.read(), Date.now());
     const requestIds = [...new Set(due.map((item) => item.requestId))];
     for (const requestId of requestIds) {
+      // 한 요청의 실패(코디네이터 생성 실패 등)가 다른 요청의 알림을 막지 않게 요청마다 따로 처리한다.
+      await this.notifyRequest(paseo, requestId).catch((error: unknown) =>
+        console.error(`[coordinator] could not notify the coordinator of ${requestId}`, error),
+      );
+    }
+  }
+
+  private async notifyRequest(paseo: PaseoApi, requestId: string): Promise<void> {
+    {
       const request = (await this.store.read()).requests.find((item) => item.id === requestId);
-      if (!request) continue;
+      if (!request) return;
       const agentId = await this.agentFor(paseo, request);
       const snapshot = await paseo.agents.ref(agentId).refresh();
-      if (!snapshot) continue;
-      if (snapshot.agent.status === "running" || (snapshot.agent.pendingPermissions?.length ?? 0) > 0) continue;
+      if (!snapshot) return;
+      if (snapshot.agent.status === "running" || (snapshot.agent.pendingPermissions?.length ?? 0) > 0) return;
       // 여기까지 왔으면 이 요청의 코디네이터는 쉬고 있다. 유실을 의심해 다시 알리는 것만 세고, 3번을 넘으면 멈춘다.
       const items = collectDue(await this.store.read(), Date.now()).filter((item) => {
         if (item.requestId !== requestId) return false;
@@ -300,14 +350,16 @@ export class CoordinatorRuntime {
         this.renotified.set(item.key, count + 1);
         return true;
       });
-      if (items.length === 0) continue;
-      await this.markNotified(items);
+      if (items.length === 0) return;
+      // 보낸 뒤에 기록한다. 먼저 기록하고 보내기가 실패하면, 실행 중 요청의 새 지시처럼 다시 알리지 않는 항목이 묻힌다.
+      // 시각은 보내기 전에 잡는다. 보내는 사이 새로 온 지시는 이 시각보다 늦어 다음에 다시 알린다.
+      const at = new Date().toISOString();
       await paseo.agents.ref(agentId).send(describe(items));
+      await this.markNotified(items, at);
     }
   }
 
-  private async markNotified(items: readonly DueItem[]): Promise<void> {
-    const now = new Date().toISOString();
+  private async markNotified(items: readonly DueItem[], now: string): Promise<void> {
     await this.store.update((current) => ({
       state: {
         ...current,
@@ -560,18 +612,24 @@ export class CoordinatorRuntime {
       execute: async (input, { paseo }) => {
         const found = await this.findTask(input.requestId, input.taskNumber);
         if (!found?.task.agentId) return { text: `Task ${input.requestId}/${input.taskNumber} has no worker yet.`, isError: true };
-        const result = await this.channel.deliver(
-          paseo,
-          input.requestId,
-          input.taskNumber,
-          `[From the coordinator] ${input.message}`,
-        );
+        // 머지했거나 끝난 작업의 워커는 정리됐다. 되살리면 요청이 끝나지 않는다. 새 작업이 필요하면 사람에게 묻는다.
+        if (found.task.status === "done" || found.task.completion?.closedAt) {
+          return { text: `Task ${input.requestId}/${input.taskNumber} is finished and its workspace may be gone. Ask the human if more work is needed.`, isError: true };
+        }
         const at = new Date().toISOString();
-        await this.patchTask(input.requestId, input.taskNumber, (task) => ({
-          ...task,
-          status: task.status === "review" || task.status === "done" ? ("running" as const) : task.status,
-          decisions: [...task.decisions, { summary: `Coordinator → worker: ${input.message}`, by: "coordinator" as const, at, qa: [] }],
-        }));
+        await this.patchTask(input.requestId, input.taskNumber, (task) =>
+          queued(
+            {
+              ...task,
+              // 머지 카드를 기다리던 작업이면 다시 실행 중으로 돌리고 예전 완료 보고를 지운다. 워커가 다시 report_done 을 부른다.
+              ...(task.status === "review" ? { status: "running" as const, completion: null, doneNudgedAt: null } : {}),
+              decisions: [...task.decisions, { summary: `Coordinator → worker: ${input.message}`, by: "coordinator" as const, at, qa: [] }],
+            },
+            `[From the coordinator] ${input.message}`,
+          ),
+        );
+        const sent = await this.channel.flush(paseo, input.requestId, input.taskNumber);
+        const result = sent ? "sent" : "queued";
         return { text: result === "sent" ? "Delivered to the worker." : "The worker is busy; it will receive this after its current turn." };
       },
     });
@@ -615,14 +673,13 @@ export class CoordinatorRuntime {
         if (!project) return { text: `Project ${projectId} is not allowed in coordinator settings.`, isError: true };
         const target = await resolveInside(project.path, path);
         if (!target) return { text: `${path} is not inside project ${project.name}.`, isError: true };
-        if (SECRET_FILE.test(basename(target))) return { text: `${path} may hold secrets and is not readable.`, isError: true };
+        if (isSecretPath(await realpath(project.path), target)) return { text: `${path} may hold secrets and is not readable.`, isError: true };
         const info = await stat(target).catch(() => null);
         if (!info?.isFile()) return { text: `${path} is not a file.`, isError: true };
-        const text = await readFile(target, "utf8").catch(() => null);
-        if (text === null) return { text: `${path} could not be read as text.`, isError: true };
-        return {
-          text: text.length > READ_LIMIT ? `${text.slice(0, READ_LIMIT)}\n… truncated (${text.length} characters total)` : text,
-        };
+        const head = await readHead(target, info.size);
+        if (head === null) return { text: `${path} could not be read.`, isError: true };
+        if (head === "binary") return { text: `${path} looks like a binary file.`, isError: true };
+        return { text: head.truncated ? `${head.text}\n… truncated (${info.size} bytes total)` : head.text };
       },
     });
   }
@@ -668,9 +725,16 @@ export class CoordinatorRuntime {
       execute: async ({ projectId }, { paseo }) => {
         const project = (await allowedProjects(paseo, this.settings)).find((item) => item.id === projectId);
         if (!project) return { text: `Project ${projectId} is not allowed in coordinator settings.`, isError: true };
+        // 심볼릭 링크로 프로젝트 밖 파일을 읽지 않게 read_file 과 같은 경계 검사를 거친다.
+        const readInside = async (name: string) => {
+          const target = await resolveInside(project.path, name).catch(() => null);
+          if (!target) return null;
+          const head = await readHead(target, (await stat(target).catch(() => null))?.size ?? 0);
+          return head && head !== "binary" ? head.text : null;
+        };
         const [readme, pkg, entries] = await Promise.all([
-          readFile(join(project.path, "README.md"), "utf8").catch(() => null),
-          readFile(join(project.path, "package.json"), "utf8").catch(() => null),
+          readInside("README.md"),
+          readInside("package.json"),
           readdir(project.path).catch(() => [] as string[]),
         ]);
         let packageSummary: unknown = null;
@@ -737,27 +801,36 @@ export class CoordinatorRuntime {
         }
         const now = new Date().toISOString();
         const projectIds = await this.knownProjects(paseo, input.projectIds);
-        await this.store.update((current) => ({
-          state: {
-            ...current,
-            requests: current.requests.map((item) =>
-              item.id === request.id
-                ? {
-                    ...item,
-                    status: "needs_input" as const,
-                    title: item.title ?? input.title,
-                    question: {
-                      context: input.context,
-                      questions: input.questions,
-                      projectIds,
-                      at: now,
+        // await 사이에 요청이 취소되거나 끝났을 수 있어 저장하는 순간에 상태를 다시 본다.
+        // 워커가 이미 일하는 요청은 진행 중인 채로 질문만 붙인다. needs_input 으로 바꾸면 답을 받은 뒤 다시 계획하게 되어
+        // 일하던 워커와 작업 기록이 버려진다.
+        const saved = await this.store.update((current) => {
+          const item = current.requests.find((entry) => entry.id === request.id);
+          if (!item || (item.status !== "planning" && item.status !== "running")) return { state: current, result: false };
+          const keepRunning = item.status === "running" && hasStarted(item);
+          return {
+            state: {
+              ...current,
+              requests: current.requests.map((entry) =>
+                entry.id !== request.id
+                  ? entry
+                  : {
+                      ...entry,
+                      status: keepRunning ? entry.status : ("needs_input" as const),
+                      title: entry.title ?? input.title,
+                      question: {
+                        context: input.context,
+                        questions: input.questions,
+                        projectIds,
+                        at: now,
+                      },
                     },
-                  }
-                : item,
-            ),
-          },
-          result: undefined,
-        }));
+              ),
+            },
+            result: true,
+          };
+        });
+        if (!saved) return { text: `Request ${request.id} changed while you were asking; read it again with coordinator_get_request.`, isError: true };
         return { text: `Question card sent for ${request.id}. Wait for the human's answer; the plugin will tell you.` };
       },
     });
@@ -789,7 +862,10 @@ export class CoordinatorRuntime {
         }
         const now = new Date().toISOString();
         const projectIds = await this.knownProjects(paseo, input.projectIds);
-        await this.store.update((current) => ({
+        const saved = await this.store.update((current) => {
+          const latest = current.requests.find((entry) => entry.id === request.id);
+          if (latest?.status !== "planning" || hasStarted(latest)) return { state: current, result: false };
+          return {
           state: {
             ...current,
             requests: current.requests.map((item) =>
@@ -806,8 +882,10 @@ export class CoordinatorRuntime {
                 : item,
             ),
           },
-          result: undefined,
-        }));
+          result: true,
+          };
+        });
+        if (!saved) return { text: `Request ${request.id} changed while you were answering; read it again with coordinator_get_request.`, isError: true };
         return { text: `Answer stored for ${request.id}. The human reviews it in the inbox.` };
       },
     });
@@ -864,7 +942,14 @@ export class CoordinatorRuntime {
         const status = "running" as const;
         const grade = input.readOnly ? null : (input.grade ?? null);
         const now = new Date().toISOString();
-        await this.store.update((current) => ({
+        const feedbackCount = request.feedback.length;
+        // 검증하는 사이(await) 요청이 취소되거나 새 지시가 왔으면 저장하지 않는다. 취소한 요청이 되살아나 워커가 생긴다.
+        const saved = await this.store.update((current) => {
+          const latest = current.requests.find((entry) => entry.id === request.id);
+          if (latest?.status !== "planning" || hasStarted(latest) || latest.feedback.length !== feedbackCount) {
+            return { state: current, result: false };
+          }
+          return {
           state: {
             ...current,
             requests: current.requests.map((item) =>
@@ -900,8 +985,10 @@ export class CoordinatorRuntime {
                 : item,
             ),
           },
-          result: undefined,
-        }));
+          result: true,
+          };
+        });
+        if (!saved) return { text: `Request ${request.id} changed while you were planning (canceled, or a new instruction arrived); read it again with coordinator_get_request.`, isError: true };
         this.onPlanStarted(paseo);
         return {
           text:
@@ -936,6 +1023,22 @@ export function validatePlan(
     }
     for (const dependency of task.dependsOn) {
       if (dependency >= task.number) problems.push(`Task ${task.number}: dependsOn may only list earlier tasks (got ${dependency}).`);
+    }
+  }
+  // 같은 프로젝트의 앞 작업에 이어지는 작업은 그 worktree 를 이어 쓴다 (dispatcher). 두 작업이 같은 작업을 이어 쓰면
+  // 두 워커가 한 worktree 에서 동시에 일하고, 한쪽을 머지할 때 다른 쪽의 worktree 가 지워진다.
+  const continuing = new Map<number, number[]>();
+  for (const task of plan.tasks) {
+    const sameProject = plan.tasks.filter((dep) => task.dependsOn.includes(dep.number) && dep.projectId === task.projectId);
+    if (sameProject.length === 0) continue;
+    const from = Math.max(...sameProject.map((dep) => dep.number));
+    continuing.set(from, [...(continuing.get(from) ?? []), task.number]);
+  }
+  for (const [from, followers] of continuing) {
+    if (followers.length > 1) {
+      problems.push(
+        `Tasks ${followers.join(", ")} all continue task ${from} in the same project, so they would share one worktree. Chain them (each after the previous one) or merge them into one task.`,
+      );
     }
   }
   return problems;

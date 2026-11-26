@@ -322,6 +322,14 @@ export function withCardQa(task: Task, change: (qa: CardQa[]) => CardQa[]): Task
 export type Question = z.infer<typeof questionSchema>;
 export type Blocker = z.infer<typeof blockerSchema>;
 export type CoordinatorRequest = z.infer<typeof requestSchema>;
+
+/**
+ * 워커 배정이 시작됐는지. 배정기는 워커를 만들기 전에 작업을 running 으로 먼저 표시하고 agentId 는 킥오프 뒤에 남기므로,
+ * agentId 만 보면 워커를 만드는 몇 초 사이를 놓친다. 시작된 요청은 다시 계획하면 안 된다 (같은 작업이 또 배정된다).
+ */
+export function hasStarted(request: CoordinatorRequest): boolean {
+  return request.tasks.some((task) => task.status !== "waiting" || task.workspaceId !== null || task.agentId !== null);
+}
 export type SentInstruction = z.infer<typeof sentInstructionSchema>;
 export type CoordinatorState = z.infer<typeof stateSchema>;
 
@@ -439,5 +447,15 @@ export const closeCompletionRpc = defineRpc({
     action: z.enum(["merge", "revise"]),
     instruction: z.string().trim().nullable(),
   }),
+  output: z.object({}),
+});
+
+/**
+ * 막힌 작업(워커 질문 카드가 없는 것)을 다시 시작한다. 워커 시작 실패, 턴 에러, report_done 없이 두 번 끝남이 여기 해당한다.
+ * 워커가 있으면 지시(없으면 기본 문장)를 보내 이어서 일하게 하고, 워커를 만들지 못했으면 대기로 돌려 다시 배정한다.
+ */
+export const retryTaskRpc = defineRpc({
+  name: "tasks.retry",
+  input: z.object({ requestId: z.string(), taskNumber: z.number().int().positive(), instruction: z.string().trim().nullable() }),
   output: z.object({}),
 });

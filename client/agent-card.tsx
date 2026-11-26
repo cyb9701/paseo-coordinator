@@ -1,6 +1,6 @@
 import type { AgentRef } from "@getpaseo/plugin/client";
 import { useAgent, useAgents, usePaseo } from "@getpaseo/plugin/client";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { type ColumnKey, columnOf, isVisibleAgent, stateColor } from "./agent-state";
@@ -21,6 +21,8 @@ function useLastAssistantText(agentId: string, hostId: string, bucket: string) {
   return useQuery({
     queryKey: ["coordinator", "last-assistant-text", hostId, agentId, bucket],
     staleTime: Infinity,
+    // 30초마다 key 가 바뀌는데, 이전 값을 유지하지 않으면 새로 읽는 동안 미리보기가 사라졌다 나타난다.
+    placeholderData: keepPreviousData,
     queryFn: async () => {
       const page = await paseo.agents.ref(agentId).timeline.refetch({ direction: "tail", limit: 20 });
       const entries = (page as { entries?: readonly { item?: { type?: string; text?: string } }[] }).entries ?? [];

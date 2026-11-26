@@ -1,7 +1,7 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { ProjectRef } from "@getpaseo/plugin/client";
 import { useProject, useProjects, usePaseo, useRpc, useSettings } from "@getpaseo/plugin/client";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { Text, View } from "react-native";
 import {
@@ -167,16 +167,26 @@ function Stepper({
 /** 자동 정지로 꺼진 규칙. 다시 켜는 것은 사람이 한다 (RULES.md §5). 꺼진 규칙이 없으면 보이지 않는다. */
 function DisabledRulesBlock({ theme, t }: { theme: PluginTheme; t: T }) {
   const { state } = useCoordinatorState();
-  const enable = useRpc(enableRuleRpc);
+  const enableRpc = useRpc(enableRuleRpc);
+  const enable = useMutation({ mutationFn: (rule: (typeof rules)[number]) => enableRpc({ rule }) });
   const rules = state?.disabledRules ?? [];
   if (rules.length === 0) return null;
   return (
     <Block title={t("settings.disabledRules")} hint={t("settings.disabledRulesHint")} theme={theme}>
       <Wrap>
         {rules.map((rule) => (
-          <CtaButton key={rule} label={t("settings.enableRule", { rule })} theme={theme} onPress={() => void enable({ rule })} />
+          <CtaButton
+            key={rule}
+            label={t("settings.enableRule", { rule })}
+            disabled={enable.isPending}
+            theme={theme}
+            onPress={() => enable.mutate(rule)}
+          />
         ))}
       </Wrap>
+      {enable.error ? (
+        <Note text={t("inbox.failed", { message: enable.error instanceof Error ? enable.error.message : String(enable.error) })} color={theme.colors.statusDanger} />
+      ) : null}
     </Block>
   );
 }
@@ -188,8 +198,9 @@ function FontSizeBlock({ theme, t }: { theme: PluginTheme; t: T }) {
   const display = useSettings(displaySettings);
   const values =
     display.status === "ready" ? display.values : { interfaceSize: DEFAULT_INTERFACE_SIZE, contentSize: DEFAULT_CONTENT_SIZE };
+  // 저장 중에 또 누르면 같은 revision 으로 저장해 충돌한다. 저장이 끝날 때까지 받지 않는다.
   const save = (patch: Partial<typeof values>) => {
-    if (display.status !== "ready") return;
+    if (display.status !== "ready" || display.saving) return;
     void display.save({ ...display.values, ...patch }, display.revision);
   };
   return (
@@ -210,6 +221,7 @@ function FontSizeBlock({ theme, t }: { theme: PluginTheme; t: T }) {
         theme={theme}
         t={t}
       />
+      {display.saveError ? <Note text={display.saveError} color={theme.colors.statusDanger} /> : null}
     </Block>
   );
 }
@@ -241,6 +253,9 @@ function ModelBlock({
   return (
     <Block title={title} hint={hint} theme={theme}>
       {loading ? <Note text={t("settings.loadingModels")} color={theme.colors.foregroundMuted} /> : null}
+      {!loading && models.length > 0 && !current ? (
+        <Note text={t("settings.modelMissing", { model: value.model })} color={theme.colors.statusWarning} />
+      ) : null}
       {failedProviders.map((provider) => (
         <Note key={provider} text={t("settings.modelsFailed", { provider })} color={theme.colors.statusDanger} />
       ))}
@@ -388,6 +403,12 @@ export function SettingsView({ theme, hostId, t }: { theme: PluginTheme; hostId:
       </Block>
 
       <Block title={t("settings.reviewers")} hint={t("settings.reviewersHint")} theme={theme}>
+        {catalog.isError ? (
+          <Note
+            text={t("settings.catalogFailed", { message: catalog.error instanceof Error ? catalog.error.message : String(catalog.error) })}
+            color={theme.colors.statusDanger}
+          />
+        ) : null}
         {catalog.data && catalog.data.readOnlyProviders.size === 0 ? (
           <Note text={t("settings.noReadOnlyProvider")} color={theme.colors.statusWarning} />
         ) : null}
@@ -408,6 +429,24 @@ export function SettingsView({ theme, hostId, t }: { theme: PluginTheme; hostId:
               theme={theme}
             />
           ))}
+          {/* 저장돼 있지만 지금 목록에 없는 모델. 보이지 않으면 해제할 수 없고 검토자 수 경고도 화면과 어긋난다. */}
+          {catalog.data
+            ? draft.reviewers.models
+                .filter((value) => !reviewerModels.some((model) => model.value === value))
+                .map((value) => (
+                  <ChoiceBox
+                    key={value}
+                    label={value}
+                    detail={t("settings.unavailable")}
+                    multiple
+                    selected
+                    onPress={() =>
+                      update((current) => ({ ...current, reviewers: { ...current.reviewers, models: toggle(current.reviewers.models, value) } }))
+                    }
+                    theme={theme}
+                  />
+                ))
+            : null}
         </Wrap>
         {reviewerInvalid ? <Note text={t("settings.noReviewerModel")} color={theme.colors.statusDanger} /> : null}
         {draft.reviewers.models.length === 1 ? (

@@ -193,6 +193,21 @@ const en = {
     revertPlaceholder: "What should the worker do instead? The automatic decision is withdrawn and this is sent.",
     sendRevert: "Revert and send",
   },
+  stoppedCard: {
+    kind: "Stopped",
+    reason: "Why it stopped",
+    noReason: "No reason was recorded.",
+    withWorker: "The worker is still there. Restarting sends it your instruction, or asks it to continue.",
+    withoutWorker: "No worker was started. Restarting tries to start one again.",
+    decide: "Restart this task?",
+    placeholder: "Optional instruction for the worker, such as what to fix first.",
+    retry: "↻ Restart",
+  },
+  connection: {
+    lost: "Lost the connection to the coordinator ({{reason}}). What you see may be out of date.",
+    closed: "the plugin stopped the stream",
+    retry: "Reconnect",
+  },
   mergeCard: {
     kind: "Merge PR",
     kindNoPr: "Finished, no PR",
@@ -313,6 +328,9 @@ const en = {
     enableRule: "Switch {{rule}} back on",
     loadingModels: "Loading models…",
     modelsFailed: "Could not load models for {{provider}}.",
+    catalogFailed: "Could not load providers: {{message}}",
+    modelMissing: "The saved model {{model}} is not in the list. Pick one below.",
+    unavailable: "Not available",
   },
 } as const;
 
@@ -503,6 +521,21 @@ const ko = {
     revertPlaceholder: "워커가 대신 무엇을 해야 하나요? 자동 결정은 취소되고 이 지시가 전달돼요.",
     sendRevert: "되돌리고 보내기",
   },
+  stoppedCard: {
+    kind: "멈춤",
+    reason: "멈춘 이유",
+    noReason: "기록된 이유가 없어요.",
+    withWorker: "워커는 남아 있어요. 다시 시작하면 지시를 보내거나, 이어서 하라고 요청해요.",
+    withoutWorker: "워커를 만들지 못했어요. 다시 시작하면 워커를 다시 만들어요.",
+    decide: "이 작업을 다시 시작할까요?",
+    placeholder: "워커에게 줄 지시가 있으면 적어 주세요. 예: 무엇부터 고칠지.",
+    retry: "↻ 다시 시작",
+  },
+  connection: {
+    lost: "코디네이터와의 연결이 끊겼어요 ({{reason}}). 화면이 최신이 아닐 수 있어요.",
+    closed: "플러그인이 상태 전송을 멈췄어요",
+    retry: "다시 연결",
+  },
   mergeCard: {
     kind: "PR 머지",
     kindNoPr: "완료, PR 없음",
@@ -623,6 +656,9 @@ const ko = {
     enableRule: "{{rule}} 다시 켜기",
     loadingModels: "모델 목록을 읽는 중…",
     modelsFailed: "{{provider}} 모델 목록을 읽지 못했어요.",
+    catalogFailed: "provider 목록을 읽지 못했어요: {{message}}",
+    modelMissing: "저장된 모델 {{model}} 이 목록에 없어요. 아래에서 다시 골라 주세요.",
+    unavailable: "사용할 수 없음",
   },
 };
 

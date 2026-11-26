@@ -1,5 +1,5 @@
 import { useRpc, useSubscription } from "@getpaseo/plugin/client";
-import { type ReactNode, createContext, useCallback, useContext, useMemo, useState } from "react";
+import { type ReactNode, createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import {
   type CoordinatorRequest,
   type Task,
@@ -11,23 +11,49 @@ import {
 
 interface StateContextValue {
   state: CoordinatorState | null;
-  error: Error | null;
+  /** 구독이 실패했거나 닫혔다. 화면은 마지막 상태를 보여주고 있으니 사람에게 알려야 한다. */
+  disconnected: Error | "closed" | null;
+  reconnect(): void;
 }
 
-const StateContext = createContext<StateContextValue>({ state: null, error: null });
+const StateContext = createContext<StateContextValue>({ state: null, disconnected: null, reconnect: () => {} });
 
 // 입력이 없는 구독이라 고정값을 넘긴다. (useSubscription 은 input 을 얕게 비교한다.)
 const NO_INPUT = {};
 
-/** server 의 요청·기록 상태를 화면 하나가 구독 하나로 받는다. */
+/**
+ * server 의 요청·기록 상태를 화면 하나가 구독 하나로 받는다.
+ * 구독은 server 플러그인이 다시 시작되거나 이벤트가 스키마 검사에 실패하면 닫힌다. useSubscription 은 input 이 바뀔 때만
+ * 다시 구독하므로, 다시 연결은 구독하는 컴포넌트를 key 로 새로 만들어서 한다.
+ */
 export function CoordinatorStateProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<CoordinatorState | null>(null);
-  const subscription = useSubscription(watchStateSubscription, NO_INPUT, setState);
-  const value = useMemo(
-    () => ({ state, error: subscription.status === "error" ? subscription.error : null }),
-    [state, subscription],
+  const [epoch, setEpoch] = useState(0);
+  const [status, setStatus] = useState<StateContextValue["disconnected"]>(null);
+  const reconnect = useCallback(() => {
+    setStatus(null);
+    setEpoch((value) => value + 1);
+  }, []);
+  const value = useMemo(() => ({ state, disconnected: status, reconnect }), [state, status, reconnect]);
+  return (
+    <StateContext.Provider value={value}>
+      <Subscriber key={epoch} onState={setState} onStatus={setStatus} />
+      {children}
+    </StateContext.Provider>
   );
-  return <StateContext.Provider value={value}>{children}</StateContext.Provider>;
+}
+
+function Subscriber({
+  onState,
+  onStatus,
+}: {
+  onState(state: CoordinatorState): void;
+  onStatus(status: StateContextValue["disconnected"]): void;
+}) {
+  const subscription = useSubscription(watchStateSubscription, NO_INPUT, onState);
+  const status = subscription.status === "error" ? subscription.error : subscription.status === "closed" ? "closed" : null;
+  useEffect(() => onStatus(status), [onStatus, status]);
+  return null;
 }
 
 export function useCoordinatorState(): StateContextValue {
@@ -64,7 +90,12 @@ export function useSentLog(): SentLog {
 
 /** 반응 필요: 코디네이터가 질문 카드를 보내고 내 답을 기다린다. */
 export function requestNeedsReaction(request: CoordinatorRequest): boolean {
-  return request.status === "needs_input" && request.question !== null;
+  // 워커가 이미 일하는 요청은 진행 중인 채로 질문을 받는다 (server ask_human).
+  return request.question !== null && (request.status === "needs_input" || request.status === "running");
+}
+
+function isOpen(request: CoordinatorRequest): boolean {
+  return request.status !== "done" && request.status !== "canceled";
 }
 
 /**
@@ -80,7 +111,7 @@ export function requestNeedsReview(request: CoordinatorRequest): boolean {
 /** 반응 필요: 워커가 보고했고 코디네이터가 결정 카드를 다 쓴 것. 오래 기다린 순서. */
 export function blockerCards(requests: readonly CoordinatorRequest[]): { request: CoordinatorRequest; task: Task }[] {
   return requests
-    .filter((request) => request.status === "running")
+    .filter(isOpen)
     .flatMap((request) => request.tasks.filter((task) => task.blocker?.coordinator).map((task) => ({ request, task })))
     .sort((a, b) => a.task.blocker!.at.localeCompare(b.task.blocker!.at));
 }
@@ -102,7 +133,7 @@ export function autoDecisionCards(requests: readonly CoordinatorRequest[]) {
  */
 export function completionCards(requests: readonly CoordinatorRequest[]): { request: CoordinatorRequest; task: Task }[] {
   return requests
-    .filter((request) => request.status === "running")
+    .filter(isOpen)
     .flatMap((request) =>
       request.tasks
         .filter((task) => task.status === "review" && task.completion && !task.completion.closedAt && !task.blocker)
@@ -113,5 +144,20 @@ export function completionCards(requests: readonly CoordinatorRequest[]): { requ
 
 /** 반응 필요에 들어가는 요청 카드 수 (질문, 워커 질문, PR 머지). 사이드바, 탭, 인박스가 같은 수를 보여야 한다. */
 export function requestReactionCount(requests: readonly CoordinatorRequest[]): number {
-  return requests.filter(requestNeedsReaction).length + blockerCards(requests).length + completionCards(requests).length;
+  return (
+    requests.filter(requestNeedsReaction).length +
+    blockerCards(requests).length +
+    completionCards(requests).length +
+    stoppedCards(requests).length
+  );
+}
+
+/**
+ * 반응 필요: 워커 질문 카드 없이 막힌 작업. 워커 시작 실패, 턴 에러, report_done 없이 두 번 끝남이다.
+ * 보드는 이 작업을 '내 결정 필요'에 두므로 인박스에도 카드가 있어야 수가 맞고, 다시 시작할 길이 생긴다.
+ */
+export function stoppedCards(requests: readonly CoordinatorRequest[]): { request: CoordinatorRequest; task: Task }[] {
+  return requests
+    .filter((request) => request.status === "running")
+    .flatMap((request) => request.tasks.filter((task) => task.status === "blocked" && !task.blocker).map((task) => ({ request, task })));
 }

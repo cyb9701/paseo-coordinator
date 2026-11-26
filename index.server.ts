@@ -11,6 +11,7 @@ import {
   createRequest,
   recordInstruction,
   resolveBlocker,
+  retryTask,
   revisePlan,
 } from "./server/requests";
 import { ReviewRunner, isReviewerSession } from "./server/review";
@@ -19,6 +20,7 @@ import { isWorkerSession, reportBlockerTool } from "./server/worker-tools";
 import { StateStore } from "./server/store";
 import {
   closeCompletionRpc,
+  retryTaskRpc,
   enableRuleRpc,
   reviewAutoDecisionRpc,
   acknowledgeRpc,
@@ -56,7 +58,9 @@ export default function contribute(server: PluginServerContext) {
   const tellCoordinator = (paseo: Parameters<typeof coordinator.notify>[0]) => {
     coordinator.notify(paseo).catch(logFailure("notify"));
   };
-  const blockerTool = reportBlockerTool(store, tellCoordinator);
+  const blockerTool = reportBlockerTool(store, tellCoordinator, (paseo, requestId, taskNumber, reviewerIds) => {
+    reviews.abandon(paseo, requestId, taskNumber, reviewerIds).catch(logFailure("abandon review"));
+  });
   const doneTool = reportDoneTool(store);
   const reviews = new ReviewRunner(store, settings, channel);
   coordinator.setReviewRunner(reviews);
@@ -73,6 +77,16 @@ export default function contribute(server: PluginServerContext) {
   server.handle(cancelRequestRpc, async (input, { paseo }) => {
     const result = await cancelRequest(input, store);
     coordinator.retire(paseo, input.id).catch(logFailure("retire coordinator"));
+    // 취소한 요청의 워커와 검토자도 멈춘다. 그대로 두면 계속 일해서 push 나 PR 까지 할 수 있다.
+    // 워크스페이스는 남긴다. 워커가 만든 변경을 사람이 확인할 수 있어야 한다.
+    const canceled = (await store.read()).requests.find((item) => item.id === input.id);
+    if (canceled?.status === "canceled") {
+      for (const task of canceled.tasks) {
+        const review = task.blocker?.review;
+        if (review?.status === "running") await reviews.abandon(paseo, canceled.id, task.number, review.reviewers.map((item) => item.agentId));
+        if (task.agentId && task.status !== "done") await paseo.agents.ref(task.agentId).archive().catch(logFailure("archive worker"));
+      }
+    }
     return result;
   });
   server.handle(revisePlanRpc, async (input, { paseo }) => {
@@ -105,8 +119,15 @@ export default function contribute(server: PluginServerContext) {
     return {};
   });
   server.handle(resolveBlockerRpc, async (input, { paseo }) => {
-    const message = await resolveBlocker(input, store);
-    await channel.deliver(paseo, input.requestId, input.taskNumber, message);
+    const { abandonedReviewers } = await resolveBlocker(input, store);
+    if (abandonedReviewers.length) await reviews.abandon(paseo, input.requestId, input.taskNumber, abandonedReviewers);
+    await channel.flush(paseo, input.requestId, input.taskNumber).catch(logFailure("send decision to worker"));
+    return {};
+  });
+  server.handle(retryTaskRpc, async (input, { paseo }) => {
+    const { hasWorker } = await retryTask(input, store);
+    if (hasWorker) await channel.flush(paseo, input.requestId, input.taskNumber).catch(logFailure("send retry to worker"));
+    else dispatcher.run(paseo).catch(logFailure("dispatch retry"));
     return {};
   });
   server.handle(closeCompletionRpc, async (input, { paseo }) => {
