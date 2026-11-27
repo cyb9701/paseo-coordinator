@@ -1,0 +1,53 @@
+name: Release
+
+# Every push to main is a deploy: users install straight from this repo with
+# `paseo plugin install github:cyb9701/paseo-coordinator`. A tag and a GitHub
+# Release mark which of those pushes changed what users get.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+# Two quick pushes must not both read the same last tag and race to create
+# the same version.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The next version is computed from every commit since the last tag.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+      - id: next
+        run: bash .github/scripts/next-release.sh
+
+      - if: steps.next.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.next.outputs.version }}
+          NOTES: ${{ steps.next.outputs.notes }}
+        run: |
+          gh release create "$VERSION" \
+            --target "$GITHUB_SHA" \
+            --title "$VERSION" \
+            --notes "$NOTES"
+
+      - if: steps.next.outputs.version == ''
+        run: echo "No feat, fix or breaking change since the last tag; skipping release."
