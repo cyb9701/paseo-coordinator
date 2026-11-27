@@ -1,5 +1,5 @@
 import { decisionInputSchema } from "../shared/model";
-import { ADD_FOLLOWUP_TOOL, RECORD_DECISION_TOOL, recordDecision, saveFollowup } from "./agent-tools";
+import { ADD_FOLLOWUP_TOOL, RECORD_DECISION_TOOL, recordDecision, saveSuggestion } from "./agent-tools";
 import type { PaseoApi } from "./paseo-api";
 import type { StateStore } from "./store";
 
@@ -28,7 +28,7 @@ export async function replayLostCalls(
   const page = await paseo.agents.ref(agentId).timeline.refetch({ direction: "tail", limit: 120 });
   const entries = ((page as { entries?: readonly ToolEntry[] }).entries ?? []) as readonly ToolEntry[];
   const state = await store.read();
-  const seen = new Set([...state.decisions.map((item) => item.callId), ...state.followups.map((item) => item.callId)].filter(Boolean));
+  const seen = new Set([...state.decisions.map((item) => item.callId), ...state.requests.map((item) => item.callId)].filter(Boolean));
   // 호출 뒤에 질문 창이 이미 답을 받았으면 멈춤 결정이라도 답 대기로 되살리지 않는다. 되살리면 이미 답한 것을 다시 묻는다.
   // 사람 메시지는 답인지 새 지시인지 가를 수 없어서 세지 않는다. 그런 결정은 답 대기로 남고 사람이 카드에서 정리한다.
   const answeredAfter = (index: number) =>
@@ -46,7 +46,7 @@ export async function replayLostCalls(
     } else if (name.endsWith(ADD_FOLLOWUP_TOOL)) {
       const text = (item.detail?.input as { text?: unknown } | undefined)?.text;
       if (typeof text !== "string" || !text.trim()) continue;
-      await saveFollowup(store, agentId, where, text.trim(), item.callId);
+      await saveSuggestion(store, agentId, where, text.trim(), item.callId);
     } else continue;
     seen.add(item.callId);
     replayed += 1;

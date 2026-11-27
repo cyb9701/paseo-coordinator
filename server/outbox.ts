@@ -26,7 +26,11 @@ function busy(snapshot: Snapshot): boolean {
 export class Outbox {
   private readonly flushing = new Map<string, Promise<boolean>>();
 
-  constructor(private readonly store: StateStore) {}
+  constructor(
+    private readonly store: StateStore,
+    /** 보낸 메시지 중 추가 요청의 id. 그 요청을 sent 로 바꾸는 데 쓴다. */
+    private readonly onSent: (requestIds: string[]) => Promise<void> = async () => {},
+  ) {}
 
   /** 받을 에이전트가 있는지 상태를 바꾸기 전에 확인한다. 없으면 AgentGoneError. */
   async ensureReachable(paseo: PaseoApi, agentId: string): Promise<void> {
@@ -34,10 +38,10 @@ export class Outbox {
     if (!snapshot || snapshot.agent.archivedAt) throw new AgentGoneError(agentId);
   }
 
-  async deliver(paseo: PaseoApi, agentId: string, text: string): Promise<Delivery> {
+  async deliver(paseo: PaseoApi, agentId: string, text: string, requestId: string | null = null): Promise<Delivery> {
     const at = new Date().toISOString();
     await this.store.update((state) => ({
-      state: { ...state, outbox: { ...state.outbox, [agentId]: [...(state.outbox[agentId] ?? []), { text, at }] } },
+      state: { ...state, outbox: { ...state.outbox, [agentId]: [...(state.outbox[agentId] ?? []), { text, at, requestId }] } },
       result: undefined,
     }));
     // 이미 내보내는 중이면 그 전송이 이 메시지를 가져갔을 수 있다. 끝난 뒤 남은 것이 있는지 다시 본다.
@@ -74,6 +78,8 @@ export class Outbox {
     if (!taken.length) return false;
     try {
       await paseo.agents.ref(agentId).send(taken.map((item) => item.text).join("\n\n---\n\n"));
+      const requestIds = taken.map((item) => item.requestId).filter((id): id is string => Boolean(id));
+      if (requestIds.length) await this.onSent(requestIds).catch((error) => console.error("[coordinator] could not mark requests sent", error));
       return true;
     } catch (error) {
       await this.store.update((state) => ({
@@ -82,6 +88,19 @@ export class Outbox {
       }));
       throw error;
     }
+  }
+
+  /** 아직 보내지 않은 추가 요청을 뺀다. 이미 보냈으면 false. */
+  async withdraw(requestId: string): Promise<boolean> {
+    return this.store.update((state) => {
+      for (const [agentId, messages] of Object.entries(state.outbox)) {
+        if (!messages.some((item) => item.requestId === requestId)) continue;
+        const left = messages.filter((item) => item.requestId !== requestId);
+        const { [agentId]: _old, ...rest } = state.outbox;
+        return { state: { ...state, outbox: left.length ? { ...rest, [agentId]: left } : rest }, result: true };
+      }
+      return { state, result: false };
+    });
   }
 
   private async drop(agentId: string): Promise<void> {

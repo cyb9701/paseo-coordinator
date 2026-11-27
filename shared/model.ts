@@ -22,6 +22,8 @@ export const evidenceSchema = z.object({
 });
 
 export const decisionInputSchema = z.object({
+  /** 한 줄 제목. 사람이 여러 결정을 한 줄씩 훑어볼 수 있어야 해서 따로 받는다. 자세한 내용은 decision 에 쓴다. */
+  title: text(100),
   decision: text(1500),
   kind: z.enum(DECISION_KINDS),
   why: text(1500),
@@ -38,12 +40,18 @@ export type DecisionInput = z.output<typeof decisionInputSchema>;
  * waiting: 멈춘 결정. 사람의 답을 기다린다.
  * answered: 사람이 답해서 에이전트에게 보냈다(또는 보낼 차례다).
  * unreviewed: 기록하고 진행한 결정. 사람이 아직 확인하지 않았다.
- * approved: 사람이 확인했다. undo: 사람이 되돌리라고 지시했다.
- * dropped: 답하기 전에 에이전트가 archive 됐다. 받을 에이전트가 없어 카드에서 내린다.
+ * approved: 사람이 확인했다(그대로 둔다).
+ * revert: 사람이 되돌리라고 했다. 그 결정으로 바뀐 것을 원래대로 돌린다.
+ * undo: 사람이 바꿔서 다시 하라고 했다. 사람이 쓴 방식으로 다시 한다.
+ * dropped: 답하기 전에 에이전트나 워크스페이스가 archive 됐다. 받을 곳이 없어 내린다.
  */
-export const DECISION_STATUSES = ["waiting", "answered", "unreviewed", "approved", "undo", "dropped"] as const;
+export const DECISION_STATUSES = ["waiting", "answered", "unreviewed", "approved", "revert", "undo", "dropped"] as const;
+/** 사람이 확인할 수 있는 상태. 멈춘 결정은 답으로 처리하고, 이미 확인한 결정은 다시 바꿀 수 있다. */
+export const REVIEWABLE_STATUSES: readonly (typeof DECISION_STATUSES)[number][] = ["unreviewed", "approved", "revert", "undo"];
 
 export const decisionSchema = decisionInputSchema.extend({
+  /** 제목을 받기 전에 기록된 결정에는 없다. 화면은 decisionTitle 로 결정 문장의 앞부분을 대신 쓴다. */
+  title: z.string().default(""),
   id: z.string(),
   number: z.number().int(),
   agentId: z.string(),
@@ -59,20 +67,40 @@ export const decisionSchema = decisionInputSchema.extend({
 });
 export type Decision = z.output<typeof decisionSchema>;
 
-export const followupSchema = z.object({
+/**
+ * 워크스페이스 추가 요청.
+ * queued: 사람이 쓴 요청. 그 워크스페이스의 에이전트가 쉬면 순서대로 받는다. 받기 전에는 취소할 수 있다.
+ * sent: 에이전트에게 보냈다.
+ * suggested: 에이전트가 add_followup 으로 남긴 범위 밖의 일. 사람이 보내기를 누르면 queued 가 된다.
+ * dismissed: 사람이 취소하거나 버렸다.
+ */
+export const REQUEST_STATUSES = ["queued", "sent", "suggested", "dismissed"] as const;
+
+export const requestSchema = z.object({
   id: z.string(),
   text: z.string(),
   projectId: z.string().nullable(),
   workspaceId: z.string().nullable(),
+  /** 받을 에이전트(사람의 요청) 또는 남긴 에이전트(제안). */
   agentId: z.string().nullable(),
   source: z.enum(["agent", "human"]),
+  status: z.enum(REQUEST_STATUSES),
   at: z.string(),
-  status: z.enum(["open", "done", "dismissed"]),
-  /** 사람이 이 일을 넘긴 에이전트. */
-  sentTo: z.string().nullable().default(null),
+  sentAt: z.string().nullable().default(null),
   callId: z.string().nullable().default(null),
 });
-export type Followup = z.output<typeof followupSchema>;
+export type WorkRequest = z.output<typeof requestSchema>;
+
+/** 멈춘 결정 카드의 '질문하기'. 결정하기 전에 에이전트에게 묻고, 에이전트의 다음 응답을 답으로 붙인다. */
+export const askSchema = z.object({
+  id: z.string(),
+  agentId: z.string(),
+  text: z.string(),
+  at: z.string(),
+  answer: z.string().nullable().default(null),
+  answeredAt: z.string().nullable().default(null),
+});
+export type Ask = z.output<typeof askSchema>;
 
 export const summaryResultSchema = z.object({
   /** 여기까지 오게 된 앞 상황: 요청, 지금까지 한 일, 관련된 앞선 결정. */
@@ -99,20 +127,22 @@ export const summarySchema = z.object({
 });
 export type Summary = z.output<typeof summarySchema>;
 
-export const outboxMessageSchema = z.object({ text: z.string(), at: z.string() });
+/** requestId 가 있으면 추가 요청이다. 보내면 그 요청이 sent 가 되고, 받기 전에 취소하면 여기서 뺀다. */
+export const outboxMessageSchema = z.object({ text: z.string(), at: z.string(), requestId: z.string().nullable().default(null) });
 
 export const stateSchema = z.object({
   version: z.literal(1),
   seq: z.number().int().default(0),
   decisions: z.array(decisionSchema).default([]),
-  followups: z.array(followupSchema).default([]),
+  requests: z.array(requestSchema).default([]),
+  asks: z.array(askSchema).default([]),
   summaries: z.array(summarySchema).default([]),
   /** agentId → 보낼 메시지. 에이전트가 일하는 중에 보내면 턴이 끊겨서, 쉴 때만 내보낸다. */
   outbox: z.record(z.string(), z.array(outboxMessageSchema)).default({}),
 });
 export type CoordinatorState = z.output<typeof stateSchema>;
 
-export const EMPTY_STATE: CoordinatorState = { version: 1, seq: 0, decisions: [], followups: [], summaries: [], outbox: {} };
+export const EMPTY_STATE: CoordinatorState = { version: 1, seq: 0, decisions: [], requests: [], asks: [], summaries: [], outbox: {} };
 
 const language = z.enum(["en", "ko"]);
 
@@ -130,14 +160,25 @@ export const answerDecisionsRpc = defineRpc({
 });
 
 /** 진행한 결정을 확인한다. undo 면 text 를 되돌리기 지시로 에이전트에게 보낸다. */
+/**
+ * 진행한 결정을 확인한다. approved 는 그대로 둔다. revert 는 되돌리라고 보내고(text 는 덧붙일 말, 없어도 된다),
+ * undo 는 text 로 쓴 방식으로 바꿔서 다시 하라고 보낸다(text 필요).
+ */
 export const reviewDecisionsRpc = defineRpc({
   name: "decisions.review",
   input: z.object({
     decisionIds: z.array(z.string()).min(1),
-    verdict: z.enum(["approved", "undo"]),
+    verdict: z.enum(["approved", "revert", "undo"]),
     text: z.string().trim().nullable().default(null),
   }),
   output: z.object({ delivery: z.enum(["sent", "queued", "none"]) }),
+});
+
+/** 멈춘 결정 카드의 '질문하기'. 에이전트가 질문 창으로 물은 중이면 그 질문 창에 이 질문을 돌려보낸다. */
+export const askAgentRpc = defineRpc({
+  name: "agents.ask",
+  input: z.object({ agentId: z.string(), text: z.string().trim().min(1) }),
+  output: z.object({}),
 });
 
 export const sendInstructionRpc = defineRpc({
@@ -152,22 +193,25 @@ export const summarizeRpc = defineRpc({
   output: z.object({}),
 });
 
-export const addFollowupRpc = defineRpc({
-  name: "followups.add",
-  input: z.object({ text: z.string().trim().min(1), projectId: z.string().nullable(), workspaceId: z.string().nullable() }),
-  output: z.object({}),
+/** 워크스페이스에 추가 요청을 넣는다. 받을 에이전트가 쉬면 바로, 일하는 중이면 턴이 끝난 뒤 받는다. */
+export const addRequestRpc = defineRpc({
+  name: "requests.add",
+  input: z.object({ workspaceId: z.string(), agentId: z.string(), text: z.string().trim().min(1) }),
+  output: z.object({ delivery: z.enum(["sent", "queued"]) }),
 });
 
-export const updateFollowupRpc = defineRpc({
-  name: "followups.update",
-  input: z.object({ id: z.string(), status: z.enum(["open", "done", "dismissed"]) }),
-  output: z.object({}),
-});
-
-export const sendFollowupRpc = defineRpc({
-  name: "followups.send",
+/** 제안을 보낸다(queued 로). 받을 에이전트는 사람이 고른다. */
+export const sendSuggestionRpc = defineRpc({
+  name: "requests.send-suggestion",
   input: z.object({ id: z.string(), agentId: z.string() }),
   output: z.object({ delivery: z.enum(["sent", "queued"]) }),
+});
+
+/** 아직 받지 않은 요청을 취소하거나 제안을 버린다. */
+export const dismissRequestRpc = defineRpc({
+  name: "requests.dismiss",
+  input: z.object({ id: z.string() }),
+  output: z.object({}),
 });
 
 export const pullRequestSchema = z.object({
@@ -234,4 +278,11 @@ export function latestSummary(state: CoordinatorState, agentId: string): Summary
     if (item.agentId === agentId) return item;
   }
   return null;
+}
+
+/** 결정의 한 줄 제목. 제목이 없던 결정은 결정 문장의 첫 줄을 줄여 쓴다. */
+export function decisionTitle(decision: Pick<Decision, "title" | "decision">): string {
+  if (decision.title.trim()) return decision.title.trim();
+  const first = decision.decision.split("\n")[0]!.trim();
+  return first.length > 90 ? `${first.slice(0, 88)}…` : first;
 }

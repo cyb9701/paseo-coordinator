@@ -8,7 +8,8 @@ import { type CoordinatorState, EMPTY_STATE, stateSchema } from "../shared/model
 /** 끝난 결정과 요약은 화면에서 지난 기록으로만 보인다. 파일이 끝없이 커지지 않게 오래된 것부터 버린다. */
 const MAX_DECISIONS = 600;
 const MAX_SUMMARIES = 300;
-const MAX_FOLLOWUPS = 1000;
+const MAX_REQUESTS = 1000;
+const MAX_ASKS = 300;
 
 /**
  * 플러그인 데이터 폴더. Paseo 는 플러그인 전용 저장 경로를 주지 않아서 daemon 홈 아래에 만든다.
@@ -40,7 +41,8 @@ function trim(state: CoordinatorState): CoordinatorState {
     decisions: keep(state.decisions, MAX_DECISIONS, (item) => item.status === "waiting" || item.status === "unreviewed"),
     // 답을 기다리는 결정을 설명하는 요약을 버리면 같은 결정을 다시 요약한다.
     summaries: keep(state.summaries, MAX_SUMMARIES, (item) => item.status === "running" || item.decisionIds.some((id) => waiting.has(id))),
-    followups: keep(state.followups, MAX_FOLLOWUPS, (item) => item.status === "open"),
+    requests: keep(state.requests, MAX_REQUESTS, (item) => item.status === "queued" || item.status === "suggested"),
+    asks: keep(state.asks, MAX_ASKS, (item) => !item.answer),
   };
 }
 

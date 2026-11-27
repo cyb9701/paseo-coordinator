@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { DecisionInput } from "../shared/model";
 import { Actions, answerFromQuestion } from "../server/actions";
-import { recordDecision, relativeTo, shouldStop } from "../server/agent-tools";
+import { recordDecision, relativeTo, saveSuggestion, shouldStop } from "../server/agent-tools";
 import { Outbox } from "../server/outbox";
 import { replayLostCalls } from "../server/replay";
 import type { PaseoApi } from "../server/paseo-api";
@@ -18,6 +18,7 @@ import { WorkspaceStatusReader } from "../server/workspace-status";
 import { WorkspaceDirectory } from "../server/workspaces";
 
 const base: DecisionInput = {
+  title: "Tests in test/",
   decision: "Put the test in test/store.test.js",
   kind: "approach",
   why: "No convention",
@@ -157,18 +158,85 @@ test("review: approve sends nothing, undo needs text and goes to each agent", as
   assert.equal(sent.every((item) => item.text.includes("Use src/ instead")), true);
 });
 
-test("follow-ups: add, hand to an agent once", async () => {
+/** 실제 서버처럼 보낸 요청을 sent 로 바꾸는 outbox 와 actions 를 묶는다. */
+function wired(store: StateStore) {
+  const outbox: Outbox = new Outbox(store, (ids): Promise<void> => actions.markSent(ids));
+  const actions: Actions = new Actions(store, outbox);
+  return { outbox, actions };
+}
+
+test("requests: an idle agent gets it at once, a busy agent when its turn ends, and a waiting one can be cancelled", async () => {
+  const store = await tempStore();
+  const { actions, outbox } = wired(store);
+  const idle = fakePaseo();
+  assert.deepEqual(await actions.addRequest(idle.paseo, { workspaceId: "w1", agentId: "a1", text: "Also add a README section", projectId: "p1" }), { delivery: "sent" });
+  assert.match(idle.sent[0]!.text, /Also add a README section/);
+  const busy = fakePaseo({ status: { a2: "running" } });
+  await actions.addRequest(busy.paseo, { workspaceId: "w1", agentId: "a2", text: "first", projectId: "p1" });
+  await actions.addRequest(busy.paseo, { workspaceId: "w1", agentId: "a2", text: "second", projectId: "p1" });
+  let state = await store.read();
+  assert.deepEqual(state.requests.map((item) => item.status), ["sent", "queued", "queued"]);
+  await actions.dismissRequest(state.requests[2]!.id);
+  const later = fakePaseo();
+  await outbox.flushAll(later.paseo);
+  state = await store.read();
+  assert.deepEqual(state.requests.map((item) => item.status), ["sent", "sent", "dismissed"]);
+  assert.equal(later.sent.length, 1);
+  assert.match(later.sent[0]!.text, /first/);
+  assert.doesNotMatch(later.sent[0]!.text, /second/);
+  await assert.rejects(actions.dismissRequest(state.requests[1]!.id), /already sent/);
+});
+
+test("requests: an agent's suggestion is sent to the agent the person picks, or dismissed", async () => {
+  const store = await tempStore();
+  const { actions } = wired(store);
+  const { paseo, sent } = fakePaseo();
+  await saveSuggestion(store, "a1", where, "Add pagination later");
+  const [suggestion] = (await store.read()).requests;
+  assert.equal(suggestion!.status, "suggested");
+  await actions.sendSuggestion(paseo, suggestion!.id, "a3");
+  assert.equal(sent[0]!.agentId, "a3");
+  assert.match(sent[0]!.text, /Add pagination later/);
+  assert.equal((await store.read()).requests[0]!.status, "sent");
+  await assert.rejects(actions.sendSuggestion(paseo, suggestion!.id, "a3"), /no longer open/);
+});
+
+test("review: revert asks to undo the change without needing a note", async () => {
   const store = await tempStore();
   const { paseo, sent } = fakePaseo();
+  const decision = await recordDecision(store, "a1", where, base);
   const actions = new Actions(store, new Outbox(store));
-  await actions.addFollowup({ text: "Add pagination", projectId: "p1", workspaceId: null });
-  const [followup] = (await store.read()).followups;
-  await actions.sendFollowup(paseo, followup!.id, "a3");
-  assert.match(sent[0]!.text, /Add pagination/);
-  const after = (await store.read()).followups[0]!;
-  assert.equal(after.status, "done");
-  assert.equal(after.sentTo, "a3");
-  await assert.rejects(actions.sendFollowup(paseo, followup!.id, "a3"), /not open/);
+  await actions.review(paseo, { decisionIds: [decision.id], verdict: "revert", text: null });
+  assert.match(sent[0]!.text, /reverted/);
+  assert.match(sent[0]!.text, /Tests in test\//);
+  assert.equal((await store.read()).decisions[0]!.status, "revert");
+});
+
+test("ask first: a pending question window is sent back with the question; the agent's next reply is the answer", async () => {
+  const store = await tempStore();
+  const responded: unknown[] = [];
+  const sent: string[] = [];
+  const paseo = {
+    agents: {
+      ref: () => ({
+        refresh: async () => ({ agent: { status: "running", archivedAt: null, pendingPermissions: [{ id: "perm1", kind: "question" }] } }),
+        respondToPermission: async (input: unknown) => {
+          responded.push(input);
+        },
+        send: async (text: string) => {
+          sent.push(text);
+        },
+      }),
+    },
+  } as unknown as PaseoApi;
+  const actions = new Actions(store, new Outbox(store));
+  await actions.ask(paseo, "a1", "Why not cursor pagination?");
+  assert.equal(sent.length, 0);
+  assert.match(JSON.stringify(responded[0]), /perm1/);
+  assert.match(JSON.stringify(responded[0]), /Why not cursor pagination/);
+  await actions.recordAskAnswer("a1", "Cursor needs a stable sort key we do not have.");
+  const [ask] = (await store.read()).asks;
+  assert.equal(ask!.answer, "Cursor needs a stable sort key we do not have.");
 });
 
 test("summary JSON is parsed even inside a code block", () => {
@@ -289,13 +357,11 @@ test("answers, undo and hand-offs to a gone agent fail and change nothing", asyn
   const actions = new Actions(store, new Outbox(store));
   await assert.rejects(actions.answer(paseo, "a1", "ok"), /gone/);
   await assert.rejects(actions.review(paseo, { decisionIds: [kept.id], verdict: "undo", text: "change" }), /gone/);
-  await actions.addFollowup({ text: "later", projectId: "p1", workspaceId: null });
-  const followup = (await store.read()).followups[0]!;
-  await assert.rejects(actions.sendFollowup(paseo, followup.id, "a1"), /gone/);
+  await assert.rejects(actions.addRequest(paseo, { workspaceId: "w1", agentId: "a1", text: "later", projectId: "p1" }), /gone/);
   const state = await store.read();
   assert.equal(state.decisions.find((item) => item.id === stopped.id)!.status, "waiting");
   assert.equal(state.decisions.find((item) => item.id === kept.id)!.status, "unreviewed");
-  assert.equal(state.followups[0]!.status, "open");
+  assert.equal(state.requests.length, 0);
   assert.equal(sent.length, 0);
 });
 
@@ -368,7 +434,7 @@ test("tool calls lost to a plugin restart are recorded at the end of the turn, o
   assert.equal(await replayLostCalls(paseo, store, "a1", where), 0);
   const state = await store.read();
   assert.deepEqual(state.decisions.map((item) => [item.decision, item.status, item.callId]), [["page and limit", "waiting", "c1"]]);
-  assert.deepEqual(state.followups.map((item) => [item.text, item.callId]), [["cursor pagination later", "c2"]]);
+  assert.deepEqual(state.requests.map((item) => [item.text, item.status, item.callId]), [["cursor pagination later", "suggested", "c2"]]);
 });
 
 test("a lost stopped decision that the person already answered is not asked again", async () => {

@@ -38,16 +38,22 @@ export interface CardAgent {
 /** 카드 머리: 종류, 프로젝트, 워크스페이스 › 에이전트, 기다린 시간. 여러 워크스페이스의 카드가 섞여도 어디 일인지 바로 보이게 한다. */
 export function CardHead({ kind, color, agent, ctx }: { kind: string; color: string; agent: CardAgent; ctx: ViewContext }) {
   const workspace = useWorkspace(agent.workspaceId, (w) => w.title ?? w.name);
+  // 윗줄은 종류·프로젝트·기다린 시간, 아랫줄은 워크스페이스 › 에이전트다. 한 줄에 모두 두면 좁은 화면에서 이름이 잘리고 시간이
+  // 혼자 다음 줄로 떨어진다.
   return (
-    <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
-      <Chip label={kind} color={color} theme={ctx.theme} />
-      <WorkspaceProjectChip workspaceId={agent.workspaceId} ctx={ctx} />
-      <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, flexShrink: 1 }}>
+    <View style={{ gap: 4 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <Chip label={kind} color={color} theme={ctx.theme} />
+        <View style={{ flexShrink: 1 }}>
+          <WorkspaceProjectChip workspaceId={agent.workspaceId} ctx={ctx} />
+        </View>
+        <View style={{ flex: 1 }} />
+        <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
+          {ctx.t("time.waiting", { ago: formatAgo(agent.since, ctx.now, ctx.t) })}
+        </Text>
+      </View>
+      <Text numberOfLines={2} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
         {`${workspace ?? ""} › ${agent.title}`}
-      </Text>
-      <View style={{ flex: 1 }} />
-      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
-        {ctx.t("time.waiting", { ago: formatAgo(agent.since, ctx.now, ctx.t) })}
       </Text>
     </View>
   );
@@ -84,7 +90,9 @@ function QuestionForm({
     <View style={{ gap: 14 }}>
       {items.map((item) => (
         <View key={item.question} style={{ gap: 8 }}>
-          <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>
+          {/* 에이전트의 질문은 길 때가 많다. 굵은 큰 글씨로 두면 벽처럼 보여서 본문 크기로 둔다. 짧은 머리말만 굵게 둔다. */}
+          {item.header ? <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, fontWeight: "600" }}>{item.header}</Text> : null}
+          <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.5) }}>
             {item.question}
             {item.multiSelect ? `  ${ctx.t("permission.multiSelect")}` : ""}
           </Text>

@@ -3,9 +3,9 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Text, View } from "react-native";
 import { type Decision, type PullRequest, type WorkspaceStatus, agentRequestsRpc, reviewDecisionsRpc } from "../shared/model";
-import { DecisionItem, DiffToggle } from "./decision-view";
+import { DecisionRow, DiffToggle } from "./decision-view";
 import { formatAgo } from "./time";
-import { Body, Chip, CtaButton, ErrorLine, Fold, InstructionBox, Muted, Row, type ViewContext } from "./ui";
+import { Chip, CtaButton, ErrorLine, Fold, Muted, TextBox, type ViewContext } from "./ui";
 
 /** PR 상태 한 줄. Paseo 가 워크스페이스에 붙여 준 GitHub 정보를 읽기만 한다. 머지는 사람이 GitHub 이나 Paseo 에서 한다. */
 export function PullRequestLine({ pr, ctx }: { pr: PullRequest; ctx: ViewContext }) {
@@ -67,40 +67,61 @@ function AgentRequests({ agentId, ctx }: { agentId: string; ctx: ViewContext }) 
   );
 }
 
-/** 확인 버튼. 이미 승인한 결정은 나중에 틀린 것을 알았을 때를 위해 되돌리기만 남긴다. */
-function ReviewActions({ decisions, ctx, undoOnly = false }: { decisions: readonly Decision[]; ctx: ViewContext; undoOnly?: boolean }) {
+type Verdict = "revert" | "undo";
+
+/**
+ * 결정 줄의 버튼. 맞음은 그대로 둔다. 되돌리기는 그 결정으로 바뀐 것을 원래대로 돌리라고 보낸다(덧붙일 말은 골라서).
+ * 바꿔서 다시는 사람이 쓴 방식으로 다시 하라고 보낸다. 이미 맞음으로 둔 결정도 나중에 되돌리거나 바꿀 수 있다.
+ */
+function ReviewActions({ decisions, ctx }: { decisions: readonly Decision[]; ctx: ViewContext }) {
   const call = useRpc(reviewDecisionsRpc);
   const review = useMutation({
-    mutationFn: (input: { verdict: "approved" | "undo"; text: string | null }) => call({ decisionIds: decisions.map((item) => item.id), ...input }),
+    mutationFn: (input: { verdict: "approved" | Verdict; text: string | null }) => call({ decisionIds: decisions.map((item) => item.id), ...input }),
   });
-  const [undoing, setUndoing] = useState(false);
+  const [mode, setMode] = useState<Verdict | null>(null);
+  const [text, setText] = useState("");
+  const approvable = decisions.some((item) => item.status === "unreviewed");
+  const many = decisions.length > 1;
+  const toggle = (next: Verdict) => setMode((current) => (current === next ? null : next));
   return (
-    <View style={{ gap: 8 }}>
-      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-        {undoOnly ? null : (
+    <View style={{ gap: 8, alignItems: "flex-end" }}>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, justifyContent: "flex-end" }}>
+        {approvable ? (
           <CtaButton
-            label={decisions.length > 1 ? ctx.t("review.approveAll", { count: decisions.length }) : ctx.t("review.approve")}
+            label={many ? ctx.t("review.approveAll", { count: decisions.length }) : ctx.t("review.approve")}
             tone="primary"
             disabled={review.isPending}
             theme={ctx.theme}
             onPress={() => review.mutate({ verdict: "approved", text: null })}
           />
+        ) : null}
+        {many ? null : (
+          <>
+            <CtaButton label={ctx.t("review.revert")} disabled={review.isPending} theme={ctx.theme} onPress={() => toggle("revert")} />
+            <CtaButton label={ctx.t("review.undo")} disabled={review.isPending} theme={ctx.theme} onPress={() => toggle("undo")} />
+          </>
         )}
-        <CtaButton
-          label={undoing ? ctx.t("common.closeInstruct") : ctx.t("review.undo")}
-          disabled={review.isPending}
-          theme={ctx.theme}
-          onPress={() => setUndoing((value) => !value)}
-        />
       </View>
-      {undoing ? (
-        <InstructionBox
-          placeholder={ctx.t("review.undoPlaceholder")}
-          submitLabel={ctx.t("review.sendUndo")}
-          busy={review.isPending}
-          ctx={ctx}
-          onSubmit={(text) => review.mutateAsync({ verdict: "undo", text }).then(() => setUndoing(false))}
-        />
+      {mode ? (
+        <View style={{ gap: 6, alignSelf: "stretch" }}>
+          <TextBox
+            value={text}
+            onChange={setText}
+            placeholder={mode === "revert" ? ctx.t("review.revertPlaceholder") : ctx.t("review.undoPlaceholder")}
+            ctx={ctx}
+            minHeight={56}
+          />
+          <View style={{ flexDirection: "row", gap: 6, justifyContent: "flex-end" }}>
+            <CtaButton label={ctx.t("common.closeInstruct")} theme={ctx.theme} onPress={() => setMode(null)} />
+            <CtaButton
+              label={mode === "revert" ? ctx.t("review.sendRevert") : ctx.t("review.sendUndo")}
+              tone="primary"
+              disabled={review.isPending || (mode === "undo" && !text.trim())}
+              theme={ctx.theme}
+              onPress={() => review.mutate({ verdict: mode, text: text.trim() || null }, { onSuccess: () => { setMode(null); setText(""); } })}
+            />
+          </View>
+        </View>
       ) : null}
       {review.data?.delivery === "queued" ? <Muted text={ctx.t("common.queued")} ctx={ctx} /> : null}
       <ErrorLine error={review.error} ctx={ctx} />
@@ -109,8 +130,8 @@ function ReviewActions({ decisions, ctx, undoOnly = false }: { decisions: readon
 }
 
 /**
- * 한 워크스페이스의 판단 흐름: 무엇을 요청받았는지 → 에이전트가 내린 결정(근거, 가정, diff) → 어느 결정에도 없는 변경.
- * 사람은 이 순서로 읽으며 에이전트의 판단이 요청과 맞는지 확인한다. 확인하지 않은 결정은 여기서 승인하거나 되돌리게 한다.
+ * 한 워크스페이스의 결정. 결정 하나가 한 줄이라 많아도 훑어볼 수 있다. 확인할 결정이 위에 오고, 지난 결정은 접어 둔다.
+ * 이상한 줄만 펼쳐 근거와 diff 를 보고, 그 자리에서 맞음, 되돌리기, 바꿔서 다시를 고른다.
  */
 export function WorkspaceReview({
   workspaceId,
@@ -123,60 +144,71 @@ export function WorkspaceReview({
   status: WorkspaceStatus | null;
   ctx: ViewContext;
 }) {
-  const names = useWorkspace(workspaceId, (w) => ({ title: w.title ?? w.name }));
-  const [showAll, setShowAll] = useState(false);
+  const [showSettled, setShowSettled] = useState(false);
   const live = decisions.filter((item) => item.status !== "dropped");
   const unreviewed = live.filter((item) => item.status === "unreviewed");
-  const settled = live.filter((item) => item.status !== "unreviewed" && item.status !== "waiting");
+  const waiting = live.filter((item) => item.status === "waiting");
+  const settled = live.filter((item) => item.status !== "unreviewed" && item.status !== "waiting").reverse();
   const agentIds = [...new Set(live.map((item) => item.agentId))];
   const extra = unexplainedFiles(status, live);
+  const sectionTitle = (text: string, color: string) => <Text style={{ color, fontSize: ctx.fonts.meta, fontWeight: "600" }}>{text}</Text>;
   return (
     <View style={{ gap: 12 }}>
-      {agentIds.length ? (
-        <Fold
-          ctx={ctx}
-          items={[{ label: ctx.t("review.requests"), count: agentIds.length, content: agentIds.map((id) => <AgentRequests key={id} agentId={id} ctx={ctx} />) }]}
-        />
-      ) : null}
+      {waiting.length ? <Muted text={ctx.t("review.waitingInInbox", { count: waiting.length })} ctx={ctx} /> : null}
       {unreviewed.length ? (
-        <View style={{ gap: 8 }}>
-          <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.body, fontWeight: "600" }}>
-            {ctx.t("review.unreviewed", { count: unreviewed.length })}
-          </Text>
+        <View>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingBottom: 6 }}>
+            {sectionTitle(ctx.t("review.unreviewed", { count: unreviewed.length }), ctx.theme.colors.statusWarning)}
+            <View style={{ flex: 1 }} />
+            {unreviewed.length > 1 ? <ReviewActions decisions={unreviewed} ctx={ctx} /> : null}
+          </View>
           {unreviewed.map((decision) => (
-            <DecisionItem key={decision.id} decision={decision} ctx={ctx} actions={<ReviewActions decisions={[decision]} ctx={ctx} />} />
+            <DecisionRow key={decision.id} decision={decision} showStatus={false} ctx={ctx} actions={<ReviewActions decisions={[decision]} ctx={ctx} />} />
           ))}
-          {unreviewed.length > 1 ? <ReviewActions decisions={unreviewed} ctx={ctx} /> : null}
         </View>
       ) : null}
       {extra.length ? (
-        <Row label={ctx.t("review.unexplained")} ctx={ctx}>
-          <Body text={live.length ? ctx.t("review.unexplainedHint", { count: extra.length }) : ctx.t("review.noDecisionsHint", { count: extra.length })} ctx={ctx} />
-          <Muted text={extra.slice(0, 30).join(", ")} ctx={ctx} />
+        <View style={{ gap: 4 }}>
+          {sectionTitle(ctx.t("review.unexplained"), ctx.theme.colors.statusWarning)}
+          <Muted text={live.length ? ctx.t("review.unexplainedHint", { count: extra.length }) : ctx.t("review.noDecisionsHint", { count: extra.length })} ctx={ctx} />
+          <Text numberOfLines={2} selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta }}>
+            {extra.slice(0, 30).join(", ")}
+          </Text>
           <DiffToggle workspaceId={workspaceId} files={extra.slice(0, 40)} ctx={ctx} />
-        </Row>
+        </View>
       ) : null}
       {status?.overlaps.length ? (
-        <Row label={ctx.t("review.overlaps")} ctx={ctx}>
+        <View style={{ gap: 4 }}>
+          {sectionTitle(ctx.t("review.overlaps"), ctx.theme.colors.statusWarning)}
           {status.overlaps.map((item) => (
             <OverlapLine key={item.workspaceId} workspaceId={item.workspaceId} files={item.files} ctx={ctx} />
           ))}
-        </Row>
-      ) : null}
-      {settled.length ? (
-        <View style={{ gap: 8 }}>
-          <View style={{ flexDirection: "row" }}>
-            <CtaButton
-              size="sm"
-              label={showAll ? `▾ ${ctx.t("review.hideSettled")}` : `▸ ${ctx.t("review.showSettled", { count: settled.length })}`}
-              theme={ctx.theme}
-              onPress={() => setShowAll((value) => !value)}
-            />
-          </View>
-          {showAll ? settled.map((decision) => <DecisionItem key={decision.id} decision={decision} ctx={ctx} actions={decision.status === "approved" ? <ReviewActions decisions={[decision]} ctx={ctx} undoOnly /> : undefined} />) : null}
         </View>
       ) : null}
-      {!live.length && !extra.length ? <Muted text={ctx.t("review.empty", { name: names?.title ?? "" })} ctx={ctx} /> : null}
+      {settled.length ? (
+        <View>
+          <View style={{ flexDirection: "row", paddingBottom: 6 }}>
+            <CtaButton
+              size="sm"
+              label={showSettled ? `▾ ${ctx.t("review.hideSettled")}` : `▸ ${ctx.t("review.showSettled", { count: settled.length })}`}
+              theme={ctx.theme}
+              onPress={() => setShowSettled((value) => !value)}
+            />
+          </View>
+          {showSettled
+            ? settled.map((decision) => (
+                <DecisionRow
+                  key={decision.id}
+                  decision={decision}
+                  ctx={ctx}
+                  actions={decision.status === "approved" ? <ReviewActions decisions={[decision]} ctx={ctx} /> : undefined}
+                />
+              ))
+            : null}
+        </View>
+      ) : null}
+      {agentIds.length ? <Fold ctx={ctx} items={[{ label: ctx.t("review.requests"), count: agentIds.length, content: agentIds.map((id) => <AgentRequests key={id} agentId={id} ctx={ctx} />) }]} /> : null}
+      {!live.length && !extra.length ? <Muted text={ctx.t("review.empty")} ctx={ctx} /> : null}
     </View>
   );
 }

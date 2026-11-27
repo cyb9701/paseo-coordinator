@@ -6,60 +6,56 @@ You still create workspaces, plan and direct the work. The coordinator does not 
 
 [한국어 소개](OVERVIEW.ko.md)
 
-![Inbox: a card for an agent that stopped on three decisions, with the context summary: what led here, what to decide now, what each answer leads to, and what to watch out for](assets/inbox.png)
+![Progress: rows per workspace with agent cards by how much they wait on you, and a workspace's decisions open below its row, one line each](assets/progress.png)
 
 ## How it works
 
 ```
 You start an agent in a watched project and give it work
   → The agent meets a choice your messages and the repository do not settle
-  → It calls record_decision before acting: what, why, alternatives,
+  → It calls record_decision before acting: a one-line title, what, why, alternatives,
     evidence (checked or assumed), whether it rests on an assumption, how hard to undo, files
   → The plugin decides
       ├─ stop: scope, data shape, interface, user-visible behavior, hard to undo, or rests on an assumption
       │     → the agent asks about all stopped decisions at once (its question tool, or one message) and waits
-      │     → a small model summarizes what led there and what each answer leads to
-      │     → one card per agent in "Needs my decision"; your answer goes back as one message
+      │     → one short card per agent in "Needs my decision"; your answer goes back as one message
       └─ continue: recorded, the agent goes on
-            → grouped per workspace in "To review": "Looks right" or "Change it"
+            → one line per decision to review: Looks right, Revert, or Redo differently
 ```
 
-Work for later goes to the follow-up list through `add_followup` instead of being done now.
+Work outside the request goes to the request list as a suggestion through `add_followup` instead of being done now.
 
 ## Screens
 
-**Inbox.** "Needs my decision" holds stopped decisions (one card per agent), permission requests, questions and errors. A stopped-decision card shows:
+**Inbox.** "Needs my decision" holds stopped decisions (one card per agent), permission requests, questions and errors. A stopped-decision card stays short:
 
-- the context summary: what led here, what to decide now, what each answer leads to, what to watch out for
-- each decision with its reason, assumptions in warning color, checked evidence, alternatives not chosen, and its files with diffs
-- an answer box, "Go ahead as proposed" and "Open agent"
+- one line on what to decide now, from a small-model summary
+- each decision as a title, the agent's proposal in two lines, a warning line if it rests on an assumption, and its alternatives as chips
+- a note box and one button: "Go ahead as proposed", or "Send answer" once you pick an alternative or write a note
+- "Ask first" to ask the agent before deciding; the question and its answer stay on the card
+- the full context, evidence and diffs folded under Details
+
+If the agent asks with a question tool such as AskUserQuestion, its options take the place of the chips and the answer is recorded on the decisions.
+
+"To review" lists, per workspace, the decisions agents made and kept going with, one line each. The sidebar badge counts only what waits on you. Permission requests, questions and errors come from every agent on the host; decisions, summaries and pull request state cover the watched projects.
 
 <p>
-  <img src="assets/inbox-decisions.png" alt="The same card further down: each decision with its reason, assumption, checked evidence, alternatives not chosen and files with a diff toggle, then the answer box with Go ahead as proposed, Send answer and Open agent" width="49%">
-  <img src="assets/review.png" alt="An agent's question window answered from the inbox, then To review: a decision the agent kept going with, with its evidence and Looks right or Change it" width="49%">
+  <img src="assets/inbox.png" alt="Inbox: a short card for an agent that stopped on decisions, each a title, the proposal, an assumption warning and alternative chips, with Go ahead as proposed and Ask first" width="49%">
+  <img src="assets/review.png" alt="Decisions to review, one line each with status, kind, title, assumption mark and file count, and Looks right, Revert and Redo differently" width="49%">
 </p>
 
-If the agent asks with a question tool such as AskUserQuestion, the question's options take the place of the answer box in the same card, and the answer is recorded on the decisions.
+**Progress.** A table of every agent on the host. Each row is a workspace; the columns say how much it waits on you: needs my decision, to review, working, waiting. Each cell holds agent cards with the state, the last reply and the agent's decisions waiting or to review. Rows that wait on you come first. Rows of watched projects also show pull request state, decisions waiting and to review, changed files no decision covers (once the workspace has recorded decisions) and files another workspace also changed.
 
-"To review" groups the decisions agents made and kept going with, per workspace. The sidebar badge counts only what waits on you. Permission requests, questions and errors come from every agent on the host; decisions, summaries, pull request state and follow-ups cover the watched projects.
+- "Decisions and changes" opens the workspace's decisions under the row, one line each: status, kind, title, an assumption mark, file count and time. Open a line for the reason, evidence, alternatives and diff. Each line has "Looks right", "Revert" (undo what that decision changed) and "Redo differently" (tell the agent how instead). Changes no decision explains and overlapping files follow.
+- "Request" gives the workspace more work. The agent there gets it right away if it is idle, or when its turn ends.
 
-**Progress.** A table of every agent on the host. Each row is a workspace; the columns say how much it waits on you: needs my decision, to review, working, waiting. Each cell holds agent cards with the state, the last reply and the agent's decisions waiting or to review. Rows that wait on you come first. Rows of watched projects also show, under the workspace name:
 
-- pull request state: checks, conflicts, review
-- decisions waiting and decisions to review
-- changed files that no decision covers (counted once the workspace has recorded decisions)
-- files another workspace of the same project also changed
-
-"Decisions and changes" opens the judgment trail under the row: what was asked, the decisions with their diffs, the changes no decision explains, and the overlaps. On a narrow screen each workspace becomes a card with its agents stacked.
-
-![Progress: two workspaces of one project as rows; an agent with three decisions waiting in Needs my decision and a finished agent in To review; the row headers show the decisions waiting, the changed files and the toggle for decisions and changes](assets/progress.png)
-
-**Follow-ups.** Work for later, from agents and from you, by project. Hand one to an agent in the same project (that closes it), mark it done or dismiss it.
+**Requests.** Extra work for running workspaces, by workspace: requests waiting for a busy agent (cancel them before they are sent), suggestions agents left through `add_followup` (send one as a request or dismiss it), and requests already sent.
 
 **Settings.** Projects to watch, context summaries on or off with their model and effort, summary language, text size.
 
 <p>
-  <img src="assets/followups.png" alt="Follow-ups: items agents saved for later, each with Hand to an agent, Done and Dismiss" width="49%">
+  <img src="assets/requests.png" alt="Requests: a request waiting for a busy agent with Cancel, and an agent's suggestion with Send as a request and Dismiss" width="49%">
   <img src="assets/settings.png" alt="Settings: context summaries on or off with the model and effort, summary language and text size" width="49%">
 </p>
 
@@ -80,7 +76,7 @@ Open **Coordinator** from the sidebar, go to **Settings** and choose the project
 
 ## What it reads, runs and stores
 
-- State (decisions, follow-ups, summaries, messages waiting for a busy agent): `plugin-data/paseo-coordinator/state.json` under the Paseo home (`$PASEO_HOME` or `~/.paseo`).
+- State (decisions, requests, questions you asked agents, summaries, messages waiting for a busy agent): `plugin-data/paseo-coordinator/state.json` under the Paseo home (`$PASEO_HOME` or `~/.paseo`).
 - It reads each watched agent's messages to show what was asked and to build summaries.
 - It runs read-only `git` commands (`rev-parse`, `merge-base`, `diff`, `ls-files`), at most four workspaces at a time, in watched workspaces. Diffs are shown only for files the workspace changed.
 - A summary runs one background agent with the summary model (default `claude/claude-haiku-5-5`) in a single hidden workspace the plugin reuses, then archives the agent. With Claude its tools are removed; with any provider it runs in a mode that asks for permission, and the plugin denies every request. Summaries run only when an agent stops for your decision, a turn fails (at most once every 10 minutes per agent), or you ask for one; at most two run at once. Turning summaries off stops the automatic ones; the button on a card still works.
@@ -100,7 +96,7 @@ paseo plugin install /absolute/path/to/paseo-coordinator
 paseo plugin reload paseo-coordinator   # after each change
 ```
 
-No build step and no runtime dependencies beyond what Paseo provides. `npm test` covers the stop rule, decision paths, answering stopped decisions in one message, delivery only to idle agents, refusing to send to a gone agent, reviews and undo instructions, follow-ups, summary batching, the error-summary interval, summaries interrupted by a restart, answers given in a question window, tool calls lost to a restart, and, against real git worktrees, changed files, overlaps, non-ASCII names, a workspace in a repository subfolder, separate caches per project set and the diff path guard.
+No build step and no runtime dependencies beyond what Paseo provides. `npm test` covers the stop rule, decision paths, answering stopped decisions in one message, delivery only to idle agents, refusing to send to a gone agent, reviews and undo instructions, requests and suggestions, revert and redo, asking first, summary batching, the error-summary interval, summaries interrupted by a restart, answers given in a question window, tool calls lost to a restart, and, against real git worktrees, changed files, overlaps, non-ASCII names, a workspace in a repository subfolder, separate caches per project set and the diff path guard.
 
 ## Documents
 

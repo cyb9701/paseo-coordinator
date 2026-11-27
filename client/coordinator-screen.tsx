@@ -3,18 +3,18 @@ import { useAgents } from "@getpaseo/plugin/client";
 import { useState } from "react";
 import { ScrollView, Text, View } from "react-native";
 import { CoordinatorStateProvider, reactionCount, useCoordinatorState } from "./coordinator-state";
-import { FollowupsView } from "./followups-view";
 import { FontProvider, useFonts } from "./fonts";
 import { useT } from "./i18n";
 import { InboxView } from "./inbox";
 import { PendingProvider, useClassifier, usePending } from "./pending-store";
 import { ProgressBoard } from "./progress-board";
+import { RequestsView } from "./requests-view";
 import { SettingsView } from "./settings-view";
 import { useNow } from "./time";
 import { CtaButton, TabBar, type ViewContext } from "./ui";
 
 
-type Tab = "inbox" | "progress" | "followups" | "settings";
+type Tab = "inbox" | "progress" | "requests" | "settings";
 
 export function CoordinatorScreen(props: PluginScreenProps) {
   return (
@@ -39,11 +39,12 @@ function ScreenBody({ theme, layout, host, navigation }: PluginScreenProps) {
   const waiting = useAgents({ hosts: [host.id], where: (agent) => classify.needsMyDecision(agent) });
   const { state } = useCoordinatorState();
   const blocked = reactionCount(state, waiting.map((ref) => ref.id), pending);
-  const followups = (state?.followups ?? []).filter((item) => item.status === "open").length;
+  // 추가 요청 탭의 숫자는 사람이 볼 것(에이전트의 제안)만 센다. 대기 중인 요청은 알아서 나간다.
+  const suggestions = (state?.requests ?? []).filter((item) => item.status === "suggested").length;
   const tabs: readonly { key: Tab; label: string }[] = [
     { key: "inbox", label: blocked > 0 ? t("tabs.inboxCount", { count: blocked }) : t("tabs.inbox") },
     { key: "progress", label: t("tabs.progress") },
-    { key: "followups", label: followups > 0 ? t("tabs.followupsCount", { count: followups }) : t("tabs.followups") },
+    { key: "requests", label: suggestions > 0 ? t("tabs.requestsCount", { count: suggestions }) : t("tabs.requests") },
   ];
   // 설정은 자주 쓰지 않아서 일하는 탭과 떨어뜨려 오른쪽 끝에 둔다.
   const settingsTab: readonly { key: Tab; label: string }[] = [{ key: "settings", label: t("tabs.settings") }];
@@ -57,7 +58,7 @@ function ScreenBody({ theme, layout, host, navigation }: PluginScreenProps) {
       <ConnectionBanner ctx={ctx} />
       {tab === "inbox" ? <InboxView ctx={ctx} /> : null}
       {tab === "progress" ? <ProgressBoard ctx={ctx} /> : null}
-      {tab === "followups" ? <FollowupsView ctx={ctx} /> : null}
+      {tab === "requests" ? <RequestsView ctx={ctx} /> : null}
       {tab === "settings" ? <SettingsView theme={theme} hostId={host.id} t={t} /> : null}
     </ScrollView>
   );

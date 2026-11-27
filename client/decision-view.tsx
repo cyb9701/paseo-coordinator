@@ -1,8 +1,8 @@
 import { useRpc } from "@getpaseo/plugin/client";
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
-import { Text, View } from "react-native";
-import { type Decision, fileDiffRpc } from "../shared/model";
+import { Pressable, Text, View } from "react-native";
+import { type Decision, decisionTitle, fileDiffRpc } from "../shared/model";
 import { formatAgo } from "./time";
 import { Chip, CodeBox, CtaButton, ErrorLine, Muted, Row, type ViewContext } from "./ui";
 
@@ -18,6 +18,7 @@ function statusColor(status: Decision["status"], ctx: ViewContext): string {
     case "unreviewed":
       return ctx.theme.colors.statusWarning;
     case "undo":
+    case "revert":
       return ctx.theme.colors.statusDanger;
     case "approved":
     case "answered":
@@ -75,86 +76,83 @@ export function DiffToggle({ workspaceId, files, ctx }: { workspaceId: string; f
   );
 }
 
-/**
- * 결정 하나. 무엇을 정했는지, 왜, 확인한 근거와 가정, 버린 대안, 되돌리는 비용, 고친 파일(diff)을 한 곳에 둔다.
- * 사람은 이것만 보고 에이전트의 판단이 맞는지 가릴 수 있어야 한다. 가정은 경고 색으로 보여 먼저 눈에 띄게 한다.
- */
-export function DecisionItem({ decision, ctx, actions, showStatus = true }: { decision: Decision; ctx: ViewContext; actions?: ReactNode; showStatus?: boolean }) {
+/** 결정의 근거. 한 줄을 펼쳤을 때와 멈춘 결정 카드의 '근거 보기'에서 보인다. */
+export function DecisionDetails({ decision, ctx }: { decision: Decision; ctx: ViewContext }) {
   const assumptions = decision.evidence.filter((item) => item.basis === "assumption");
   const verified = decision.evidence.filter((item) => item.basis === "verified");
+  const line = (text: string, color = ctx.theme.colors.foreground) => (
+    <Text selectable style={{ color, fontSize: ctx.fonts.meta, lineHeight: Math.round(ctx.fonts.meta * 1.45) }}>
+      {text}
+    </Text>
+  );
   return (
-    <View
-      style={{
-        gap: 10,
-        padding: 12,
-        borderRadius: 8,
-        borderWidth: 1,
-        borderColor: ctx.theme.colors.border,
-        backgroundColor: ctx.theme.colors.surface0,
-      }}
-    >
-      <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
-        <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, fontWeight: "600" }}>{`#${decision.number}`}</Text>
-        <Chip label={ctx.t(`decisionKinds.${decision.kind}`)} color={kindColor(decision, ctx)} theme={ctx.theme} />
-        <Chip
-          label={ctx.t(`reversible.${decision.reversible}`)}
-          color={decision.reversible === "easy" ? ctx.theme.colors.foregroundMuted : ctx.theme.colors.statusDanger}
-          theme={ctx.theme}
-        />
-        {decision.restsOnAssumption ? <Chip label={ctx.t("decision.restsOnAssumption")} color={ctx.theme.colors.statusWarning} theme={ctx.theme} /> : null}
-        {showStatus ? <Chip label={ctx.t(`decisionStatus.${decision.status}`)} color={statusColor(decision.status, ctx)} theme={ctx.theme} /> : null}
-        <View style={{ flex: 1 }} />
-        <Muted text={formatAgo(decision.at, ctx.now, ctx.t)} ctx={ctx} />
-      </View>
-      <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600", lineHeight: Math.round(ctx.fonts.heading * 1.4) }}>
-        {decision.decision}
-      </Text>
-      <Row label={ctx.t("decision.why")} ctx={ctx}>
+    <View style={{ gap: 8 }}>
+      <Row label={ctx.t("decision.what")} ctx={ctx}>
         <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.45) }}>
-          {decision.why}
+          {decision.decision}
         </Text>
       </Row>
-      {assumptions.length ? (
-        <Row label={ctx.t("decision.assumptions")} ctx={ctx}>
-          {assumptions.map((item, index) => (
-            <Text key={index} selectable style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.body }}>
-              {`? ${item.text}`}
-            </Text>
-          ))}
-        </Row>
-      ) : null}
-      {verified.length ? (
-        <Row label={ctx.t("decision.verified")} ctx={ctx}>
-          {verified.map((item, index) => (
-            <Text key={index} selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta, lineHeight: Math.round(ctx.fonts.meta * 1.45) }}>
-              {`✓ ${item.text}`}
-            </Text>
-          ))}
-        </Row>
-      ) : null}
+      <Row label={ctx.t("decision.why")} ctx={ctx}>
+        {line(decision.why)}
+      </Row>
+      {assumptions.length ? <Row label={ctx.t("decision.assumptions")} ctx={ctx}>{assumptions.map((item, index) => <View key={index}>{line(`? ${item.text}`, ctx.theme.colors.statusWarning)}</View>)}</Row> : null}
+      {verified.length ? <Row label={ctx.t("decision.verified")} ctx={ctx}>{verified.map((item, index) => <View key={index}>{line(`✓ ${item.text}`)}</View>)}</Row> : null}
       {decision.alternatives.length ? (
         <Row label={ctx.t("decision.alternatives")} ctx={ctx}>
-          {decision.alternatives.map((item, index) => (
-            <Text key={index} selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta, lineHeight: Math.round(ctx.fonts.meta * 1.45) }}>
-              {`✗ ${item.option} — ${item.whyNot}`}
-            </Text>
-          ))}
+          {decision.alternatives.map((item, index) => <View key={index}>{line(`✗ ${item.option} — ${item.whyNot}`)}</View>)}
         </Row>
       ) : null}
+      <Row label={ctx.t("decision.undoCost")} ctx={ctx}>
+        {line(ctx.t(`reversible.${decision.reversible}`), decision.reversible === "easy" ? ctx.theme.colors.foreground : ctx.theme.colors.statusDanger)}
+      </Row>
       {decision.files.length ? (
         <Row label={ctx.t("decision.files")} ctx={ctx}>
           <Muted text={decision.files.join(", ")} ctx={ctx} />
           <DiffToggle workspaceId={decision.workspaceId} files={decision.files} ctx={ctx} />
         </Row>
       ) : null}
-      {decision.reply ? (
-        <Row label={decision.status === "undo" ? ctx.t("decision.undoReply") : ctx.t("decision.reply")} ctx={ctx}>
-          <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body }}>
-            {decision.reply.text}
-          </Text>
+      {decision.reply?.text ? (
+        <Row label={ctx.t(`decision.replyLabel.${decision.status === "revert" || decision.status === "undo" ? decision.status : "answer"}`)} ctx={ctx}>
+          {line(decision.reply.text)}
         </Row>
       ) : null}
-      {actions}
+    </View>
+  );
+}
+
+/**
+ * 결정 한 줄. 상태, 종류, 제목, 가정 표시, 파일 수, 시간만 보인다. 여러 결정을 훑어보다가 이상한 것만 펼쳐 근거와 diff 를 본다.
+ * actions 는 줄 오른쪽 버튼(맞음, 되돌리기, 바꿔서 다시)이다. 줄을 누르면 근거가 펼쳐진다.
+ */
+export function DecisionRow({ decision, ctx, actions, showStatus = true }: { decision: Decision; ctx: ViewContext; actions?: ReactNode; showStatus?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const assumed = decision.restsOnAssumption || decision.evidence.some((item) => item.basis === "assumption");
+  return (
+    <View style={{ borderTopWidth: 1, borderColor: ctx.theme.colors.border, paddingVertical: 8, gap: 8 }}>
+      <View style={{ flexDirection: "row", flexWrap: ctx.compact ? "wrap" : "nowrap", alignItems: "center", gap: 8 }}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`${decisionTitle(decision)} ${open ? ctx.t("card.collapse") : ctx.t("card.expand")}`}
+          onPress={() => setOpen((value) => !value)}
+          style={{ flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 8 }}
+        >
+          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{open ? "▾" : "▸"}</Text>
+          {showStatus ? <Chip label={ctx.t(`decisionStatus.${decision.status}`)} color={statusColor(decision.status, ctx)} theme={ctx.theme} /> : null}
+          <Chip label={ctx.t(`decisionKinds.${decision.kind}`)} color={kindColor(decision, ctx)} theme={ctx.theme} />
+          <Text numberOfLines={open ? undefined : 1} style={{ flex: 1, minWidth: 0, color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600" }}>
+            {decisionTitle(decision)}
+          </Text>
+          {assumed ? <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>{ctx.t("decision.assumedShort")}</Text> : null}
+          {decision.files.length ? <Muted text={ctx.t("decision.fileCount", { count: decision.files.length })} ctx={ctx} /> : null}
+          <Muted text={formatAgo(decision.at, ctx.now, ctx.t)} ctx={ctx} />
+        </Pressable>
+        {actions}
+      </View>
+      {open ? (
+        <View style={{ paddingLeft: ctx.compact ? 0 : 20 }}>
+          <DecisionDetails decision={decision} ctx={ctx} />
+        </View>
+      ) : null}
     </View>
   );
 }

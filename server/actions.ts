@@ -1,15 +1,17 @@
-import type { Decision, Followup } from "../shared/model";
+import { type Decision, REVIEWABLE_STATUSES, type WorkRequest, decisionTitle } from "../shared/model";
 import type { Outbox } from "./outbox";
 import type { PaseoApi } from "./paseo-api";
 import { type StateStore, nextId } from "./store";
 
 // 에이전트에게 가는 문장은 화면 언어와 관계없이 영어로 둔다. 사람이 쓴 답은 그대로 붙인다.
 
-const REVIEWABLE = new Set<Decision["status"]>(["unreviewed", "approved", "undo"]);
+const REVIEWABLE = new Set<Decision["status"]>(REVIEWABLE_STATUSES);
 
 function list(decisions: readonly Decision[]): string {
-  return decisions.map((item) => `#${item.number} ${item.decision}`).join("\n");
+  return decisions.map((item) => `#${item.number} ${decisionTitle(item)}: ${item.decision}`).join("\n");
 }
+
+const REQUEST_PREFIX = "An additional request from the user for this workspace:";
 
 /** 사람이 카드에서 하는 일. 상태를 바꾸고, 에이전트에게 보낼 말이 있으면 outbox 로 보낸다. */
 export class Actions {
@@ -39,20 +41,23 @@ export class Actions {
     return { delivery: await this.outbox.deliver(paseo, agentId, message) };
   }
 
-  /** 기록하고 진행한 결정을 확인한다. 되돌리라고 하면 에이전트마다 지시를 보낸다. */
+  /**
+   * 기록하고 진행한 결정을 확인한다. approved 는 그대로 둔다. revert 는 그 결정으로 바뀐 것을 원래대로 돌리라고 보내고,
+   * undo 는 사람이 쓴 방식으로 바꿔서 다시 하라고 보낸다. 에이전트마다 메시지 하나로 간다.
+   */
   async review(
     paseo: PaseoApi,
-    input: { decisionIds: string[]; verdict: "approved" | "undo"; text: string | null },
+    input: { decisionIds: string[]; verdict: "approved" | "revert" | "undo"; text: string | null },
   ): Promise<{ delivery: "sent" | "queued" | "none" }> {
-    if (input.verdict === "undo" && !input.text?.trim()) throw new Error("Write what to do instead.");
+    const note = input.text?.trim() || null;
+    if (input.verdict === "undo" && !note) throw new Error("Write what to do instead.");
     const at = new Date().toISOString();
     const wanted = new Set(input.decisionIds);
-    if (input.verdict === "undo") {
+    if (input.verdict !== "approved") {
       const agents = new Set((await this.store.read()).decisions.filter((item) => wanted.has(item.id)).map((item) => item.agentId));
       for (const agentId of agents) await this.outbox.ensureReachable(paseo, agentId);
     }
     const changed = await this.store.update((state) => {
-      // 멈춘 결정은 답으로 처리한다. 확인 전 결정과, 이미 확인한 결정을 다시 바꾸는 경우(승인을 되돌리기로)만 받는다.
       const targets = state.decisions.filter((item) => wanted.has(item.id) && REVIEWABLE.has(item.status));
       if (!targets.length) return { state, result: [] as Decision[] };
       const ids = new Set(targets.map((item) => item.id));
@@ -60,9 +65,7 @@ export class Actions {
         state: {
           ...state,
           decisions: state.decisions.map((item) =>
-            ids.has(item.id)
-              ? { ...item, status: input.verdict, reply: input.verdict === "undo" ? { text: input.text!.trim(), at } : item.reply }
-              : item,
+            ids.has(item.id) ? { ...item, status: input.verdict, reply: input.verdict === "approved" ? item.reply : { text: note ?? "", at } } : item,
           ),
         },
         result: targets,
@@ -74,62 +77,104 @@ export class Actions {
     for (const item of changed) byAgent.set(item.agentId, [...(byAgent.get(item.agentId) ?? []), item]);
     let delivery: "sent" | "queued" = "sent";
     for (const [agentId, decisions] of byAgent) {
-      const message = `The user reviewed decisions you made and wants them changed:\n${list(decisions)}\n\nInstead:\n${input.text!.trim()}\n\nChange your work accordingly. Record any new choice this needs with record_decision.`;
+      const message =
+        input.verdict === "revert"
+          ? `The user reviewed decisions you made and wants them reverted:\n${list(decisions)}\n\nUndo the changes these decisions made and return that part to how it was before.${note ? `\n\nNote from the user:\n${note}` : ""}\nRecord any new choice this needs with record_decision.`
+          : `The user reviewed decisions you made and wants them redone differently:\n${list(decisions)}\n\nDo it this way instead:\n${note}\n\nChange your work accordingly. Record any new choice this needs with record_decision.`;
       if ((await this.outbox.deliver(paseo, agentId, message)) === "queued") delivery = "queued";
     }
     return { delivery };
   }
 
-  async addFollowup(input: { text: string; projectId: string | null; workspaceId: string | null }): Promise<Record<string, never>> {
-    await this.store.update((state) => {
-      const { state: next, id } = nextId(state, "f");
-      const followup: Followup = {
+  /** 워크스페이스에 추가 요청을 넣는다. 에이전트가 쉬면 바로 받고, 일하는 중이면 턴이 끝난 뒤 순서대로 받는다. */
+  async addRequest(paseo: PaseoApi, input: { workspaceId: string; agentId: string; text: string; projectId: string | null }) {
+    await this.outbox.ensureReachable(paseo, input.agentId);
+    const id = await this.store.update((state) => {
+      const { state: next, id } = nextId(state, "r");
+      const request: WorkRequest = {
         id,
         text: input.text,
         projectId: input.projectId,
         workspaceId: input.workspaceId,
-        agentId: null,
+        agentId: input.agentId,
         source: "human",
+        status: "queued",
         at: new Date().toISOString(),
-        status: "open",
-        sentTo: null,
+        sentAt: null,
         callId: null,
       };
-      return { state: { ...next, followups: [...next.followups, followup] }, result: undefined };
+      return { state: { ...next, requests: [...next.requests, request] }, result: id };
     });
-    return {};
+    return { delivery: await this.outbox.deliver(paseo, input.agentId, `${REQUEST_PREFIX}\n\n${input.text}`, id) };
   }
 
-  async updateFollowup(id: string, status: Followup["status"]): Promise<Record<string, never>> {
-    await this.store.update((state) => {
-      if (!state.followups.some((item) => item.id === id)) return { state, result: undefined };
-      return { state: { ...state, followups: state.followups.map((item) => (item.id === id ? { ...item, status } : item)) }, result: undefined };
-    });
-    return {};
-  }
-
-  /** 후속 작업을 사람이 고른 에이전트에게 맡긴다. 새 워크스페이스는 사람이 만든다. 플러그인은 일을 배정하지 않는다. */
-  async sendFollowup(paseo: PaseoApi, id: string, agentId: string): Promise<{ delivery: "sent" | "queued" }> {
+  /** 에이전트가 남긴 제안을 사람이 고른 에이전트에게 추가 요청으로 보낸다. */
+  async sendSuggestion(paseo: PaseoApi, id: string, agentId: string) {
     await this.outbox.ensureReachable(paseo, agentId);
-    // 먼저 닫고 보낸다. 보내기가 실패하면 다시 연다. 반대로 하면 전송 뒤 오류에서 열린 채로 남아 두 번 누르면 두 번 간다.
-    const followup = await this.store.update((state) => {
-      const found = state.followups.find((item) => item.id === id);
-      if (!found || found.status !== "open") return { state, result: null };
+    const request = await this.store.update((state) => {
+      const found = state.requests.find((item) => item.id === id);
+      if (!found || found.status !== "suggested") return { state, result: null };
       return {
-        state: { ...state, followups: state.followups.map((item) => (item.id === id ? { ...item, status: "done" as const, sentTo: agentId } : item)) },
+        state: { ...state, requests: state.requests.map((item) => (item.id === id ? { ...item, status: "queued" as const, agentId } : item)) },
         result: found,
       };
     });
-    if (!followup) throw new Error("This follow-up is not open.");
-    try {
-      return { delivery: await this.outbox.deliver(paseo, agentId, `A follow-up from the user's list:\n\n${followup.text}`) };
-    } catch (error) {
-      await this.store.update((state) => ({
-        state: { ...state, followups: state.followups.map((item) => (item.id === id ? { ...item, status: "open" as const, sentTo: null } : item)) },
-        result: undefined,
-      }));
-      throw error;
+    if (!request) throw new Error("This suggestion is no longer open.");
+    return { delivery: await this.outbox.deliver(paseo, agentId, `${REQUEST_PREFIX}\n\n${request.text}`, id) };
+  }
+
+  /** 받기 전의 요청을 취소하거나 제안을 버린다. 이미 보낸 요청은 취소할 수 없다. */
+  async dismissRequest(id: string): Promise<Record<string, never>> {
+    const request = (await this.store.read()).requests.find((item) => item.id === id);
+    if (!request || (request.status !== "queued" && request.status !== "suggested")) throw new Error("This request was already sent or closed.");
+    if (request.status === "queued" && !(await this.outbox.withdraw(id))) throw new Error("This request was already sent.");
+    await this.store.update((state) => ({
+      state: { ...state, requests: state.requests.map((item) => (item.id === id ? { ...item, status: "dismissed" as const } : item)) },
+      result: undefined,
+    }));
+    return {};
+  }
+
+  async markSent(requestIds: readonly string[]): Promise<void> {
+    const ids = new Set(requestIds);
+    const at = new Date().toISOString();
+    await this.store.update((state) => ({
+      state: { ...state, requests: state.requests.map((item) => (ids.has(item.id) ? { ...item, status: "sent" as const, sentAt: at } : item)) },
+      result: undefined,
+    }));
+  }
+
+  /**
+   * 결정하기 전에 에이전트에게 묻는다. 에이전트가 질문 창으로 묻는 중이면 그 질문 창을 이 질문으로 돌려보낸다(답하고 다시 물으라고).
+   * 아니면 쉴 때 메시지로 보낸다. 에이전트의 다음 응답이 답으로 카드에 붙는다(index.server.ts 의 턴·권한 hook).
+   */
+  async ask(paseo: PaseoApi, agentId: string, text: string): Promise<Record<string, never>> {
+    const snapshot = await paseo.agents.ref(agentId).refresh();
+    if (!snapshot || snapshot.agent.archivedAt) throw new Error(`Agent ${agentId} is gone. Nothing was sent.`);
+    await this.store.update((state) => {
+      const { state: next, id } = nextId(state, "q");
+      return { state: { ...next, asks: [...next.asks, { id, agentId, text, at: new Date().toISOString(), answer: null, answeredAt: null }] }, result: undefined };
+    });
+    const message = `Before deciding, the user asks about your stopped decisions:\n${text}\n\nAnswer this. Do not implement the stopped decisions yet; ask about them again when you have answered.`;
+    const question = (snapshot.agent.pendingPermissions ?? []).find((request) => request.kind === "question");
+    if (question) {
+      await paseo.agents.ref(agentId).respondToPermission({ requestId: question.id, response: { behavior: "deny", message } });
+    } else {
+      await this.outbox.deliver(paseo, agentId, message);
     }
+    return {};
+  }
+
+  /** 답을 기다리는 질문에 에이전트의 응답을 붙인다. 에이전트가 턴을 끝내거나 다시 질문 창을 띄울 때 부른다. */
+  async recordAskAnswer(agentId: string, answer: string | null): Promise<void> {
+    if (!answer?.trim()) return;
+    const at = new Date().toISOString();
+    await this.store.update((state) => {
+      const open = state.asks.filter((item) => item.agentId === agentId && !item.answer);
+      if (!open.length) return { state, result: undefined };
+      const ids = new Set(open.map((item) => item.id));
+      return { state: { ...state, asks: state.asks.map((item) => (ids.has(item.id) ? { ...item, answer: answer.trim(), answeredAt: at } : item)) }, result: undefined };
+    });
   }
 }
 

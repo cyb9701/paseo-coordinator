@@ -438,3 +438,52 @@ export function Body({ text, ctx, strong = false }: { text: string; ctx: ViewCon
     </Text>
   );
 }
+
+/** 글의 대략적인 폭(px). 한글·한자처럼 넓은 글자는 글자 크기만큼, 영문·숫자·기호는 그 절반으로 센다. */
+function textWidth(text: string, fontSize: number): number {
+  let width = 0;
+  for (const char of text) width += /[\u1100-\u11ff\u2e80-\ua4cf\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/.test(char) ? fontSize : fontSize * 0.5;
+  return width;
+}
+
+/** 카드 안 글이 쓸 수 있는 대략적인 폭(px). 좁은 화면은 휴대폰 카드, 넓은 화면은 인박스 최대 폭 기준이다. */
+const LINE_WIDTH = { compact: 340, wide: 820 };
+
+/**
+ * 접힌 글. lines 줄까지만 보이고, 넘치면 '더 보기'로 펼친다. 말줄임으로 잘린 채 끝나면 중요한 내용을 놓친다.
+ * 넘치는지는 글자 수로 어림하고, 네이티브에서 줄 수를 알려 주면 그것도 쓴다(웹에는 onTextLayout 이 없다).
+ */
+export function ExpandableText({
+  children,
+  text,
+  lines,
+  style,
+  ctx,
+}: {
+  children: ReactNode;
+  /** 넘치는지 어림할 원문. */
+  text: string;
+  lines: number;
+  style: object;
+  ctx: ViewContext;
+}) {
+  const [open, setOpen] = useState(false);
+  const [measured, setMeasured] = useState(false);
+  const fontSize = (style as { fontSize?: number }).fontSize ?? ctx.fonts.body;
+  const overflow = measured || textWidth(text, fontSize) > lines * (ctx.compact ? LINE_WIDTH.compact : LINE_WIDTH.wide);
+  return (
+    <Pressable accessibilityRole={overflow ? "button" : undefined} disabled={!overflow} onPress={() => setOpen((value) => !value)} style={{ gap: 2 }}>
+      <Text
+        selectable={!overflow}
+        numberOfLines={open ? undefined : lines}
+        onTextLayout={(event) => {
+          if (!open && event.nativeEvent.lines.length > lines) setMeasured(true);
+        }}
+        style={style}
+      >
+        {children}
+      </Text>
+      {overflow ? <Text style={{ color: ctx.theme.colors.accent, fontSize: ctx.fonts.meta }}>{open ? ctx.t("common.less") : ctx.t("common.more")}</Text> : null}
+    </Pressable>
+  );
+}

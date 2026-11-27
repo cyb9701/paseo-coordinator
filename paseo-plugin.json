@@ -3,11 +3,10 @@
   "name": "Coordinator",
   "description": "Watches your coding agents and brings you only what needs a person: decisions they stopped on, permissions, questions and errors, plus a reviewable log of the decisions they made on their own.",
   "media": [
-    "assets/inbox.png",
-    "assets/inbox-decisions.png",
-    "assets/review.png",
     "assets/progress.png",
-    "assets/followups.png",
+    "assets/inbox.png",
+    "assets/review.png",
+    "assets/requests.png",
     "assets/settings.png"
   ],
   "requirements": {

@@ -4,19 +4,19 @@ Coordinator watches the coding agents in the projects you choose and brings you 
 
 Every agent in a watched project, including the ones you start, gets two tools and a short instruction:
 
-- `record_decision`: before acting on a choice that your messages and the repository do not settle, the agent records what it chose, why, the alternatives, its evidence (checked or assumed), whether the choice rests on an assumption, how hard it is to undo and the files it touches.
-- `add_followup`: work for later goes to your follow-up list instead of being done now.
+- `record_decision`: before acting on a choice that your messages and the repository do not settle, the agent records a one-line title, what it chose, why, the alternatives, its evidence (checked or assumed), whether the choice rests on an assumption, how hard it is to undo and the files it touches.
+- `add_followup`: work outside the request becomes a suggestion on your request list instead of being done now.
 
 The plugin decides whether a recorded decision stops the agent: scope, data shape, interface or user-visible behavior, anything hard to undo, and anything resting on an assumption stop it. The agent then asks about all stopped decisions at once, with its question tool (such as AskUserQuestion) if it has one or in one message, and waits. Either way it records the decisions first. Other decisions are recorded and the agent goes on; you review them later.
 
 ## Screens
 
-- **Inbox.** "Needs my decision" has one card per agent with stopped decisions, plus permission requests, questions and errors. A stopped-decision card shows a context summary (what led here, what you decide now, what each answer leads to, what to watch out for), each decision with its evidence, assumptions and diff, and a box for your answer or "Go ahead as proposed". "To review" groups decisions agents made and kept going with, per workspace.
-- **Progress.** A table of every agent on the host: one row per workspace, columns for needs my decision, to review, working and waiting, with agent cards in the cells. Rows of watched projects also show pull request state (checks, conflicts, review), decisions waiting or to review, changed files no decision covers, and files also changed in another workspace; "Decisions and changes" opens what was asked, the decisions and the changes.
-- **Follow-ups.** Work for later from agents and from you. Hand one to an agent in the same project (that closes it), or close it yourself.
+- **Inbox.** "Needs my decision" has one short card per agent with stopped decisions: what to decide now in one line, each decision as a title with the agent's proposal, an assumption warning and alternative chips, then "Go ahead as proposed" or your answer. "Ask first" asks the agent before you decide, and the answer stays on the card. The context, evidence and diffs are folded. Permission requests, questions and errors come here too. "To review" lists the decisions agents made and kept going with, one line each.
+- **Progress.** A table of every agent on the host: one row per workspace, columns for needs my decision, to review, working and waiting, with agent cards in the cells. Rows of watched projects also show pull request state, decision counts, changed files no decision covers and files also changed in another workspace. "Decisions and changes" lists the workspace's decisions one line each, with "Looks right", "Revert" and "Redo differently"; opening a line shows its evidence and diff. "Request" gives the workspace more work.
+- **Requests.** Extra work for running workspaces: requests waiting for a busy agent (cancel them before they are sent), agents' suggestions (send or dismiss), and requests already sent.
 - **Settings.** Projects to watch, context summaries on or off with their model (default `claude/claude-haiku-5-5`) and effort, summary language, text size.
 
-The sidebar badge counts only cards that wait on you. Permission requests, questions and errors come from every agent on the host, watched project or not; decisions, summaries, pull request state and follow-ups cover the watched projects.
+The sidebar badge counts only cards that wait on you. Permission requests, questions and errors come from every agent on the host, watched project or not; decisions, summaries and pull request state cover the watched projects.
 
 ## Setup
 
@@ -24,12 +24,12 @@ Paseo 0.17.4 or later with plugins enabled. Tested on macOS with Claude agents. 
 
 ## What it reads, runs and stores
 
-- State (decisions, follow-ups, summaries, messages waiting for a busy agent): `plugin-data/paseo-coordinator/state.json` under the Paseo home (`$PASEO_HOME` or `~/.paseo`).
+- State (decisions, requests, questions you asked agents, summaries, messages waiting for a busy agent): `plugin-data/paseo-coordinator/state.json` under the Paseo home (`$PASEO_HOME` or `~/.paseo`).
 - It reads each agent's messages to show what was asked and to build summaries.
 - It runs read-only `git` commands in watched workspaces (`rev-parse`, `merge-base`, `diff`, `ls-files`), at most four workspaces at a time, to find changed files, overlaps and diffs. Diffs are shown only for files the workspace changed.
 - Pull request state comes from what Paseo already attaches to each workspace. The plugin does not call GitHub, merge pull requests, delete branches or archive workspaces.
 - A summary starts one background agent on your provider with the summary model, in a single hidden workspace the plugin reuses, and archives the agent when done. With Claude its tools are removed; with any provider it runs in a mode that asks for permission, and the plugin denies every request. Summaries run only when an agent stops for your decision, a turn fails (at most once every 10 minutes per agent), or you ask for one; at most two run at once. Turning summaries off stops the automatic ones; the button on a card still works.
-- Your answers and instructions are sent to the agent only when it is idle, so they do not cut into a running turn.
+- Your answers, requests and instructions are sent to the agent only when it is idle, so they do not cut into a running turn. When the agent is waiting in a question window, "Ask first" answers that window with your question.
 
 ## Limits
 

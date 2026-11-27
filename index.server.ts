@@ -1,14 +1,15 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {
-  addFollowupRpc,
+  addRequestRpc,
+  askAgentRpc,
+  dismissRequestRpc,
   agentRequestsRpc,
   answerDecisionsRpc,
   fileDiffRpc,
   reviewDecisionsRpc,
-  sendFollowupRpc,
+  sendSuggestionRpc,
   sendInstructionRpc,
   summarizeRpc,
-  updateFollowupRpc,
   watchStateSubscription,
   workspaceStatusRpc,
 } from "./shared/model";
@@ -32,6 +33,12 @@ const PLUGIN_MCP_PREFIX = "mcp__paseo__";
 
 const OUR_TOOL_NAMES = new Set(AGENT_TOOL_NAMES.flatMap((name) => [name, `${PLUGIN_MCP_PREFIX}${name}`]));
 
+/** 에이전트의 마지막 응답. 질문하기의 답으로 붙인다. */
+async function lastAgentText(paseo: PaseoApi, agentId: string): Promise<string | null> {
+  const exchanges = mergeRuns(await recentExchanges(paseo, agentId, 60).catch(() => []));
+  return [...exchanges].reverse().find((item) => item.role === "agent")?.text ?? null;
+}
+
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(coordinatorSettings);
   const readSettings = async (): Promise<CoordinatorSettings> => {
@@ -42,9 +49,10 @@ export default function contribute(server: PluginServerContext) {
   const store = new StateStore();
   const directory = new WorkspaceDirectory();
   const statuses = new WorkspaceStatusReader(directory);
-  const outbox = new Outbox(store);
+  // 추가 요청을 보내면 그 요청을 sent 로 바꾼다. actions 는 outbox 를 받으므로 늦게 묶는다.
+  const outbox: Outbox = new Outbox(store, (requestIds): Promise<void> => actions.markSent(requestIds));
   const summarizer = new Summarizer(store, readSettings, directory, statuses);
-  const actions = new Actions(store, outbox);
+  const actions: Actions = new Actions(store, outbox);
   const logFailure = (what: string) => (error: unknown) => console.error(`[coordinator] ${what} failed`, error);
 
   // 앱 언어. 서버는 모르므로 화면이 구독할 때 알려 준다. 요약을 사람이 읽을 언어로 쓰는 데만 쓴다.
@@ -109,6 +117,8 @@ export default function contribute(server: PluginServerContext) {
   server.addHook("agent.permission.before", async ({ agent, request }, { paseo }) => {
     lastPaseo = paseo;
     if (request.kind === "question") {
+      // 질문하기로 물었던 것이 있으면, 에이전트가 다시 질문 창을 띄우기 전에 쓴 응답이 그 답이다.
+      await actions.recordAskAnswer(agent.id, await lastAgentText(paseo, agent.id)).catch(logFailure("record ask answer"));
       // 플러그인 재시작으로 잃은 결정이 있으면 질문 창이 뜨기 전에 되살린다. 그래야 결정 카드 안에 이 질문이 들어가고, 답하면 결정에 남는다.
       const found = await watchedWorkspace(paseo, agent.workspaceId).catch(() => null);
       if (found) {
@@ -143,6 +153,9 @@ export default function contribute(server: PluginServerContext) {
   server.addHook("agent.turn.after", async ({ agent, outcome }, { paseo }) => {
     lastPaseo = paseo;
     if (agent.background) return;
+    if ((await store.read()).asks.some((item) => item.agentId === agent.id && !item.answer)) {
+      await actions.recordAskAnswer(agent.id, await lastAgentText(paseo, agent.id)).catch(logFailure("record ask answer"));
+    }
     await outbox.flush(paseo, agent.id).catch((error) => {
       if (!(error instanceof AgentGoneError)) logFailure("flush outbox")(error);
     });
@@ -171,11 +184,22 @@ export default function contribute(server: PluginServerContext) {
 
   // 워크스페이스가 archive 되면 그 안의 결정은 답하거나 확인할 곳이 없다(diff 도 볼 수 없고 받을 에이전트도 없다). 확인 필요에
   // 영영 남지 않게 내린다. 끝난 결정 기록은 그대로 둔다.
+  // 받기 전의 추가 요청과 제안도 받을 곳이 없어지므로 닫는다. 보내지 않은 요청은 outbox 에서도 뺀다.
   server.addHook("workspace.archive.after", async ({ workspace }) => {
+    const pending = (await store.read()).requests.filter((item) => item.workspaceId === workspace.id && item.status === "queued");
+    for (const item of pending) await outbox.withdraw(item.id).catch(logFailure("withdraw request"));
     await store.update((state) => {
       const open = (item: (typeof state.decisions)[number]) => item.workspaceId === workspace.id && (item.status === "waiting" || item.status === "unreviewed");
-      if (!state.decisions.some(open)) return { state, result: undefined };
-      return { state: { ...state, decisions: state.decisions.map((item) => (open(item) ? { ...item, status: "dropped" as const } : item)) }, result: undefined };
+      const waiting = (item: (typeof state.requests)[number]) => item.workspaceId === workspace.id && (item.status === "queued" || item.status === "suggested");
+      if (!state.decisions.some(open) && !state.requests.some(waiting)) return { state, result: undefined };
+      return {
+        state: {
+          ...state,
+          decisions: state.decisions.map((item) => (open(item) ? { ...item, status: "dropped" as const } : item)),
+          requests: state.requests.map((item) => (waiting(item) ? { ...item, status: "dismissed" as const } : item)),
+        },
+        result: undefined,
+      };
     });
   });
 
@@ -204,9 +228,13 @@ export default function contribute(server: PluginServerContext) {
     summarizer.request(paseo, input.agentId, workspaceId, "manual", input.language);
     return {};
   });
-  server.handle(addFollowupRpc, (input) => actions.addFollowup(input));
-  server.handle(updateFollowupRpc, (input) => actions.updateFollowup(input.id, input.status));
-  server.handle(sendFollowupRpc, (input, { paseo }) => actions.sendFollowup(paseo, input.id, input.agentId));
+  server.handle(addRequestRpc, async (input, { paseo }) => {
+    const entry = await directory.find(paseo, input.workspaceId);
+    return actions.addRequest(paseo, { ...input, projectId: entry?.projectId ?? null });
+  });
+  server.handle(sendSuggestionRpc, (input, { paseo }) => actions.sendSuggestion(paseo, input.id, input.agentId));
+  server.handle(dismissRequestRpc, (input) => actions.dismissRequest(input.id));
+  server.handle(askAgentRpc, (input, { paseo }) => actions.ask(paseo, input.agentId, input.text));
   server.handle(workspaceStatusRpc, async (input, { paseo }) => {
     const values = await readSettings();
     return { workspaces: await statuses.read(paseo, values.projectIds, input.force), at: new Date().toISOString() };

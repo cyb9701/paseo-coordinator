@@ -1,6 +1,6 @@
 import { type AgentToolContext, defineAgentTool } from "@getpaseo/plugin/server";
 import { z } from "zod";
-import { type Decision, type DecisionInput, type Followup, STOP_KINDS, decisionInputSchema } from "../shared/model";
+import { type Decision, type DecisionInput, STOP_KINDS, type WorkRequest, decisionInputSchema } from "../shared/model";
 import type { PaseoApi } from "./paseo-api";
 import { type StateStore, nextId } from "./store";
 
@@ -26,7 +26,7 @@ The person who asked for this work reviews your decisions afterwards, often acro
 
 Do not record steps the request or the repository already dictates, mechanical work (reading files, running tests, formatting), or a choice the user already answered.
 
-In evidence, mark an item "verified" only if you checked it: cite file:line, a command and its output, or a doc. Anything you believe without checking is "assumption". Set restsOnAssumption to true when the choice would change if an assumption turned out wrong.
+Give each decision a short title (one line, under 80 characters) that names the choice, such as "Persist todos in a JSON file", and put the details in decision. In evidence, mark an item "verified" only if you checked it: cite file:line, a command and its output, or a doc. Anything you believe without checking is "assumption". Set restsOnAssumption to true when the choice would change if an assumption turned out wrong.
 
 Record a decision before you ask the user about it, even when you would ask anyway; the user reviews decisions from this log. The tool answers "continue" or "stop". On "stop", do not implement that decision. Record the other decisions you need first, then ask the user about every stopped decision together, once: with your question tool if you have one (such as AskUserQuestion), otherwise in one short message at the end of your turn. Then wait.
 
@@ -74,7 +74,7 @@ export function decisionTools(store: StateStore, context: DecisionContext) {
     name: RECORD_DECISION_TOOL,
     title: "Record a decision",
     description:
-      "Record a choice that the user's messages and the repository do not settle, before acting on it: what you chose, why, the alternatives, the evidence (verified or assumption), whether it rests on an assumption, how hard it is to undo and the files it touches. The result says whether to continue or stop and ask the user.",
+      "Record a choice that the user's messages and the repository do not settle, before acting on it: a one-line title, what you chose, why, the alternatives, the evidence (verified or assumption), whether it rests on an assumption, how hard it is to undo and the files it touches. The result says whether to continue or stop and ask the user.",
     input: decisionInputSchema,
     execute: async (input, { agent, paseo }) => {
       const where = await context.locate(agent, paseo);
@@ -91,17 +91,18 @@ export function decisionTools(store: StateStore, context: DecisionContext) {
     name: ADD_FOLLOWUP_TOOL,
     title: "Add a follow-up",
     description:
-      "Save work that is outside the current request, or that the user wants done later, to the user's follow-up list instead of doing it now. Write it so someone without this conversation can start it.",
+      "Save work that is outside the current request, or that the user wants done later, as a suggestion on the user's request list instead of doing it now. Write it so someone without this conversation can start it.",
     input: z.object({ text: z.string().trim().min(1) }),
     execute: async ({ text }, { agent, paseo }) => {
-      await saveFollowup(store, agent.id, await context.locate(agent, paseo), text);
-      return { text: "Saved to the follow-up list. Do not do it now; continue with your task." };
+      await saveSuggestion(store, agent.id, await context.locate(agent, paseo), text);
+      return { text: "Saved as a suggestion for the user. Do not do it now; continue with your task." };
     },
   });
   return [record, followup];
 }
 
-export async function saveFollowup(
+/** 에이전트가 남긴 범위 밖의 일. 사람이 추가 요청 목록에서 보내거나 버린다. */
+export async function saveSuggestion(
   store: StateStore,
   agentId: string,
   where: { workspaceId: string; projectId: string | null } | null,
@@ -109,20 +110,20 @@ export async function saveFollowup(
   callId: string | null = null,
 ): Promise<void> {
   await store.update((state) => {
-    const { state: next, id } = nextId(state, "f");
-    const followup: Followup = {
+    const { state: next, id } = nextId(state, "r");
+    const request: WorkRequest = {
       id,
       text,
       projectId: where?.projectId ?? null,
       workspaceId: where?.workspaceId ?? null,
       agentId,
       source: "agent",
+      status: "suggested",
       at: new Date().toISOString(),
-      status: "open",
-      sentTo: null,
+      sentAt: null,
       callId,
     };
-    return { state: { ...next, followups: [...next.followups, followup] }, result: undefined };
+    return { state: { ...next, requests: [...next.requests, request] }, result: undefined };
   });
 }
 

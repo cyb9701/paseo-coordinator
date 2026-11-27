@@ -11,14 +11,18 @@ import { useClassifier } from "./pending-store";
 import { formatAgo } from "./time";
 import { CtaButton, ErrorLine, Muted, ProjectTag, type ViewContext } from "./ui";
 import { shortPath } from "./workspace-place";
+import { RequestComposer } from "./requests-view";
 import { PullRequestLine, WorkspaceReview, unexplainedFiles } from "./workspace-review";
 
 const SEPARATOR = "::";
 const WORKSPACE_COLUMN_WIDTH = 260;
 const NO_DECISIONS: readonly Decision[] = [];
 const NO_COUNTS = { waiting: 0, unreviewed: 0 };
+const NO_REQUESTS = { queued: 0, suggested: 0 };
 
 type Cells = Map<ColumnKey, readonly AgentRef[]>;
+/** 행 아래에 펼치는 것: 결정 목록이나 추가 요청 작성. 한 번에 하나만 연다. */
+type Panel = "review" | "request" | null;
 
 interface DecisionIndex {
   byWorkspace: Map<string, Decision[]>;
@@ -70,15 +74,17 @@ function WorkspaceCell({
   workspaceId,
   status,
   flags,
-  open,
-  onToggle,
+  panel,
+  onPanel,
+  requests,
   ctx,
 }: {
   workspaceId: string;
   status: WorkspaceStatus | null;
   flags: ReturnType<typeof signals> | null;
-  open: boolean;
-  onToggle(): void;
+  panel: Panel;
+  onPanel(panel: Panel): void;
+  requests: { queued: number; suggested: number };
   ctx: ViewContext;
 }) {
   const workspace = useWorkspace(workspaceId, (w) => ({
@@ -120,11 +126,16 @@ function WorkspaceCell({
             <Muted text={flags.recorded ? ctx.t("board.changed", { count: status.changedFiles.length }) : ctx.t("board.changedNoDecisions", { count: status.changedFiles.length })} ctx={ctx} />
           ) : null}
           {status?.error ? <Muted text={status.error} ctx={ctx} /> : null}
-          <View style={{ flexDirection: "row", marginTop: 4 }}>
-            <CtaButton size="sm" label={open ? `▾ ${ctx.t("board.close")}` : `▸ ${ctx.t("board.review")}`} theme={ctx.theme} onPress={onToggle} />
-          </View>
         </View>
       ) : null}
+      {requests.queued ? <Text style={{ color: ctx.theme.colors.accent, fontSize: ctx.fonts.meta }}>{ctx.t("board.requestsQueued", { count: requests.queued })}</Text> : null}
+      {requests.suggested ? <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>{ctx.t("board.requestsSuggested", { count: requests.suggested })}</Text> : null}
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+        {flags ? (
+          <CtaButton size="sm" label={panel === "review" ? `▾ ${ctx.t("board.review")}` : `▸ ${ctx.t("board.review")}`} theme={ctx.theme} onPress={() => onPanel(panel === "review" ? null : "review")} />
+        ) : null}
+        <CtaButton size="sm" label={panel === "request" ? `▾ ${ctx.t("board.addRequest")}` : `+ ${ctx.t("board.addRequest")}`} theme={ctx.theme} onPress={() => onPanel(panel === "request" ? null : "request")} />
+      </View>
     </View>
   );
 }
@@ -146,6 +157,7 @@ function BoardRow({
   index,
   status,
   watched,
+  requestCounts,
   ctx,
 }: {
   workspaceId: string;
@@ -153,11 +165,13 @@ function BoardRow({
   index: DecisionIndex;
   status: WorkspaceStatus | null;
   watched: boolean;
+  requestCounts: Map<string, { queued: number; suggested: number }>;
   ctx: ViewContext;
 }) {
-  const [open, setOpen] = useState(false);
+  const [panel, setPanel] = useState<Panel>(null);
   const decisions = index.byWorkspace.get(workspaceId) ?? NO_DECISIONS;
   const flags = watched ? signals(status, decisions) : null;
+  const requests = requestCounts.get(workspaceId) ?? NO_REQUESTS;
   return (
     <View
       style={{
@@ -169,7 +183,7 @@ function BoardRow({
     >
       <View style={{ flexDirection: "row" }}>
         <View style={{ width: WORKSPACE_COLUMN_WIDTH - 3, padding: 10 }}>
-          <WorkspaceCell workspaceId={workspaceId} status={status} flags={flags} open={open} onToggle={() => setOpen((value) => !value)} ctx={ctx} />
+          <WorkspaceCell workspaceId={workspaceId} status={status} flags={flags} panel={panel} onPanel={setPanel} requests={requests} ctx={ctx} />
         </View>
         {COLUMN_KEYS.map((key) => (
           <View key={key} style={{ flex: 1, minWidth: 0, padding: 8, gap: 8, borderLeftWidth: 1, borderColor: ctx.theme.colors.border }}>
@@ -177,9 +191,13 @@ function BoardRow({
           </View>
         ))}
       </View>
-      {open ? (
+      {panel ? (
         <View style={{ padding: 12, borderTopWidth: 1, borderColor: ctx.theme.colors.border, backgroundColor: ctx.theme.colors.surface1 }}>
-          <WorkspaceReview workspaceId={workspaceId} decisions={decisions} status={status} ctx={ctx} />
+          {panel === "review" ? (
+            <WorkspaceReview workspaceId={workspaceId} decisions={decisions} status={status} ctx={ctx} />
+          ) : (
+            <RequestComposer workspaceId={workspaceId} onDone={() => setPanel(null)} ctx={ctx} />
+          )}
         </View>
       ) : null}
     </View>
@@ -193,6 +211,7 @@ function CompactRow({
   index,
   status,
   watched,
+  requestCounts,
   ctx,
 }: {
   workspaceId: string;
@@ -200,11 +219,13 @@ function CompactRow({
   index: DecisionIndex;
   status: WorkspaceStatus | null;
   watched: boolean;
+  requestCounts: Map<string, { queued: number; suggested: number }>;
   ctx: ViewContext;
 }) {
-  const [open, setOpen] = useState(false);
+  const [panel, setPanel] = useState<Panel>(null);
   const decisions = index.byWorkspace.get(workspaceId) ?? NO_DECISIONS;
   const flags = watched ? signals(status, decisions) : null;
+  const requests = requestCounts.get(workspaceId) ?? NO_REQUESTS;
   return (
     <View
       style={{
@@ -218,11 +239,12 @@ function CompactRow({
         backgroundColor: ctx.theme.colors.surface0,
       }}
     >
-      <WorkspaceCell workspaceId={workspaceId} status={status} flags={flags} open={open} onToggle={() => setOpen((value) => !value)} ctx={ctx} />
+      <WorkspaceCell workspaceId={workspaceId} status={status} flags={flags} panel={panel} onPanel={setPanel} requests={requests} ctx={ctx} />
       {COLUMN_KEYS.map((key) => (
         <CardsFor key={key} refs={cells?.get(key) ?? []} index={index} column={key} ctx={ctx} />
       ))}
-      {open ? <WorkspaceReview workspaceId={workspaceId} decisions={decisions} status={status} ctx={ctx} /> : null}
+      {panel === "review" ? <WorkspaceReview workspaceId={workspaceId} decisions={decisions} status={status} ctx={ctx} /> : null}
+      {panel === "request" ? <RequestComposer workspaceId={workspaceId} onDone={() => setPanel(null)} ctx={ctx} /> : null}
     </View>
   );
 }
@@ -318,8 +340,20 @@ export function ProgressBoard({ ctx }: { ctx: ViewContext }) {
     await statuses.refresh().catch(() => undefined);
     setRefreshing(false);
   };
+  const requestCounts = useMemo(() => {
+    const counts = new Map<string, { queued: number; suggested: number }>();
+    for (const item of state?.requests ?? []) {
+      if (!item.workspaceId || (item.status !== "queued" && item.status !== "suggested")) continue;
+      const current = counts.get(item.workspaceId) ?? { queued: 0, suggested: 0 };
+      if (item.status === "queued") current.queued += 1;
+      else current.suggested += 1;
+      counts.set(item.workspaceId, current);
+    }
+    return counts;
+  }, [state?.requests]);
   const rowProps = (workspaceId: string) => ({
     workspaceId,
+    requestCounts,
     cells: board.get(workspaceId),
     index,
     status: statusOf(statuses.data?.workspaces, workspaceId),
