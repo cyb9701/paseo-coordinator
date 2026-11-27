@@ -2,7 +2,7 @@ import { useAgent, useRpc } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { type Decision, answerDecisionsRpc, askAgentRpc, decisionTitle, latestSummary } from "../shared/model";
+import { type Decision, answerDecisionsRpc, askAgentRpc, composeAnswer, decisionTitle, latestSummary } from "../shared/model";
 import { useCoordinatorState } from "./coordinator-state";
 import { DecisionDetails } from "./decision-view";
 import { usePending } from "./pending-store";
@@ -13,17 +13,6 @@ import { Card, Chip, CtaButton, ErrorLine, ExpandableText, Fold, InstructionBox,
 
 /** 결정마다 고른 답. null 은 에이전트 제안대로다. */
 type Choices = Record<string, string | null>;
-
-/** 에이전트에게 가는 답. 결정마다 제안대로인지 고른 대안인지 적고, 사람이 쓴 말을 덧붙인다. */
-function composeAnswer(decisions: readonly Decision[], choices: Choices, note: string): string {
-  const lines = decisions.map((item) => {
-    const choice = choices[item.id];
-    return choice
-      ? `#${item.number} ${decisionTitle(item)}: use "${choice}" instead of your proposal.`
-      : `#${item.number} ${decisionTitle(item)}: go ahead as you proposed.`;
-  });
-  return note.trim() ? `${lines.join("\n")}\n\n${note.trim()}` : lines.join("\n");
-}
 
 function OptionChip({ label, selected, onPress, ctx }: { label: string; selected: boolean; onPress(): void; ctx: ViewContext }) {
   return (
@@ -173,9 +162,9 @@ export function StoppedCard({ agentId, decisions, ctx }: { agentId: string; deci
           <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, fontWeight: "600" }}>{ctx.t("stopped.qa")}</Text>
           {asks.map((item) => (
             <View key={item.id} style={{ gap: 2 }}>
-              <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta }}>{`Q. ${item.text}`}</Text>
+              <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta }}>{ctx.t("stopped.question", { text: item.text })}</Text>
               <Text selectable numberOfLines={8} style={{ color: item.answer ? ctx.theme.colors.foreground : ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
-                {item.answer ? `A. ${item.answer}` : ctx.t("stopped.waitingAnswer", { ago: formatAgo(item.at, ctx.now, ctx.t) })}
+                {item.answer ? ctx.t("stopped.answer", { text: item.answer }) : ctx.t("stopped.waitingAnswer", { ago: formatAgo(item.at, ctx.now, ctx.t) })}
               </Text>
             </View>
           ))}

@@ -3,6 +3,7 @@ import type { PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/ui";
 import { type ReactNode, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { readError } from "../shared/errors";
 import { type Fonts, useFonts } from "./fonts";
 import type { T } from "./i18n";
 
@@ -388,11 +389,17 @@ export function InstructionBox({
   );
 }
 
+/** 서버 오류를 화면 언어로. 코디네이터가 코드를 붙인 오류만 바꾸고, git·Paseo 오류는 원문 그대로 둔다. */
+export function errorText(error: unknown, t: T): string {
+  const { code, message } = readError(error);
+  return code ? t(`errors.${code}`) : message;
+}
+
 export function ErrorLine({ error, ctx }: { error: unknown; ctx: ViewContext }) {
   if (!error) return null;
   return (
     <Text style={{ color: ctx.theme.colors.statusDanger, fontSize: ctx.fonts.meta }}>
-      {ctx.t("common.failed", { message: error instanceof Error ? error.message : String(error) })}
+      {ctx.t("common.failed", { message: errorText(error, ctx.t) })}
     </Text>
   );
 }

@@ -1,12 +1,14 @@
+import { CoordinatorError } from "../shared/errors";
+import { MESSAGE_SEPARATOR } from "../shared/messages";
 import type { PaseoApi } from "./paseo-api";
 import type { StateStore } from "./store";
 
 export type Delivery = "sent" | "queued";
 
 /** 받을 에이전트가 없다. 사람에게 알려야 한다. "대기 중"으로 보이고 사라지면 지시가 간 줄 안다. */
-export class AgentGoneError extends Error {
+export class AgentGoneError extends CoordinatorError {
   constructor(agentId: string) {
-    super(`Agent ${agentId} is gone (archived or deleted). Nothing was sent.`);
+    super("agentGone", `Agent ${agentId} is gone (archived or deleted). Nothing was sent.`);
   }
 }
 
@@ -77,7 +79,7 @@ export class Outbox {
     });
     if (!taken.length) return false;
     try {
-      await paseo.agents.ref(agentId).send(taken.map((item) => item.text).join("\n\n---\n\n"));
+      await paseo.agents.ref(agentId).send(taken.map((item) => item.text).join(MESSAGE_SEPARATOR));
       const requestIds = taken.map((item) => item.requestId).filter((id): id is string => Boolean(id));
       if (requestIds.length) await this.onSent(requestIds).catch((error) => console.error("[coordinator] could not mark requests sent", error));
       return true;

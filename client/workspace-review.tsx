@@ -3,6 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Text, View } from "react-native";
 import { type Decision, type PullRequest, type WorkspaceStatus, agentRequestsRpc, reviewDecisionsRpc } from "../shared/model";
+import { type SentPart, readSentMessage } from "../shared/messages";
 import { DecisionRow, DiffToggle } from "./decision-view";
 import { formatAgo } from "./time";
 import { Chip, CtaButton, ErrorLine, Fold, Muted, TextBox, type ViewContext } from "./ui";
@@ -43,6 +44,51 @@ export function unexplainedFiles(status: WorkspaceStatus | null, decisions: read
   return status.changedFiles.filter((file) => !covered.has(file));
 }
 
+/**
+ * '요청받은 것'의 한 덩어리. 플러그인이 에이전트에게 보낸 메시지는 에이전트가 읽도록 영어로 길게 쓰여 있다. 그대로 보이면 사람이 시킨
+ * 일이 그 글에 밀리므로, 무엇을 했는지 화면 언어 한 줄로 쓰고 사람이 쓴 말만 원문으로 붙인다.
+ */
+function SentPartView({ part, ctx }: { part: SentPart; ctx: ViewContext }) {
+  const body = (text: string) => (
+    <Text selectable numberOfLines={12} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.45) }}>
+      {text}
+    </Text>
+  );
+  const numbers = (list: readonly number[]) => list.map((number) => `#${number}`).join(", ");
+  if (part.kind === "text") return body(part.text);
+  if (part.kind === "request") {
+    return (
+      <View style={{ gap: 2 }}>
+        <Muted text={ctx.t("review.sent.request")} ctx={ctx} />
+        {body(part.text)}
+      </View>
+    );
+  }
+  if (part.kind === "ask") {
+    return (
+      <View style={{ gap: 2 }}>
+        <Muted text={ctx.t("review.sent.ask")} ctx={ctx} />
+        {body(part.text)}
+      </View>
+    );
+  }
+  if (part.kind === "answer") {
+    const lines = part.choices.map((item) => `#${item.number} ${item.choice ? ctx.t("decision.answerChose", { option: item.choice }) : ctx.t("decision.answerAsProposed")}`);
+    return (
+      <View style={{ gap: 2 }}>
+        <Muted text={ctx.t("review.sent.answer")} ctx={ctx} />
+        {body(part.note ? `${lines.join("\n")}\n${part.note}` : lines.join("\n"))}
+      </View>
+    );
+  }
+  return (
+    <View style={{ gap: 2 }}>
+      <Muted text={ctx.t(part.kind === "revert" ? "review.sent.revert" : "review.sent.redo", { numbers: numbers(part.numbers) })} ctx={ctx} />
+      {part.note ? body(part.note) : null}
+    </View>
+  );
+}
+
 function AgentRequests({ agentId, ctx }: { agentId: string; ctx: ViewContext }) {
   const call = useRpc(agentRequestsRpc);
   const query = useQuery({ queryKey: ["coordinator", "requests", ctx.hostId, agentId], queryFn: () => call({ agentId }), staleTime: 60_000 });
@@ -57,9 +103,9 @@ function AgentRequests({ agentId, ctx }: { agentId: string; ctx: ViewContext }) 
       {shown.map((message, index) => (
         <View key={index} style={{ gap: 2 }}>
           {message.at ? <Muted text={formatAgo(message.at, ctx.now, ctx.t)} ctx={ctx} /> : null}
-          <Text selectable numberOfLines={12} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.45) }}>
-            {message.text}
-          </Text>
+          {readSentMessage(message.text).map((part, partIndex) => (
+            <SentPartView key={partIndex} part={part} ctx={ctx} />
+          ))}
         </View>
       ))}
       {messages.length > shown.length ? <Muted text={ctx.t("review.moreRequests", { count: messages.length - shown.length })} ctx={ctx} /> : null}

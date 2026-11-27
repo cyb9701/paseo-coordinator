@@ -9,7 +9,7 @@ import { COLUMN_KEYS, type ColumnKey, columnColor, columnFor, isVisibleAgent, ne
 import { statusOf, useCoordinatorState, useWorkspaceStatuses } from "./coordinator-state";
 import { useClassifier } from "./pending-store";
 import { formatAgo } from "./time";
-import { CtaButton, ErrorLine, Muted, ProjectTag, type ViewContext } from "./ui";
+import { CtaButton, ErrorLine, Muted, ProjectTag, type ViewContext, errorText } from "./ui";
 import { shortPath } from "./workspace-place";
 import { RequestComposer } from "./requests-view";
 import { PullRequestLine, WorkspaceReview, unexplainedFiles } from "./workspace-review";
@@ -125,7 +125,7 @@ function WorkspaceCell({
           {status?.changedFiles.length ? (
             <Muted text={flags.recorded ? ctx.t("board.changed", { count: status.changedFiles.length }) : ctx.t("board.changedNoDecisions", { count: status.changedFiles.length })} ctx={ctx} />
           ) : null}
-          {status?.error ? <Muted text={status.error} ctx={ctx} /> : null}
+          {status?.error ? <Muted text={errorText(status.error, ctx.t)} ctx={ctx} /> : null}
         </View>
       ) : null}
       {requests.queued ? <Text style={{ color: ctx.theme.colors.accent, fontSize: ctx.fonts.meta }}>{ctx.t("board.requestsQueued", { count: requests.queued })}</Text> : null}

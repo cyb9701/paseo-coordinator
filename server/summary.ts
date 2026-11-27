@@ -3,7 +3,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import type { CoordinatorSettings } from "../shared/settings";
+import { type CoordinatorSettings, type Language, outputLanguage } from "../shared/settings";
 import { type CoordinatorState, type Decision, type Summary, summaryResultSchema } from "../shared/model";
 import type { PaseoApi } from "./paseo-api";
 import { type StateStore, dataDirectory, nextId } from "./store";
@@ -48,15 +48,13 @@ const SUMMARIZER_BLOCKED_TOOLS = [
 
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}…` : text);
 
-type Language = "en" | "ko";
-
 /**
  * 사람이 정할 일이 생겼을 때만(멈춘 결정, 실패한 턴, 사람이 누른 요약) 작은 모델로 앞뒤 상황을 정리한다.
  * 에이전트 하나에 한 번에 하나만 돈다. 도는 중에 새 일이 생기면 끝난 뒤 한 번 더 돈다.
  */
 export class Summarizer {
   private readonly running = new Map<string, Promise<void>>();
-  private readonly again = new Map<string, { trigger: Summary["trigger"]; language: Language }>();
+  private readonly again = new Map<string, { trigger: Summary["trigger"]; language: Language | null }>();
   private active = 0;
   private readonly waitingForSlot: (() => void)[] = [];
 
@@ -69,7 +67,7 @@ export class Summarizer {
     private readonly home = join(dataDirectory(), "summarizer"),
   ) {}
 
-  request(paseo: PaseoApi, agentId: string, workspaceId: string, trigger: Summary["trigger"], language: Language): void {
+  request(paseo: PaseoApi, agentId: string, workspaceId: string, trigger: Summary["trigger"], language: Language | null): void {
     if (this.running.has(agentId)) {
       this.again.set(agentId, { trigger, language });
       return;
@@ -93,7 +91,7 @@ export class Summarizer {
     agentId: string,
     workspaceId: string,
     failed: boolean,
-    language: Language,
+    language: Language | null,
     settings: CoordinatorSettings,
   ): Promise<void> {
     if (!settings.summary.enabled) return;
@@ -120,7 +118,7 @@ export class Summarizer {
     };
   }
 
-  private async run(paseo: PaseoApi, agentId: string, workspaceId: string, trigger: Summary["trigger"], language: Language) {
+  private async run(paseo: PaseoApi, agentId: string, workspaceId: string, trigger: Summary["trigger"], language: Language | null) {
     const settings = await this.readSettings();
     const state = await this.store.read();
     const waiting = state.decisions.filter((item) => item.agentId === agentId && item.status === "waiting");
@@ -166,7 +164,7 @@ export class Summarizer {
     workspaceId: string,
     waiting: readonly Decision[],
     trigger: Summary["trigger"],
-    language: Language,
+    language: Language | null,
   ): Promise<string> {
     const [exchanges, entry, snapshot] = await Promise.all([
       recentExchanges(paseo, agentId).then(mergeRuns).catch(() => []),
@@ -182,7 +180,8 @@ export class Summarizer {
     const earlier = state.decisions.filter((item) => item.workspaceId === workspaceId && item.status !== "waiting").slice(-15);
     const names = new Map((await this.directory.list(paseo).catch(() => [])).map((item) => [item.id, item.title ?? item.name]));
     const sections = [
-      `Write every field in ${language === "ko" ? "Korean" : "English"}. Keep code identifiers, file paths and commands as they are.`,
+      // 앱 언어를 한 번도 듣지 못했으면 영어로 가정하지 않고 사람이 에이전트에게 쓴 언어를 따른다.
+      `Write every field in ${language === "ko" ? "Korean" : language === "en" ? "English" : "the language the person writes to the agent in"}. Keep code identifiers, file paths and commands as they are.`,
       `Trigger: ${trigger === "decision" ? "the agent stopped and waits for the person's decision" : trigger === "error" ? "the agent's turn failed" : "the person asked for a summary"}.`,
       `Workspace: ${entry ? `${entry.title ?? entry.name} (project ${entry.projectDisplayName}, branch ${entry.gitRuntime?.currentBranch ?? "unknown"})` : workspaceId}`,
       `Agent: ${snapshot?.agent.title ?? agentId}, status ${snapshot?.agent.status ?? "unknown"}${snapshot?.agent.lastError ? `, last error: ${clip(snapshot.agent.lastError, 1000)}` : ""}`,
@@ -257,10 +256,6 @@ function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
     timer = setTimeout(() => reject(new Error("The summary took too long.")), ms);
   });
   return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
-}
-
-function outputLanguage(settings: CoordinatorSettings, language: Language): Language {
-  return settings.outputLanguage === "auto" ? language : settings.outputLanguage;
 }
 
 function decisionForPrompt(item: Decision) {

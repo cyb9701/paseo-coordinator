@@ -1,4 +1,4 @@
-import { decisionInputSchema } from "../shared/model";
+import { ANSWERED_IN_CONVERSATION, decisionInputSchema } from "../shared/model";
 import { ADD_FOLLOWUP_TOOL, RECORD_DECISION_TOOL, recordDecision, saveSuggestion } from "./agent-tools";
 import type { PaseoApi } from "./paseo-api";
 import type { StateStore } from "./store";
@@ -60,7 +60,7 @@ async function markAnswered(store: StateStore, id: string): Promise<void> {
     state: {
       ...state,
       decisions: state.decisions.map((item) =>
-        item.id === id ? { ...item, status: "answered" as const, reply: { text: "(answered in the agent's conversation)", at } } : item,
+        item.id === id ? { ...item, status: "answered" as const, reply: { text: ANSWERED_IN_CONVERSATION, at } } : item,
       ),
     },
     result: undefined,

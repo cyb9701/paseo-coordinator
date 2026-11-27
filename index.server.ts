@@ -13,8 +13,8 @@ import {
   watchStateSubscription,
   workspaceStatusRpc,
 } from "./shared/model";
-import { type CoordinatorSettings, coordinatorSettings } from "./shared/settings";
-import { AGENT_INSTRUCTIONS, AGENT_TOOL_NAMES, decisionTools } from "./server/agent-tools";
+import { type CoordinatorSettings, type Language, coordinatorSettings, outputLanguage } from "./shared/settings";
+import { AGENT_TOOL_NAMES, agentInstructions, decisionTools } from "./server/agent-tools";
 import { Actions, answerFromQuestion } from "./server/actions";
 import { AgentGoneError, Outbox } from "./server/outbox";
 import type { PaseoApi } from "./server/paseo-api";
@@ -55,8 +55,10 @@ export default function contribute(server: PluginServerContext) {
   const actions: Actions = new Actions(store, outbox);
   const logFailure = (what: string) => (error: unknown) => console.error(`[coordinator] ${what} failed`, error);
 
-  // 앱 언어. 서버는 모르므로 화면이 구독할 때 알려 준다. 요약을 사람이 읽을 언어로 쓰는 데만 쓴다.
-  let language: "en" | "ko" = "en";
+  // 앱 언어. 서버는 모르므로 화면이 구독할 때 알려 주고, 상태 파일에 남겨 재시작 뒤에도 쓴다. 요약과 결정 기록을 사람이 읽을 언어로
+  // 쓰게 하는 데 쓴다. 한 번도 알려 준 적이 없으면 null 이다. 이때 en 으로 가정하면 한국어로 일하는 에이전트에게 결정을 영어로 쓰라고
+  // 지시하게 된다.
+  const appLanguage = async (): Promise<Language | null> => (await store.read()).appLanguage;
   let lastPaseo: PaseoApi | null = null;
 
   /**
@@ -91,7 +93,7 @@ export default function contribute(server: PluginServerContext) {
     return {
       ...request,
       tools: [...request.tools, ...tools],
-      appendSystemPrompt: [...(request.appendSystemPrompt ?? []), AGENT_INSTRUCTIONS],
+      appendSystemPrompt: [...(request.appendSystemPrompt ?? []), agentInstructions(outputLanguage(found.values, await appLanguage()))],
     };
   });
 
@@ -125,7 +127,7 @@ export default function contribute(server: PluginServerContext) {
         const where = { workspaceId: found.entry.id, projectId: found.entry.projectId, cwd: workspaceDirectoryPath(found.entry) };
         await replayLostCalls(paseo, store, agent.id, where).catch(logFailure("replay lost tool calls"));
         // 질문 창으로 물으면 답할 때까지 턴이 끝나지 않는다. 턴 끝을 기다리지 않고 지금 앞뒤 상황을 요약한다.
-        await summarizer.afterTurn(paseo, agent.id, found.entry.id, false, language, found.values).catch(logFailure("summary on question"));
+        await summarizer.afterTurn(paseo, agent.id, found.entry.id, false, await appLanguage(), found.values).catch(logFailure("summary on question"));
       }
     }
     const respond = (response: { behavior: "allow" } | { behavior: "deny"; message: string }) =>
@@ -164,7 +166,7 @@ export default function contribute(server: PluginServerContext) {
     const where = { workspaceId: found.entry.id, projectId: found.entry.projectId, cwd: workspaceDirectoryPath(found.entry) };
     await replayLostCalls(paseo, store, agent.id, where).catch(logFailure("replay lost tool calls"));
     await summarizer
-      .afterTurn(paseo, agent.id, found.entry.id, outcome.kind === "failed", language, found.values)
+      .afterTurn(paseo, agent.id, found.entry.id, outcome.kind === "failed", await appLanguage(), found.values)
       .catch(logFailure("summary after turn"));
   });
 
@@ -204,7 +206,9 @@ export default function contribute(server: PluginServerContext) {
   });
 
   server.handle(watchStateSubscription, (input, { push, signal, paseo }) => {
-    language = input.language;
+    store
+      .update((state) => (state.appLanguage === input.language ? { state, result: undefined } : { state: { ...state, appLanguage: input.language }, result: undefined }))
+      .catch(logFailure("save app language"));
     lastPaseo = paseo;
     outbox.flushAll(paseo).catch(logFailure("flush on subscribe"));
     const send = (state: Parameters<typeof push>[0]) => {

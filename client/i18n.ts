@@ -144,6 +144,10 @@ const en = {
     noDiff: "No change in this file yet.",
     diffBase: "Compared with {{base}}",
     replyLabel: { answer: "Your answer", revert: "Revert note", undo: "Redo with" },
+    answerAsProposed: "Go ahead as proposed",
+    answerChose: "Use instead: {{option}}",
+    answerInQuestionWindow: "Answered in the question window",
+    answerInConversation: "Answered in the agent's conversation",
   },
   stopped: {
     proposal: "Proposal:",
@@ -156,6 +160,8 @@ const en = {
     askPlaceholder: "What do you want to know before deciding?",
     sendAsk: "Ask the agent",
     qa: "Questions and answers",
+    question: "Q. {{text}}",
+    answer: "A. {{text}}",
     waitingAnswer: "Waiting for the agent's answer (asked {{ago}})",
     context: "Context",
     evidence: "Evidence",
@@ -163,7 +169,7 @@ const en = {
   summary: {
     title: "Summary",
     before: "Before",
-    ask: "Now",
+    ask: "To do",
     after: "Next",
     watchOut: "Watch out",
     request: "Summarize the context",
@@ -176,6 +182,13 @@ const en = {
   },
   review: {
     requests: "What was asked",
+    sent: {
+      request: "Additional request",
+      ask: "Asked before deciding",
+      answer: "Answered stopped decisions",
+      revert: "Asked to revert {{numbers}}",
+      redo: "Asked to redo {{numbers}} differently",
+    },
     noRequest: "No request text found.",
     moreRequests: "{{count}} more messages in the agent",
     unreviewed_one: "{{count}} decision to review",
@@ -301,6 +314,15 @@ const en = {
     loadFailed: "Could not load settings: {{message}}",
     invalid: "Saved settings are invalid: {{message}}",
     saveFailed: "Could not save: {{message}}",
+  },
+  errors: {
+    agentGone: "The agent is gone (archived or deleted). Nothing was sent.",
+    noWaitingDecision: "This agent has no decision waiting for an answer. It may have been answered already.",
+    notReviewable: "These decisions cannot be reviewed now.",
+    suggestionClosed: "This suggestion is no longer open.",
+    requestClosed: "This request was already sent or closed.",
+    requestSent: "This request was already sent, so it cannot be cancelled.",
+    noBaseBranch: "No base branch found to compare changes with.",
   },
 };
 
@@ -447,6 +469,10 @@ const ko: typeof en = {
     noDiff: "이 파일은 아직 바뀌지 않았습니다.",
     diffBase: "{{base}} 와 비교",
     replyLabel: { answer: "내 답", revert: "되돌리며 한 말", undo: "다시 할 방식" },
+    answerAsProposed: "제안대로 진행",
+    answerChose: "대신 이것으로: {{option}}",
+    answerInQuestionWindow: "질문 창에서 답함",
+    answerInConversation: "에이전트 대화에서 답함",
   },
   stopped: {
     proposal: "제안:",
@@ -459,6 +485,8 @@ const ko: typeof en = {
     askPlaceholder: "결정하기 전에 무엇을 알고 싶나요?",
     sendAsk: "에이전트에게 묻기",
     qa: "문답",
+    question: "물음: {{text}}",
+    answer: "답: {{text}}",
     waitingAnswer: "에이전트의 답을 기다리는 중 ({{ago}} 물음)",
     context: "앞뒤 상황",
     evidence: "근거",
@@ -466,7 +494,7 @@ const ko: typeof en = {
   summary: {
     title: "요약",
     before: "앞 상황",
-    ask: "지금",
+    ask: "할 일",
     after: "뒤에 일어날 일",
     watchOut: "놓치면 안 되는 것",
     request: "앞뒤 상황 요약",
@@ -479,6 +507,13 @@ const ko: typeof en = {
   },
   review: {
     requests: "요청받은 것",
+    sent: {
+      request: "추가 요청",
+      ask: "결정 전에 물음",
+      answer: "멈춘 결정에 답함",
+      revert: "{{numbers}} 되돌리기 요청",
+      redo: "{{numbers}} 바꿔서 다시 요청",
+    },
     noRequest: "요청 글을 찾지 못했습니다.",
     moreRequests: "에이전트에 메시지 {{count}}개가 더 있습니다",
     unreviewed_one: "확인할 결정 {{count}}건",
@@ -580,7 +615,7 @@ const ko: typeof en = {
     loadingModels: "모델을 불러오는 중…",
     modelMissing: "{{model}} 을(를) 이 host 에서 쓸 수 없습니다.",
     modelsFailed: "{{provider}} 의 모델을 읽지 못했습니다.",
-    effort: "Effort",
+    effort: "추론 강도",
     effortDefault: "모델 기본값",
     language: "요약 언어",
     languageHint: "자동은 앱 언어를 따릅니다.",
@@ -604,6 +639,15 @@ const ko: typeof en = {
     loadFailed: "설정을 불러오지 못했습니다: {{message}}",
     invalid: "저장된 설정이 잘못되었습니다: {{message}}",
     saveFailed: "저장하지 못했습니다: {{message}}",
+  },
+  errors: {
+    agentGone: "에이전트가 없어졌습니다(보관되었거나 삭제됨). 아무것도 보내지 않았습니다.",
+    noWaitingDecision: "이 에이전트에는 답을 기다리는 결정이 없습니다. 이미 답했을 수 있습니다.",
+    notReviewable: "지금은 이 결정들을 확인할 수 없습니다.",
+    suggestionClosed: "이 제안은 이미 닫혔습니다.",
+    requestClosed: "이 요청은 이미 보냈거나 닫혔습니다.",
+    requestSent: "이 요청은 이미 보내서 취소할 수 없습니다.",
+    noBaseBranch: "변경을 비교할 기준 브랜치를 찾지 못했습니다.",
   },
 };
 

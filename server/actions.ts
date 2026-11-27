@@ -1,17 +1,13 @@
-import { type Decision, REVIEWABLE_STATUSES, type WorkRequest, decisionTitle } from "../shared/model";
-import type { Outbox } from "./outbox";
+import { answerMessage, askMessage, redoMessage, requestMessage, revertMessage } from "../shared/messages";
+import { ANSWERED_IN_QUESTION_WINDOW, type Decision, REVIEWABLE_STATUSES, type WorkRequest } from "../shared/model";
+import { CoordinatorError } from "../shared/errors";
+import { AgentGoneError, type Outbox } from "./outbox";
 import type { PaseoApi } from "./paseo-api";
 import { type StateStore, nextId } from "./store";
 
-// 에이전트에게 가는 문장은 화면 언어와 관계없이 영어로 둔다. 사람이 쓴 답은 그대로 붙인다.
+// 에이전트에게 가는 문장은 shared/messages.ts 에서 만든다. 화면이 같은 파일로 그 문장을 다시 알아본다.
 
 const REVIEWABLE = new Set<Decision["status"]>(REVIEWABLE_STATUSES);
-
-function list(decisions: readonly Decision[]): string {
-  return decisions.map((item) => `#${item.number} ${decisionTitle(item)}: ${item.decision}`).join("\n");
-}
-
-const REQUEST_PREFIX = "An additional request from the user for this workspace:";
 
 /** 사람이 카드에서 하는 일. 상태를 바꾸고, 에이전트에게 보낼 말이 있으면 outbox 로 보낸다. */
 export class Actions {
@@ -36,9 +32,8 @@ export class Actions {
         result: waiting,
       };
     });
-    if (!answered.length) throw new Error("This agent has no decision waiting for an answer.");
-    const message = `The user answered the decisions you stopped on:\n${list(answered)}\n\nAnswer:\n${text}\n\nContinue with this answer. Do not record these decisions again.`;
-    return { delivery: await this.outbox.deliver(paseo, agentId, message) };
+    if (!answered.length) throw new CoordinatorError("noWaitingDecision", "This agent has no decision waiting for an answer.");
+    return { delivery: await this.outbox.deliver(paseo, agentId, answerMessage(answered, text)) };
   }
 
   /**
@@ -71,16 +66,13 @@ export class Actions {
         result: targets,
       };
     });
-    if (!changed.length) throw new Error("These decisions cannot be reviewed now.");
+    if (!changed.length) throw new CoordinatorError("notReviewable", "These decisions cannot be reviewed now.");
     if (input.verdict === "approved") return { delivery: "none" };
     const byAgent = new Map<string, Decision[]>();
     for (const item of changed) byAgent.set(item.agentId, [...(byAgent.get(item.agentId) ?? []), item]);
     let delivery: "sent" | "queued" = "sent";
     for (const [agentId, decisions] of byAgent) {
-      const message =
-        input.verdict === "revert"
-          ? `The user reviewed decisions you made and wants them reverted:\n${list(decisions)}\n\nUndo the changes these decisions made and return that part to how it was before.${note ? `\n\nNote from the user:\n${note}` : ""}\nRecord any new choice this needs with record_decision.`
-          : `The user reviewed decisions you made and wants them redone differently:\n${list(decisions)}\n\nDo it this way instead:\n${note}\n\nChange your work accordingly. Record any new choice this needs with record_decision.`;
+      const message = input.verdict === "revert" ? revertMessage(decisions, note) : redoMessage(decisions, note ?? "");
       if ((await this.outbox.deliver(paseo, agentId, message)) === "queued") delivery = "queued";
     }
     return { delivery };
@@ -105,7 +97,7 @@ export class Actions {
       };
       return { state: { ...next, requests: [...next.requests, request] }, result: id };
     });
-    return { delivery: await this.outbox.deliver(paseo, input.agentId, `${REQUEST_PREFIX}\n\n${input.text}`, id) };
+    return { delivery: await this.outbox.deliver(paseo, input.agentId, requestMessage(input.text), id) };
   }
 
   /** 에이전트가 남긴 제안을 사람이 고른 에이전트에게 추가 요청으로 보낸다. */
@@ -119,15 +111,15 @@ export class Actions {
         result: found,
       };
     });
-    if (!request) throw new Error("This suggestion is no longer open.");
-    return { delivery: await this.outbox.deliver(paseo, agentId, `${REQUEST_PREFIX}\n\n${request.text}`, id) };
+    if (!request) throw new CoordinatorError("suggestionClosed", "This suggestion is no longer open.");
+    return { delivery: await this.outbox.deliver(paseo, agentId, requestMessage(request.text), id) };
   }
 
   /** 받기 전의 요청을 취소하거나 제안을 버린다. 이미 보낸 요청은 취소할 수 없다. */
   async dismissRequest(id: string): Promise<Record<string, never>> {
     const request = (await this.store.read()).requests.find((item) => item.id === id);
-    if (!request || (request.status !== "queued" && request.status !== "suggested")) throw new Error("This request was already sent or closed.");
-    if (request.status === "queued" && !(await this.outbox.withdraw(id))) throw new Error("This request was already sent.");
+    if (!request || (request.status !== "queued" && request.status !== "suggested")) throw new CoordinatorError("requestClosed", "This request was already sent or closed.");
+    if (request.status === "queued" && !(await this.outbox.withdraw(id))) throw new CoordinatorError("requestSent", "This request was already sent.");
     await this.store.update((state) => ({
       state: { ...state, requests: state.requests.map((item) => (item.id === id ? { ...item, status: "dismissed" as const } : item)) },
       result: undefined,
@@ -150,12 +142,12 @@ export class Actions {
    */
   async ask(paseo: PaseoApi, agentId: string, text: string): Promise<Record<string, never>> {
     const snapshot = await paseo.agents.ref(agentId).refresh();
-    if (!snapshot || snapshot.agent.archivedAt) throw new Error(`Agent ${agentId} is gone. Nothing was sent.`);
+    if (!snapshot || snapshot.agent.archivedAt) throw new AgentGoneError(agentId);
     await this.store.update((state) => {
       const { state: next, id } = nextId(state, "q");
       return { state: { ...next, asks: [...next.asks, { id, agentId, text, at: new Date().toISOString(), answer: null, answeredAt: null }] }, result: undefined };
     });
-    const message = `Before deciding, the user asks about your stopped decisions:\n${text}\n\nAnswer this. Do not implement the stopped decisions yet; ask about them again when you have answered.`;
+    const message = askMessage(text);
     const question = (snapshot.agent.pendingPermissions ?? []).find((request) => request.kind === "question");
     if (question) {
       await paseo.agents.ref(agentId).respondToPermission({ requestId: question.id, response: { behavior: "deny", message } });
@@ -195,7 +187,7 @@ export async function answerFromQuestion(store: StateStore, agentId: string, upd
     return {
       state: {
         ...state,
-        decisions: state.decisions.map((item) => (ids.has(item.id) ? { ...item, status: "answered" as const, reply: { text: text || "(answered in the question window)", at } } : item)),
+        decisions: state.decisions.map((item) => (ids.has(item.id) ? { ...item, status: "answered" as const, reply: { text: text || ANSWERED_IN_QUESTION_WINDOW, at } } : item)),
       },
       result: waiting.length,
     };

@@ -139,10 +139,15 @@ export const stateSchema = z.object({
   summaries: z.array(summarySchema).default([]),
   /** agentId → 보낼 메시지. 에이전트가 일하는 중에 보내면 턴이 끊겨서, 쉴 때만 내보낸다. */
   outbox: z.record(z.string(), z.array(outboxMessageSchema)).default({}),
+  /**
+   * 마지막으로 화면이 알려 준 앱 언어. 서버는 화면이 구독할 때에야 앱 언어를 안다. 메모리에만 두면 플러그인이 다시 시작된 뒤 화면이
+   * 다시 구독하기 전까지 언어를 몰라, 앱을 닫아 둔 동안 만든 요약이 영어가 된다.
+   */
+  appLanguage: z.enum(["en", "ko"]).nullable().default(null),
 });
 export type CoordinatorState = z.output<typeof stateSchema>;
 
-export const EMPTY_STATE: CoordinatorState = { version: 1, seq: 0, decisions: [], requests: [], asks: [], summaries: [], outbox: {} };
+export const EMPTY_STATE: CoordinatorState = { version: 1, seq: 0, decisions: [], requests: [], asks: [], summaries: [], outbox: {}, appLanguage: null };
 
 const language = z.enum(["en", "ko"]);
 
@@ -278,6 +283,49 @@ export function latestSummary(state: CoordinatorState, agentId: string): Summary
     if (item.agentId === agentId) return item;
   }
   return null;
+}
+
+/** 질문 창에서 답했는데 답 내용이 비어 있을 때 남기는 답. 화면은 이 값을 알아보고 화면 언어로 바꿔 보여 준다. */
+export const ANSWERED_IN_QUESTION_WINDOW = "(answered in the question window)";
+/** 플러그인이 다시 시작한 뒤, 에이전트 대화에서 이미 답한 결정에 남기는 답. */
+export const ANSWERED_IN_CONVERSATION = "(answered in the agent's conversation)";
+
+const PROPOSED_SUFFIX = ": go ahead as you proposed.";
+const CHOSEN_PATTERN = /: use "(.*)" instead of your proposal\.$/s;
+
+/**
+ * 카드에서 보내는 답. 에이전트가 읽으므로 영어로 쓰고, 같은 글이 멈춘 결정마다 reply 로 남는다. 화면은 readAnswer 로 이 글을 다시
+ * 읽어 화면 언어로 보여 준다. 두 함수가 같은 형식을 써야 하므로 형식을 바꾸면 함께 바꾼다.
+ */
+export function composeAnswer(decisions: readonly Pick<Decision, "id" | "number" | "title" | "decision">[], choices: Record<string, string | null>, note: string): string {
+  const lines = decisions.map((item) => {
+    const choice = choices[item.id];
+    return choice ? `#${item.number} ${decisionTitle(item)}: use "${choice}" instead of your proposal.` : `#${item.number} ${decisionTitle(item)}${PROPOSED_SUFFIX}`;
+  });
+  return note.trim() ? `${lines.join("\n")}\n\n${note.trim()}` : lines.join("\n");
+}
+
+/**
+ * 결정에 남은 답을 화면에 보일 모양으로 읽는다. card 는 카드에서 보낸 답이고, choice 가 null 이면 제안대로다. 질문 창의 "질문: 답"이나
+ * 형식을 알아볼 수 없는 글은 text 로 그대로 돌려준다.
+ */
+export type ReadAnswer =
+  | { kind: "card"; choice: string | null; note: string }
+  | { kind: "questionWindow" }
+  | { kind: "conversation" }
+  | { kind: "text"; text: string };
+
+export function readAnswer(decision: Pick<Decision, "number">, text: string): ReadAnswer {
+  if (text === ANSWERED_IN_QUESTION_WINDOW) return { kind: "questionWindow" };
+  if (text === ANSWERED_IN_CONVERSATION) return { kind: "conversation" };
+  const split = text.indexOf("\n\n");
+  const head = split < 0 ? text : text.slice(0, split);
+  const note = split < 0 ? "" : text.slice(split + 2).trim();
+  const line = head.split("\n").find((item) => item.startsWith(`#${decision.number} `));
+  if (!line) return { kind: "text", text };
+  if (line.endsWith(PROPOSED_SUFFIX)) return { kind: "card", choice: null, note };
+  const chosen = CHOSEN_PATTERN.exec(line);
+  return chosen ? { kind: "card", choice: chosen[1]!, note } : { kind: "text", text };
 }
 
 /** 결정의 한 줄 제목. 제목이 없던 결정은 결정 문장의 첫 줄을 줄여 쓴다. */

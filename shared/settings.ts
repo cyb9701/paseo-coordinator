@@ -26,6 +26,15 @@ export const settingsSchema = z.object({
 
 export type CoordinatorSettings = z.output<typeof settingsSchema>;
 
+export type Language = "en" | "ko";
+
+/**
+ * 사람이 읽을 글의 언어. auto 면 앱 언어를 따른다. 서버는 화면이 구독할 때에야 앱 언어를 알므로, 아직 모르면 null 을 돌려준다.
+ */
+export function outputLanguage(settings: Pick<CoordinatorSettings, "outputLanguage">, appLanguage: Language | null): Language | null {
+  return settings.outputLanguage === "auto" ? appLanguage : settings.outputLanguage;
+}
+
 export const coordinatorSettings = defineSettings({
   id: "coordinator-v1",
   scope: "host",

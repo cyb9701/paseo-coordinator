@@ -3,6 +3,7 @@ import { z } from "zod";
 import { type Decision, type DecisionInput, STOP_KINDS, type WorkRequest, decisionInputSchema } from "../shared/model";
 import type { PaseoApi } from "./paseo-api";
 import { type StateStore, nextId } from "./store";
+import type { Language } from "../shared/settings";
 
 export const RECORD_DECISION_TOOL = "record_decision";
 export const ADD_FOLLOWUP_TOOL = "add_followup";
@@ -20,7 +21,20 @@ export function shouldStop(input: Pick<DecisionInput, "kind" | "reversible" | "r
  * 에이전트 지침. 결정 기록 도구와 함께 붙는다. 이 문구로 claude opus·sonnet 은 결정을 구현하기 전에 기록하고, 멈출 결정은 모아서
  * 한 번에 묻고, 답을 받은 뒤 같은 결정을 다시 기록하지 않는다. 문구를 바꾸면 실제 에이전트로 이 세 가지를 다시 확인한다.
  */
-export const AGENT_INSTRUCTIONS = `## Decision log (Coordinator plugin)
+export function agentInstructions(language: Language | null): string {
+  return `${AGENT_INSTRUCTIONS}\n\n${decisionLanguageLine(language)}`;
+}
+
+/**
+ * 결정 기록과 추가 요청 제안은 코디네이터 화면에 그대로 보인다. 언어를 정하지 않으면 에이전트는 영어 지침을 따라 영어로 쓰고, 사람의
+ * 말에서 가져온 낱말만 그 언어로 남아 한 문장에 두 언어가 섞인다. 화면 언어를 아직 모르면 사람이 쓰는 언어를 따르게 한다.
+ */
+export function decisionLanguageLine(language: Language | null): string {
+  const target = language === "ko" ? "Korean" : language === "en" ? "English" : "the language the user writes to you in";
+  return `Write the text of ${RECORD_DECISION_TOOL} (title, decision, why, alternatives, evidence) and ${ADD_FOLLOWUP_TOOL} in ${target}; the person reads them on screen in that language. Keep code identifiers, file paths, commands and quoted output as they are.`;
+}
+
+const AGENT_INSTRUCTIONS = `## Decision log (Coordinator plugin)
 
 The person who asked for this work reviews your decisions afterwards, often across many workspaces at once. Call ${RECORD_DECISION_TOOL} for each choice that the user's messages and the repository (code, docs, conventions, tests) do not already settle, before you act on it. Examples: what the change covers beyond what was asked, a data shape or storage format, a public interface or error format, user-visible behavior, adding a dependency, choosing between two reasonable designs.
 

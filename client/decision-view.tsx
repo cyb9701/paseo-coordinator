@@ -2,7 +2,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { type Decision, decisionTitle, fileDiffRpc } from "../shared/model";
+import { type Decision, decisionTitle, fileDiffRpc, readAnswer } from "../shared/model";
 import { formatAgo } from "./time";
 import { Chip, CodeBox, CtaButton, ErrorLine, Muted, Row, type ViewContext } from "./ui";
 
@@ -76,6 +76,19 @@ export function DiffToggle({ workspaceId, files, ctx }: { workspaceId: string; f
   );
 }
 
+/**
+ * 사람의 답을 화면 언어로 보인다. 카드에서 보낸 답은 에이전트가 읽도록 영어로 저장되므로, 이 결정에 고른 것과 덧붙인 말만 꺼내 다시 쓴다.
+ * 질문 창의 "질문: 답"은 에이전트가 쓴 질문이라 그대로 둔다.
+ */
+function answerText(decision: Decision, text: string, ctx: ViewContext): string {
+  const answer = readAnswer(decision, text);
+  if (answer.kind === "questionWindow") return ctx.t("decision.answerInQuestionWindow");
+  if (answer.kind === "conversation") return ctx.t("decision.answerInConversation");
+  if (answer.kind === "text") return answer.text;
+  const choice = answer.choice ? ctx.t("decision.answerChose", { option: answer.choice }) : ctx.t("decision.answerAsProposed");
+  return answer.note ? `${choice}\n${answer.note}` : choice;
+}
+
 /** 결정의 근거. 한 줄을 펼쳤을 때와 멈춘 결정 카드의 '근거 보기'에서 보인다. */
 export function DecisionDetails({ decision, ctx }: { decision: Decision; ctx: ViewContext }) {
   const assumptions = decision.evidence.filter((item) => item.basis === "assumption");
@@ -112,9 +125,15 @@ export function DecisionDetails({ decision, ctx }: { decision: Decision; ctx: Vi
         </Row>
       ) : null}
       {decision.reply?.text ? (
-        <Row label={ctx.t(`decision.replyLabel.${decision.status === "revert" || decision.status === "undo" ? decision.status : "answer"}`)} ctx={ctx}>
-          {line(decision.reply.text)}
-        </Row>
+        decision.status === "revert" || decision.status === "undo" ? (
+          <Row label={ctx.t(`decision.replyLabel.${decision.status}`)} ctx={ctx}>
+            {line(decision.reply.text)}
+          </Row>
+        ) : (
+          <Row label={ctx.t("decision.replyLabel.answer")} ctx={ctx}>
+            {line(answerText(decision, decision.reply.text, ctx))}
+          </Row>
+        )
       ) : null}
     </View>
   );

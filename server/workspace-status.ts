@@ -1,3 +1,4 @@
+import { codedMessage } from "../shared/errors";
 import type { PullRequest, WorkspaceStatus } from "../shared/model";
 import { baseCommit, changedFiles, fileDiff, mapLimited } from "./git";
 import type { PaseoApi } from "./paseo-api";
@@ -89,7 +90,7 @@ export class WorkspaceStatusReader {
     try {
       const cwd = workspaceDirectoryPath(entry);
       const found = await baseCommit(cwd, prBase(entry));
-      if (!found) return { ...base, error: "no base branch found" };
+      if (!found) return { ...base, error: codedMessage("noBaseBranch", "no base branch found") };
       return { ...base, base: found.ref, changedFiles: (await changedFiles(cwd, found.commit)).files };
     } catch (error) {
       return { ...base, error: error instanceof Error ? error.message : String(error) };

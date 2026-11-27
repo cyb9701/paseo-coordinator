@@ -6,10 +6,13 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { DecisionInput } from "../shared/model";
+import { ANSWERED_IN_QUESTION_WINDOW, type DecisionInput, composeAnswer, readAnswer } from "../shared/model";
 import { Actions, answerFromQuestion } from "../server/actions";
-import { recordDecision, relativeTo, saveSuggestion, shouldStop } from "../server/agent-tools";
-import { Outbox } from "../server/outbox";
+import { agentInstructions, recordDecision, relativeTo, saveSuggestion, shouldStop } from "../server/agent-tools";
+import { outputLanguage } from "../shared/settings";
+import { readError } from "../shared/errors";
+import { MESSAGE_SEPARATOR, answerMessage, askMessage, readSentMessage, redoMessage, requestMessage, revertMessage } from "../shared/messages";
+import { AgentGoneError, Outbox } from "../server/outbox";
 import { replayLostCalls } from "../server/replay";
 import type { PaseoApi } from "../server/paseo-api";
 import { StateStore } from "../server/store";
@@ -459,4 +462,67 @@ test("summaries reuse one background workspace instead of creating one each time
   await waitFor(async () => (await store.read()).summaries[0]?.status === "done");
   assert.deepEqual(reused, ["wsum"]);
   assert.equal(created[0]!.cwd, undefined);
+});
+
+test("agent instructions name the language decisions are written in", () => {
+  assert.match(agentInstructions(outputLanguage({ outputLanguage: "auto" }, "ko")), /record_decision.*in Korean/);
+  assert.match(agentInstructions(outputLanguage({ outputLanguage: "en" }, "ko")), /record_decision.*in English/);
+  // 화면이 아직 구독하지 않아 앱 언어를 모르면 영어로 가정하지 않고 사람이 쓰는 언어를 따르게 한다.
+  assert.match(agentInstructions(outputLanguage({ outputLanguage: "auto" }, null)), /in the language the user writes to you in/);
+});
+
+test("the answer sent from a card reads back per decision", () => {
+  const decisions = [
+    { id: "d1", number: 3, title: "Persist todos: JSON file", decision: "x" },
+    { id: "d2", number: 4, title: "Box count", decision: "y" },
+  ];
+  const text = composeAnswer(decisions, { d2: 'only "N 박스"' }, "  테스트 먼저  ");
+  assert.deepEqual(readAnswer({ number: 3 }, text), { kind: "card", choice: null, note: "테스트 먼저" });
+  assert.deepEqual(readAnswer({ number: 4 }, text), { kind: "card", choice: 'only "N 박스"', note: "테스트 먼저" });
+  // #3 으로 시작하는 #30 을 #3 으로 잘못 읽지 않는다.
+  assert.deepEqual(readAnswer({ number: 30 }, text), { kind: "text", text });
+  assert.deepEqual(readAnswer({ number: 3 }, ANSWERED_IN_QUESTION_WINDOW), { kind: "questionWindow" });
+  assert.deepEqual(readAnswer({ number: 3 }, "Which box rule?: pack count"), { kind: "text", text: "Which box rule?: pack count" });
+});
+
+test("the app language survives a plugin restart", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coord-lang-"));
+  const first = new StateStore(directory);
+  assert.equal((await first.read()).appLanguage, null);
+  await first.update((state) => ({ state: { ...state, appLanguage: "ko" as const }, result: undefined }));
+  assert.equal((await new StateStore(directory).read()).appLanguage, "ko");
+});
+
+test("messages the plugin sends read back as what the person did", () => {
+  const decisions = [
+    { id: "d1", number: 26, title: "Box count", decision: "N before 박스.\n#7 is not a decision line" },
+    { id: "d2", number: 27, title: "Match by type", decision: "Look at Product Type" },
+  ];
+  const answer = answerMessage(decisions, composeAnswer(decisions, { d2: "name only" }, "테스트 먼저"));
+  assert.deepEqual(readSentMessage(answer), [
+    { kind: "answer", choices: [{ number: 26, choice: null }, { number: 27, choice: "name only" }], note: "테스트 먼저" },
+  ]);
+  const plain = [
+    { number: 26, title: "Box count", decision: "N before 박스.\nCount packs." },
+    { number: 27, title: "Match by type", decision: "Look at Product Type" },
+  ];
+  assert.deepEqual(readSentMessage(revertMessage(plain, null)), [{ kind: "revert", numbers: [26, 27], note: null }]);
+  assert.deepEqual(readSentMessage(revertMessage(plain, "원래대로")), [{ kind: "revert", numbers: [26, 27], note: "원래대로" }]);
+  assert.deepEqual(readSentMessage(redoMessage(plain.slice(0, 1), "팩 수로 세기")), [{ kind: "redo", numbers: [26], note: "팩 수로 세기" }]);
+  // 일하는 동안 쌓인 메시지는 한 번에 간다.
+  assert.deepEqual(readSentMessage([requestMessage("README 에 적기"), askMessage("왜 N 박스만?")].join(MESSAGE_SEPARATOR)), [
+    { kind: "request", text: "README 에 적기" },
+    { kind: "ask", text: "왜 N 박스만?" },
+  ]);
+  assert.deepEqual(readSentMessage("그냥 사람이 쓴 말"), [{ kind: "text", text: "그냥 사람이 쓴 말" }]);
+  // 질문 창에서 온 답처럼 카드 형식이 아닌 답은 사람이 쓴 그대로 보인다.
+  assert.deepEqual(readSentMessage(answerMessage(decisions, "Which rule?: pack count")), [{ kind: "text", text: "Which rule?: pack count" }]);
+});
+
+test("coded errors keep their code through a message string", () => {
+  // RPC 를 거치면 message 만 남고, 호스트가 앞에 무언가를 붙일 수 있다.
+  const sent = new Error(`Plugin RPC failed: ${new AgentGoneError("a1").message}`);
+  assert.deepEqual(readError(sent), { code: "agentGone", message: "Plugin RPC failed: Agent a1 is gone (archived or deleted). Nothing was sent." });
+  assert.deepEqual(readError(new Error("git diff: fatal: bad revision")), { code: null, message: "git diff: fatal: bad revision" });
+  assert.deepEqual(readError("x [coordinator:unknownCode]"), { code: null, message: "x" });
 });
