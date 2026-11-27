@@ -89,7 +89,7 @@ export function questionItems(request: PermissionRequest): QuestionItem[] {
 }
 
 /**
- * 질문 답변. 0단계에서 실행으로 확인한 형식이다 (RULES.md §13).
+ * 질문 답변. Paseo 0.17.4 에서 실행으로 확인한 형식이다.
  * answers 의 키는 질문 원문, 값은 고른 선택지 label 이다. 여러 개를 고르면 ", " 로 잇고, 직접 쓴 답은 끝에 붙인다.
  */
 export function questionResponse(
@@ -127,7 +127,7 @@ export function requestActions(request: PermissionRequest): PermissionAction[] {
 export const DENIED_BY_USER = "The user denied this request.";
 export const QUESTION_SKIPPED = "The user skipped this question without answering.";
 
-export function actionResponse(request: PermissionRequest, action: PermissionAction, message?: string): PermissionResponse {
+export function actionResponse(request: PermissionRequest, action: PermissionAction): PermissionResponse {
   const explicit = Boolean(request.actions && request.actions.length > 0);
   if (action.behavior === "allow") {
     return explicit ? { behavior: "allow", selectedActionId: action.id } : { behavior: "allow" };
@@ -135,7 +135,7 @@ export function actionResponse(request: PermissionRequest, action: PermissionAct
   return {
     behavior: "deny",
     ...(explicit ? { selectedActionId: action.id } : {}),
-    message: message?.trim() || DENIED_BY_USER,
+    message: DENIED_BY_USER,
   };
 }
 

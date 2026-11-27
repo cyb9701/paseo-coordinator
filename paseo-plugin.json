@@ -1,13 +1,13 @@
 {
   "id": "paseo-coordinator",
   "name": "Coordinator",
-  "description": "Turns one request into coordinated coding-agent work across your projects and brings you only the decisions that need a person.",
+  "description": "Watches your coding agents and brings you only what needs a person: decisions they stopped on, permissions, questions and errors, plus a reviewable log of the decisions they made on their own.",
   "media": [
-    "assets/inbox-needs-reaction.png",
-    "assets/progress-board.png",
-    "assets/worker-question-card.png",
-    "assets/report-card.png",
-    "assets/new-request.png",
+    "assets/inbox.png",
+    "assets/inbox-decisions.png",
+    "assets/review.png",
+    "assets/workspaces.png",
+    "assets/followups.png",
     "assets/settings.png"
   ],
   "requirements": {

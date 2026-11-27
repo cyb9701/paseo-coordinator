@@ -1,40 +1,10 @@
 import type { PluginAgentSnapshot, PluginTheme } from "@getpaseo/plugin";
 
-// 진행 현황 칸반, 인박스, 사이드바 배지가 같은 기준으로 상태를 세도록 한 곳에서 판정한다.
-// 순서가 중요하다. 권한을 기다리는 에이전트는 status 가 아직 "running" 이라서,
-// attentionReason 을 먼저 봐야 "실행 중"이 아니라 "결정 필요"로 보인다.
-export type AgentStateKey =
-  | "permission"
-  | "error"
-  | "finished"
-  | "running"
-  | "initializing"
-  | "idle"
-  | "closed";
-
 /**
- * 진행 현황 컬럼. 왼쪽일수록 사람을 더 기다린다.
- * - react: 작업이 멈춰서 나를 기다린다 (RULES.md §12 내 결정 필요)
- * - review: 끝난 일이라 나중에 봐도 된다. 답변, 결정할 것 없는 완료 보고서, 턴을 마친 직접 띄운 에이전트 (RULES.md §12 확인 필요)
- * - auto: 코디네이터와 검토자가 대신 판단하는 중이다 (RULES.md §2 ④~⑥). 3·6단계부터 채워진다
- * - running: 워커가 일하는 중이다
- * - waiting: 시작 전이거나 세션이 쉬는 중이다
- * 완료된 요청은 컬럼이 아니라 보드 아래에 접어 둔다. 끝난 일이 칸을 차지하면 멈춘 일이 덜 보인다.
+ * 인박스, 워크스페이스 보드, 사이드바 배지가 같은 기준으로 세도록 상태를 한 곳에서 판정한다.
+ * 순서가 중요하다. 권한을 기다리는 에이전트는 status 가 아직 "running" 이라서 권한 대기를 먼저 봐야 한다.
  */
-export type ColumnKey = "react" | "review" | "auto" | "running" | "waiting";
-
-// 이름은 화면 언어에 따라 i18n.ts 의 states.* / columns.* 에서 꺼낸다.
-const STATE_COLUMNS: Record<AgentStateKey, ColumnKey> = {
-  permission: "react",
-  error: "react",
-  finished: "review",
-  running: "running",
-  initializing: "running",
-  idle: "waiting",
-  closed: "waiting",
-};
-
-export const COLUMN_KEYS: readonly ColumnKey[] = ["react", "review", "auto", "running", "waiting"];
+export type AgentStateKey = "permission" | "error" | "finished" | "running" | "initializing" | "idle" | "closed";
 
 type StateInput = Pick<PluginAgentSnapshot, "status" | "attentionReason" | "requiresAttention">;
 
@@ -52,51 +22,27 @@ export function agentState(agent: StateInput, hasPending = false): AgentStateKey
   return "idle";
 }
 
-export function columnOf(key: AgentStateKey): ColumnKey {
-  return STATE_COLUMNS[key];
+/** 사람을 기다리는 상태. 인박스 '내 결정 필요'에 카드로 오르고 배지에 센다. */
+export function needsPerson(key: AgentStateKey): boolean {
+  return key === "permission" || key === "error";
 }
 
-export function columnRank(key: ColumnKey): number {
-  return COLUMN_KEYS.indexOf(key);
-}
-
-// 컬럼마다 다른 색을 쓴다. accent 가 초록인 테마가 있어서 확인 필요를 statusSuccess 로 두면
-// 코디네이터 처리 중과 구분되지 않았다 (2026-11-25 스크린샷). 내 결정 필요는 병목이라 가장 강한 색을 쓴다.
-export function columnColor(key: ColumnKey, theme: PluginTheme): string {
+export function stateColor(key: AgentStateKey, theme: PluginTheme): string {
   switch (key) {
-    case "react":
+    case "permission":
+    case "error":
       return theme.colors.statusDanger;
-    case "review":
+    case "finished":
       return theme.colors.statusWarning;
-    case "auto":
-      return theme.colors.accent;
     case "running":
-      return theme.colors.foreground;
+    case "initializing":
+      return theme.colors.accent;
     default:
       return theme.colors.foregroundMuted;
   }
 }
 
-export function stateColor(key: AgentStateKey, theme: PluginTheme): string {
-  return columnColor(STATE_COLUMNS[key], theme);
-}
-
-const ROLE_LABEL = "paseo-coordinator.role";
-
-/**
- * 사람이 볼 에이전트. 검토자처럼 플러그인이 만드는 background 에이전트와 코디네이터는 뺀다.
- * 코디네이터는 플러그인이 요청마다 만들고 정리하며, 할 일은 질문·답변 카드와 완료 보고서로 대신 보인다.
- * 워커는 남긴다. 워커의 권한 요청과 에러는 사람이 직접 처리해야 하기 때문이다.
- */
-export function isVisibleAgent(agent: Pick<PluginAgentSnapshot, "background" | "labels">): boolean {
-  const role = agent.labels[ROLE_LABEL];
-  return !agent.background && role !== "coordinator" && role !== "reviewer";
-}
-
-/**
- * 직접 띄운 에이전트. 진행 현황의 '직접 띄운 에이전트' 구역과 확인 필요의 에이전트 카드에 쓴다.
- * 플러그인이 만든 워커는 요청 행의 작업 카드로 이미 보이므로 뺀다.
- */
-export function isDirectAgent(agent: Pick<PluginAgentSnapshot, "background" | "labels">): boolean {
-  return isVisibleAgent(agent) && agent.labels[ROLE_LABEL] !== "worker";
+/** 사람이 볼 에이전트. 요약 에이전트처럼 플러그인이 띄우는 helper 는 background 라 빠진다. */
+export function isVisibleAgent(agent: Pick<PluginAgentSnapshot, "background">): boolean {
+  return !agent.background;
 }

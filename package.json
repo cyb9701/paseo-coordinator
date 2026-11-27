@@ -6,16 +6,16 @@
     "paseo-plugin.json",
     "OVERVIEW.md",
     "OVERVIEW.*.md",
+    "README.md",
+    "RULES.md",
+    "DESIGN.md",
+    "LICENSE",
     "assets/",
-    "index.client.ts",
     "index.client.tsx",
     "index.server.ts",
-    "index.server.tsx",
     "client/",
     "server/",
-    "shared/",
-    "README.md",
-    "LICENSE"
+    "shared/"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",

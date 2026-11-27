@@ -1,223 +1,188 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { cleanupTaskWorkspaces } from "./server/cleanup";
-import { CompletionRunner, reportDoneTool } from "./server/completion";
-import { CoordinatorRuntime, answerCoordinatorPermission, isCoordinatorSession } from "./server/coordinator";
-import { listBranches, resolveBaseRef } from "./server/branches";
-import { Dispatcher } from "./server/dispatcher";
-import { listExistingWorkspaces, pluginWorkspaceIds, workspaceProblem } from "./server/existing-workspace";
-import { COORDINATOR_PROMPT } from "./server/prompt";
 import {
-  acknowledge,
-  answerQuestions,
-  askCoordinator,
-  cancelRequest,
-  createRequest,
-  recordInstruction,
-  resolveBlocker,
-  retryTask,
-  revisePlan,
-  cancelTask,
-} from "./server/requests";
-import { ReviewRunner, isReviewerSession } from "./server/review";
-import { WorkerChannel } from "./server/worker-channel";
-import { isWorkerSession, reportBlockerTool } from "./server/worker-tools";
-import { StateStore } from "./server/store";
-import {
-  closeCompletionRpc,
-  retryTaskRpc,
-  retryCoordinatorRpc,
-  cancelTaskRpc,
-  enableRuleRpc,
-  reviewAutoDecisionRpc,
-  acknowledgeRpc,
-  answerQuestionsRpc,
-  askCoordinatorRpc,
-  resolveBlockerRpc,
-  cancelRequestRpc,
-  createRequestRpc,
-  listBranchesRpc,
-  recordInstructionRpc,
-  revisePlanRpc,
+  addFollowupRpc,
+  agentRequestsRpc,
+  answerDecisionsRpc,
+  fileDiffRpc,
+  reviewDecisionsRpc,
+  sendFollowupRpc,
+  sendInstructionRpc,
+  summarizeRpc,
+  updateFollowupRpc,
   watchStateSubscription,
+  workspaceStatusRpc,
 } from "./shared/model";
-import { coordinatorSettings } from "./shared/settings";
+import { type CoordinatorSettings, coordinatorSettings } from "./shared/settings";
+import { AGENT_INSTRUCTIONS, AGENT_TOOL_NAMES, decisionTools } from "./server/agent-tools";
+import { Actions, answerFromQuestion } from "./server/actions";
+import { AgentGoneError, Outbox } from "./server/outbox";
+import type { PaseoApi } from "./server/paseo-api";
+import { replayLostCalls } from "./server/replay";
+import { StateStore } from "./server/store";
+import { Summarizer, isSummarizer } from "./server/summary";
+import { mergeRuns, recentExchanges } from "./server/timeline";
+import { WorkspaceStatusReader } from "./server/workspace-status";
+import { WorkspaceDirectory, workspaceDirectoryPath } from "./server/workspaces";
 
-/** 주기 검사 간격. 다시 알리기 기준(1분)과 보정 검사 간격(15초)보다 길게 둔다. */
-const PERIODIC_CHECK_MS = 60_000;
+/** hook 이 유실돼도 쌓인 메시지가 나가도록 도는 간격. */
+const PERIODIC_MS = 60_000;
+
+/** 플러그인 도구는 daemon 의 "paseo" MCP 서버로 나가서, Claude 에서는 이 접두사가 붙은 이름이 된다. */
+const PLUGIN_MCP_PREFIX = "mcp__paseo__";
+
+const OUR_TOOL_NAMES = new Set(AGENT_TOOL_NAMES.flatMap((name) => [name, `${PLUGIN_MCP_PREFIX}${name}`]));
 
 export default function contribute(server: PluginServerContext) {
-  // 주기 검사가 쓸 Paseo API. hook 과 RPC 가 받을 때마다 기억한다.
-  let lastPaseo: Parameters<typeof coordinator.notify>[0] | null = null;
-  const remember = (paseo: Parameters<typeof coordinator.notify>[0]) => {
-    lastPaseo = paseo;
-  };
-  // 등록해야 클라이언트 useSettings 가 쓰는 읽기·쓰기 RPC 가 생긴다.
   const settings = server.registerSettings(coordinatorSettings);
+  const readSettings = async (): Promise<CoordinatorSettings> => {
+    const state = await settings.read();
+    if (state.status !== "ready") throw new Error(`Coordinator settings are invalid: ${state.error}`);
+    return state.values;
+  };
   const store = new StateStore();
+  const directory = new WorkspaceDirectory();
+  const statuses = new WorkspaceStatusReader(directory);
+  const outbox = new Outbox(store);
+  const summarizer = new Summarizer(store, readSettings, directory, statuses);
+  const actions = new Actions(store, outbox);
   const logFailure = (what: string) => (error: unknown) => console.error(`[coordinator] ${what} failed`, error);
-  const channel = new WorkerChannel(store);
-  // 변경 요청은 마지막 PR 이 머지되면 끝난다. 그 요청의 코디네이터도 정리한다.
-  const onRequestDone = (paseo: Parameters<typeof coordinator.retire>[0], requestId: string) => {
-    coordinator.retire(paseo, requestId).catch(logFailure("retire coordinator"));
+
+  // 앱 언어. 서버는 모르므로 화면이 구독할 때 알려 준다. 요약을 사람이 읽을 언어로 쓰는 데만 쓴다.
+  let language: "en" | "ko" = "en";
+  let lastPaseo: PaseoApi | null = null;
+
+  /**
+   * 결정 기록 도구를 붙일 세션인지. 사람이 설정에서 고른 프로젝트의 워크스페이스에 있고, 사람이 보는 세션(background 가 아님)이어야 한다.
+   * 요약 에이전트처럼 플러그인이 띄우는 helper 는 background 라 빠진다.
+   */
+  const watchedWorkspace = async (paseo: PaseoApi, workspaceId: string | null) => {
+    if (!workspaceId) return null;
+    const values = await readSettings();
+    // 지켜보는 프로젝트가 없으면 daemon 에 묻지 않는다. 이 hook 은 모든 에이전트의 모든 세션 열기와 턴 끝에 돈다.
+    if (!values.projectIds.length) return null;
+    const entry = await directory.find(paseo, workspaceId);
+    if (!entry || !values.projectIds.includes(entry.projectId)) return null;
+    return { entry, values };
   };
-  // 조사가 코디네이터에게 돌아왔거나 실패한 막힘 보고를 다시 처리하면 코디네이터가 할 일이 생긴다. 워커의 턴 종료는 코디네이터
-  // 알림을 부르지 않으므로 여기서 알린다.
-  const dispatcher = new Dispatcher(store, settings, channel, onRequestDone, (paseo) => tellCoordinator(paseo));
-  const completions = new CompletionRunner(store, channel, onRequestDone);
-  const coordinator = new CoordinatorRuntime(
-    store,
-    settings,
-    (paseo) => {
-      dispatcher.run(paseo).catch(logFailure("dispatch"));
+
+  const tools = decisionTools(store, {
+    locate: async (agent, paseo) => {
+      const found = await watchedWorkspace(paseo, agent.workspaceId);
+      return found ? { workspaceId: found.entry.id, projectId: found.entry.projectId, cwd: workspaceDirectoryPath(found.entry) } : null;
     },
-    channel,
-    // 코디네이터가 작업을 취소했다. 워커를 정리하고 남은 작업으로 요청을 마무리한다. 모두 취소됐으면 코디네이터도 정리한다.
-    (paseo, requestId, agentIds, requestCanceled) => {
-      if (requestCanceled) coordinator.retire(paseo, requestId).catch(logFailure("retire coordinator"));
-      dispatcher.afterCancel(paseo, requestId, agentIds).catch(logFailure("finish after coordinator cancel"));
-    },
-  );
-  const tellCoordinator = (paseo: Parameters<typeof coordinator.notify>[0]) => {
-    coordinator.notify(paseo).catch(logFailure("notify"));
-  };
-  const blockerTool = reportBlockerTool(store, tellCoordinator, (paseo, requestId, taskNumber, reviewerIds) => {
-    reviews.abandon(paseo, requestId, taskNumber, reviewerIds).catch(logFailure("abandon review"));
-  });
-  const doneTool = reportDoneTool(store);
-  const reviews = new ReviewRunner(store, settings, channel);
-  coordinator.setReviewRunner(reviews);
-  const reviewerTools = reviews.tools((paseo, requestId, taskNumber) => {
-    reviews.finalize(paseo, requestId, taskNumber, "complete").catch(logFailure("finalize review"));
   });
 
-  // 사람이 쓰는 화면에서만 부른다. 설정 화면에서 아직 저장하지 않은 프로젝트의 기준 브랜치도 고를 수 있게, 허용 목록이 아니라
-  // 이 host 에 등록된 프로젝트면 읽는다. 브랜치 이름과 worktree 경로만 돌려준다.
-  const projectRoot = async (paseo: Parameters<typeof coordinator.notify>[0], projectId: string) =>
-    (await paseo.projects.list()).projects.find((project) => project.projectId === projectId)?.projectRootPath ?? null;
-  server.handle(listBranchesRpc, async ({ projectId }, { paseo }) => {
-    const root = await projectRoot(paseo, projectId);
-    if (!root) throw new Error(`Project ${projectId} is not registered on this host.`);
-    return listBranches(root);
+  server.addHook("agent.open.before", async ({ request }, { paseo }) => {
+    lastPaseo = paseo;
+    if (request.background || request.purpose !== "interactive" || isSummarizer(request)) return request;
+    const found = await watchedWorkspace(paseo, request.workspaceId).catch((error) => {
+      console.error("[coordinator] could not check the workspace of a session", error);
+      return null;
+    });
+    if (!found) return request;
+    return {
+      ...request,
+      tools: [...request.tools, ...tools],
+      appendSystemPrompt: [...(request.appendSystemPrompt ?? []), AGENT_INSTRUCTIONS],
+    };
   });
-  server.handle(createRequestRpc, async (input, { paseo }) => {
-    const result = await createRequest(
-      input,
-      store,
-      settings,
-      async (projectId, branch) => {
-        const root = await projectRoot(paseo, projectId);
-        return Boolean(root && (await resolveBaseRef(root, branch)));
-      },
-      async (projectId, workspaceId) => {
-        const [workspaces, state] = await Promise.all([listExistingWorkspaces(paseo, projectId), store.read()]);
-        return workspaceProblem(
-          workspaces.find((item) => item.id === workspaceId),
-          workspaceId,
-          projectId,
-          pluginWorkspaceIds(state),
-        );
-      },
+
+  // 결정 기록 도구를 부를 때마다 권한 확인이 뜨지 않게 Claude 의 허용 목록에 넣는다. 권한 hook 으로 허용해도 Paseo 는 그 전에
+  // "권한 필요" 알림을 보낸다. 이 값은 에이전트에 저장되므로 지켜보는 프로젝트의 폴더에서 만드는 에이전트에만 넣는다.
+  server.addHook("agent.create.before", async ({ request }, { paseo }) => {
+    if (request.config.provider !== "claude") return request;
+    const values = await readSettings().catch(() => null);
+    if (!values?.projectIds.length) return request;
+    const cwd = request.config.cwd;
+    const entries = await directory.list(paseo).catch(() => []);
+    const watched = entries.some(
+      (entry) => values.projectIds.includes(entry.projectId) && (workspaceDirectoryPath(entry) === cwd || entry.projectRootPath === cwd),
     );
-    // 코디네이터 생성과 알림은 오래 걸릴 수 있어서 요청 저장과 떼어 놓는다. 실패하면 다음 턴 종료 때 다시 시도한다.
-    coordinator.notify(paseo).catch(logFailure("notify"));
-    return result;
-  });
-  server.handle(cancelRequestRpc, async (input, { paseo }) => {
-    const result = await cancelRequest(input, store);
-    coordinator.retire(paseo, input.id).catch(logFailure("retire coordinator"));
-    // 취소한 요청의 워커와 검토자도 멈춘다. 그대로 두면 계속 일해서 push 나 PR 까지 할 수 있다.
-    // 워크스페이스는 남긴다. 워커가 만든 변경을 사람이 확인할 수 있어야 한다.
-    const canceled = (await store.read()).requests.find((item) => item.id === input.id);
-    if (canceled?.status === "canceled") {
-      for (const task of canceled.tasks) {
-        const review = task.blocker?.review;
-        if (review?.status === "running") await reviews.abandon(paseo, canceled.id, task.number, review.reviewers.map((item) => item.agentId));
-        // 끝난(done) 작업의 세션도 닫는다. 이어 쓰기로 끝난 앞 작업의 세션이 사람의 워크스페이스에 영영 남았다 (2026-11-26 전수 검사).
-        if (task.agentId) await paseo.agents.ref(task.agentId).archive().catch(logFailure("archive worker"));
-      }
-      // 읽기 조사는 plan 모드라 남길 변경이 없다. 답을 확인할 때처럼 조사 worktree 와 브랜치를 정리한다.
-      if (canceled.kind === "read") cleanupTaskWorkspaces(paseo, canceled.tasks).catch(logFailure("clean up investigations"));
-    }
-    return result;
-  });
-  server.handle(revisePlanRpc, async (input, { paseo }) => {
-    const result = await revisePlan(input, store);
-    coordinator.notify(paseo).catch(logFailure("notify"));
-    return result;
-  });
-  server.handle(acknowledgeRpc, async (input, { paseo }) => {
-    const result = await acknowledge(input, store);
-    // 답변을 확인하면 읽기 요청이 끝난다. 그 요청의 코디네이터와 조사 워크스페이스·브랜치도 정리한다.
-    const request = (await store.read()).requests.find((item) => item.id === input.id);
-    if (request?.status === "done") {
-      coordinator.retire(paseo, input.id).catch(logFailure("retire coordinator"));
-      if (request.kind === "read") cleanupTaskWorkspaces(paseo, request.tasks).catch(logFailure("clean up investigations"));
-    }
-    return result;
-  });
-  server.handle(retryCoordinatorRpc, async (input, { paseo }) => {
-    await coordinator.retry(paseo, input.id);
-    return {};
-  });
-  server.handle(answerQuestionsRpc, async (input, { paseo }) => {
-    const result = await answerQuestions(input, store);
-    coordinator.notify(paseo).catch(logFailure("notify"));
-    return result;
-  });
-  server.handle(recordInstructionRpc, (input) => recordInstruction(input, store));
-  server.handle(enableRuleRpc, async ({ rule }) => {
-    await store.update((state) => ({
-      state: { ...state, disabledRules: state.disabledRules.filter((item) => item !== rule) },
-      result: undefined,
-    }));
-    return {};
-  });
-  server.handle(reviewAutoDecisionRpc, async (input, { paseo }) => {
-    await reviews.reviewAutoDecision(paseo, input);
-    return {};
-  });
-  server.handle(resolveBlockerRpc, async (input, { paseo }) => {
-    const { abandonedReviewers } = await resolveBlocker(input, store);
-    if (abandonedReviewers.length) await reviews.abandon(paseo, input.requestId, input.taskNumber, abandonedReviewers);
-    await channel.flush(paseo, input.requestId, input.taskNumber).catch(logFailure("send decision to worker"));
-    return {};
-  });
-  server.handle(retryTaskRpc, async (input, { paseo }) => {
-    const { hasWorker, orphanWorkspaceId } = await retryTask(input, store);
-    if (hasWorker) await channel.flush(paseo, input.requestId, input.taskNumber).catch(logFailure("send retry to worker"));
-    else {
-      // 워커를 만들기 전에 실패한 작업의 worktree 는 새로 배정하면 아무도 쓰지 않는다. 고아로 남지 않게 정리한다.
-      if (orphanWorkspaceId) await paseo.workspaces.ref(orphanWorkspaceId).archive().catch(logFailure("archive orphan workspace"));
-      dispatcher.run(paseo).catch(logFailure("dispatch retry"));
-    }
-    return {};
-  });
-  server.handle(cancelTaskRpc, async (input, { paseo }) => {
-    const { agentIds, requestCanceled } = await cancelTask(input, store);
-    if (requestCanceled) coordinator.retire(paseo, input.requestId).catch(logFailure("retire coordinator"));
-    await dispatcher.afterCancel(paseo, input.requestId, agentIds).catch(logFailure("finish after cancel"));
-    return {};
-  });
-  server.handle(closeCompletionRpc, async (input, { paseo }) => {
-    await completions.close(paseo, input);
-    return {};
-  });
-  server.handle(askCoordinatorRpc, async (input, { paseo }) => {
-    const result = await askCoordinator(input, store);
-    tellCoordinator(paseo);
-    return result;
+    if (!watched) return request;
+    const options = request.config.providerOptions ?? {};
+    const allowed = Array.isArray(options.allowedTools) ? (options.allowedTools as string[]) : [];
+    const ours = AGENT_TOOL_NAMES.map((name) => `${PLUGIN_MCP_PREFIX}${name}`).filter((name) => !allowed.includes(name));
+    if (!ours.length) return request;
+    return { ...request, config: { ...request.config, providerOptions: { ...options, allowedTools: [...allowed, ...ours] } } };
   });
 
-  // promise 를 반환하면 그 promise 가 끝날 때 구독이 닫힌다 (SDK 계약). 처음 상태만 보내고 닫혀서
-  // 이후 변경이 화면에 안 갔던 버그가 있었다 (2026-11-25). 그래서 일반 함수로 두고 signal 로만 닫는다.
-  server.handle(watchStateSubscription, (_input, { push, signal, paseo }) => {
-    remember(paseo);
-    // 화면이 열릴 때마다 계획이 필요한 요청이 남아 있는지 보고 코디네이터에게 알린다.
-    // 플러그인 재시작이나 실패로 알림을 놓쳐도 사람이 화면을 열면 다시 이어진다.
-    coordinator.notify(paseo).catch(logFailure("notify on subscribe"));
-    reviews.reconcile(paseo).catch(logFailure("reconcile reviews"));
-    dispatcher.run(paseo).catch(logFailure("dispatch on subscribe"));
-    // 구독이 막 끊긴 순간에 보내면 실패할 수 있다. 다음 구독이 처음에 전체 상태를 받으므로 버려도 된다.
+  server.addHook("agent.permission.before", async ({ agent, request }, { paseo }) => {
+    lastPaseo = paseo;
+    if (request.kind === "question") {
+      // 플러그인 재시작으로 잃은 결정이 있으면 질문 창이 뜨기 전에 되살린다. 그래야 결정 카드 안에 이 질문이 들어가고, 답하면 결정에 남는다.
+      const found = await watchedWorkspace(paseo, agent.workspaceId).catch(() => null);
+      if (found) {
+        const where = { workspaceId: found.entry.id, projectId: found.entry.projectId, cwd: workspaceDirectoryPath(found.entry) };
+        await replayLostCalls(paseo, store, agent.id, where).catch(logFailure("replay lost tool calls"));
+        // 질문 창으로 물으면 답할 때까지 턴이 끝나지 않는다. 턴 끝을 기다리지 않고 지금 앞뒤 상황을 요약한다.
+        await summarizer.afterTurn(paseo, agent.id, found.entry.id, false, language, found.values).catch(logFailure("summary on question"));
+      }
+    }
+    const respond = (response: { behavior: "allow" } | { behavior: "deny"; message: string }) =>
+      paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response }).catch(logFailure("answer permission"));
+    // 요약 에이전트는 받은 글만 정리한다. 어떤 도구도 쓰지 않는다.
+    if (isSummarizer(agent)) {
+      await respond({ behavior: "deny", message: "You only summarize the text you were given. Answer with the JSON now." });
+      return;
+    }
+    // 결정을 기록하는 일이 사람의 승인을 기다리면 안 된다. 기록은 상태 파일에만 쓴다.
+    // 이름 끝만 비교하면 다른 MCP 서버의 같은 이름 도구도 허용된다. 이 플러그인 도구의 이름과 정확히 같을 때만 허용한다.
+    if (request.kind === "tool" && OUR_TOOL_NAMES.has(request.name)) await respond({ behavior: "allow" });
+  });
+
+  // 에이전트의 질문 창(AskUserQuestion)에 사람이 답하면 그 에이전트의 멈춘 결정에 그 답을 남긴다. 질문 창의 답은 updatedInput.answers 로
+  // 온다. 요청 종류를 기억해 두지 않고 답의 모양으로 가린다. 기억해 두면 플러그인이 다시 시작될 때 잃는다.
+  // 건너뛰기(거절)면 결정은 그대로 답을 기다린다. 카드의 답 칸으로 다시 답할 수 있다.
+  server.addHook("agent.permission.after", async ({ agent, resolution }) => {
+    if (resolution.behavior !== "allow") return;
+    const answers = (resolution.updatedInput as { answers?: unknown } | undefined)?.answers;
+    if (!answers || typeof answers !== "object") return;
+    await answerFromQuestion(store, agent.id, resolution.updatedInput).catch(logFailure("record question answer"));
+  });
+
+  server.addHook("agent.turn.after", async ({ agent, outcome }, { paseo }) => {
+    lastPaseo = paseo;
+    if (agent.background) return;
+    await outbox.flush(paseo, agent.id).catch((error) => {
+      if (!(error instanceof AgentGoneError)) logFailure("flush outbox")(error);
+    });
+    const found = await watchedWorkspace(paseo, agent.workspaceId).catch(() => null);
+    if (!found) return;
+    const where = { workspaceId: found.entry.id, projectId: found.entry.projectId, cwd: workspaceDirectoryPath(found.entry) };
+    await replayLostCalls(paseo, store, agent.id, where).catch(logFailure("replay lost tool calls"));
+    await summarizer
+      .afterTurn(paseo, agent.id, found.entry.id, outcome.kind === "failed", language, found.values)
+      .catch(logFailure("summary after turn"));
+  });
+
+  // 답을 기다리던 에이전트가 archive 되면 그 카드는 답할 곳이 없다. 사람의 인박스에 영영 남지 않게 내린다.
+  server.addHook("agent.archive.after", async ({ agent }) => {
+    await store.update((state) => {
+      if (!state.decisions.some((item) => item.agentId === agent.id && item.status === "waiting")) return { state, result: undefined };
+      return {
+        state: {
+          ...state,
+          decisions: state.decisions.map((item) => (item.agentId === agent.id && item.status === "waiting" ? { ...item, status: "dropped" as const } : item)),
+        },
+        result: undefined,
+      };
+    });
+  });
+
+  // 워크스페이스가 archive 되면 그 안의 결정은 답하거나 확인할 곳이 없다(diff 도 볼 수 없고 받을 에이전트도 없다). 확인 필요에
+  // 영영 남지 않게 내린다. 끝난 결정 기록은 그대로 둔다.
+  server.addHook("workspace.archive.after", async ({ workspace }) => {
+    await store.update((state) => {
+      const open = (item: (typeof state.decisions)[number]) => item.workspaceId === workspace.id && (item.status === "waiting" || item.status === "unreviewed");
+      if (!state.decisions.some(open)) return { state, result: undefined };
+      return { state: { ...state, decisions: state.decisions.map((item) => (open(item) ? { ...item, status: "dropped" as const } : item)) }, result: undefined };
+    });
+  });
+
+  server.handle(watchStateSubscription, (input, { push, signal, paseo }) => {
+    language = input.language;
+    lastPaseo = paseo;
+    outbox.flushAll(paseo).catch(logFailure("flush on subscribe"));
     const send = (state: Parameters<typeof push>[0]) => {
       push(state).catch(() => undefined);
     };
@@ -226,102 +191,34 @@ export default function contribute(server: PluginServerContext) {
     store.read().then(send, logFailure("read state"));
   });
 
-  // 코디네이터 세션에만 전용 도구와 지침을 붙인다. 지침은 세션마다 붙고 에이전트에 저장되지 않는다.
-  server.addHook("agent.open.before", async ({ request }) => {
-    // 워커에게는 막힘·완료 보고 도구만, 검토자에게는 검토 도구 두 개만 붙인다.
-    if (isWorkerSession(request.labels)) return { ...request, tools: [...request.tools, blockerTool, doneTool] };
-    if (isReviewerSession(request.labels)) return { ...request, tools: [...request.tools, ...reviewerTools] };
-    if (!isCoordinatorSession(request.labels)) return request;
-    return {
-      ...request,
-      tools: [...request.tools, ...coordinator.tools()],
-      appendSystemPrompt: [
-        ...(request.appendSystemPrompt ?? []),
-        COORDINATOR_PROMPT,
-        `You coordinate request ${request.labels["paseo-coordinator.request"] ?? "(unknown)"} only. Its state lives in the plugin: always re-read it with coordinator_get_request instead of relying on earlier turns.`,
-      ],
-    };
+  server.handle(answerDecisionsRpc, (input, { paseo }) => actions.answer(paseo, input.agentId, input.text));
+  server.handle(reviewDecisionsRpc, (input, { paseo }) => actions.review(paseo, input));
+  server.handle(sendInstructionRpc, async (input, { paseo }) => {
+    await outbox.ensureReachable(paseo, input.agentId);
+    return { delivery: await outbox.deliver(paseo, input.agentId, input.text) };
+  });
+  server.handle(summarizeRpc, async (input, { paseo }) => {
+    const snapshot = await paseo.agents.ref(input.agentId).refresh();
+    const workspaceId = snapshot?.agent.workspaceId;
+    if (!workspaceId) throw new Error("This agent is not in a workspace.");
+    summarizer.request(paseo, input.agentId, workspaceId, "manual", input.language);
+    return {};
+  });
+  server.handle(addFollowupRpc, (input) => actions.addFollowup(input));
+  server.handle(updateFollowupRpc, (input) => actions.updateFollowup(input.id, input.status));
+  server.handle(sendFollowupRpc, (input, { paseo }) => actions.sendFollowup(paseo, input.id, input.agentId));
+  server.handle(workspaceStatusRpc, async (input, { paseo }) => {
+    const values = await readSettings();
+    return { workspaces: await statuses.read(paseo, values.projectIds, input.force), at: new Date().toISOString() };
+  });
+  server.handle(fileDiffRpc, (input, { paseo }) => statuses.diff(paseo, input.workspaceId, input.files));
+  server.handle(agentRequestsRpc, async ({ agentId }, { paseo }) => {
+    const exchanges = mergeRuns(await recentExchanges(paseo, agentId, 400));
+    return { messages: exchanges.filter((item) => item.role === "user").map((item) => ({ text: item.text, at: item.at })) };
   });
 
-  // 코디네이터가 일을 마치면 그동안 쌓인 요청을 알린다. 열린 질문이나 읽지 않은 지시 때문에 미뤘던 요청 마무리도 이어 간다.
-  // 워커가 일을 마치면 작업 상태를 바꾸고 다음 작업을 배정한다.
-  server.addHook("agent.turn.after", async ({ agent, outcome }, { paseo }) => {
-    remember(paseo);
-    const requestId = await coordinator.requestOf(agent.id);
-    if (requestId) {
-      await dispatcher.settleRequest(paseo, requestId).catch(logFailure("settle request after coordinator turn"));
-      await coordinator.notify(paseo).catch(logFailure("notify after turn"));
-      return;
-    }
-    await dispatcher.onWorkerTurn(paseo, agent.id, outcome).catch(logFailure("worker turn"));
-  });
-
-  // 코디네이터가 자기 전용 도구를 부를 때 권한 확인이 뜨면 기계적으로 허용한다. 이 도구는 요청을 읽고
-  // 계획을 저장할 뿐이다. 그 밖의 권한 요청은 손대지 않아서 사람의 인박스로 간다.
-  server.addHook("agent.permission.before", async ({ agent, request }, { paseo }) => {
-    remember(paseo);
-    // 검토자는 읽기 전용이다. 검토 도구는 허용하고, 그 밖의 권한 요청은 모두 거절한다 (RULES.md §7).
-    if (await reviews.findReview(agent.id)) {
-      const allowed = request.kind === "tool" && request.name.includes("reviewer_");
-      await paseo.agents
-        .ref(agent.id)
-        .respondToPermission({
-          requestId: request.id,
-          response: allowed
-            ? { behavior: "allow" }
-            : { behavior: "deny", message: "Reviewers are read-only. Continue the review without this." },
-        })
-        .catch(logFailure("answer reviewer permission"));
-      return;
-    }
-    // plan 모드 워커(Auto 가 없는 provider 의 읽기 조사, 또는 바꾸기 전에 만든 워커)는 조사를 마치면 ExitPlanMode 로 계획 승인을
-    // 사람에게 받으려고 멈춘다. 읽기 조사에는 승인할 계획이 없고, 승인하면 세션이 편집 모드로 바뀌어 읽기 전용이 풀린다
-    // (r13·r14·r18, 2026-11-27). 거절하고 보고를 마지막 메시지로 쓰게 한다. 답변은 그 메시지에서 모은다.
-    if (request.kind === "plan") {
-      const worker = await dispatcher.findWorker(agent.id);
-      if (worker?.request.kind === "read") {
-        await paseo.agents
-          .ref(agent.id)
-          .respondToPermission({
-            requestId: request.id,
-            response: {
-              behavior: "deny",
-              message:
-                "This is a read-only investigation, so there is no plan to approve. Stay read-only. Write your full report (everything you put in the plan) as your final message and end your turn.",
-            },
-          })
-          .catch(logFailure("deny read worker plan exit"));
-        return;
-      }
-    }
-    // 워커가 보고 도구를 부를 때 권한 확인이 뜨면 허용한다. 보고하는 일 자체가 사람을 기다리면 안 된다.
-    if (
-      request.kind === "tool" &&
-      (request.name.includes("report_blocker") || request.name.includes("report_done")) &&
-      (await dispatcher.findWorker(agent.id))
-    ) {
-      await paseo.agents
-        .ref(agent.id)
-        .respondToPermission({ requestId: request.id, response: { behavior: "allow" } })
-        .catch(logFailure("allow report_blocker"));
-      return;
-    }
-    if (!(await coordinator.requestOf(agent.id))) return;
-    console.log(`[coordinator] coordinator permission request: kind=${request.kind} name=${request.name}`);
-    // 코디네이터는 자기 도구만 쓴다 (지침). 그 밖의 권한 요청은 거절해 코디네이터가 기다리며 멈추지 않게 한다.
-    await answerCoordinatorPermission(paseo, agent.id, request);
-  });
-
-  // 알림형 hook 은 best-effort 라 유실될 수 있고, 다시 알리기와 보정 검사는 무언가가 불러야 돈다. 사람이 화면을 다시 열기 전까지
-  // 아무 검사도 돌지 않던 문제를 막기 위해 주기적으로 돈다 (2026-11-26 전수 검사). Paseo API 는 hook·RPC 가 받은 것을 쓴다.
   const timer = setInterval(() => {
-    if (!lastPaseo) return;
-    coordinator.notify(lastPaseo).catch(logFailure("periodic notify"));
-    // 코디네이터의 턴 종료 hook 이 유실돼도, 열린 질문이나 읽지 않은 지시 때문에 미뤘던 요청 마무리를 이어 간다.
-    dispatcher.settleAll(lastPaseo).catch(logFailure("periodic settle"));
-    reviews.reconcile(lastPaseo).catch(logFailure("periodic review reconcile"));
-    dispatcher.run(lastPaseo).catch(logFailure("periodic dispatch"));
-  }, PERIODIC_CHECK_MS);
-
+    if (lastPaseo) outbox.flushAll(lastPaseo).catch(logFailure("periodic flush"));
+  }, PERIODIC_MS);
   return () => clearInterval(timer);
 }

@@ -1,16 +1,14 @@
 import type { PluginAgentSnapshot } from "@getpaseo/plugin";
 import { usePaseo } from "@getpaseo/plugin/client";
 import { type ReactNode, createContext, useContext, useEffect, useMemo, useState } from "react";
-import { type AgentStateKey, type ColumnKey, agentState, columnOf, isDirectAgent, isVisibleAgent } from "./agent-state";
+import { type AgentStateKey, agentState, isVisibleAgent, needsPerson } from "./agent-state";
 import type { PermissionRequest } from "./permissions";
 
 /**
  * 에이전트마다 대기 중인 권한 요청과 마지막 에러.
  *
- * 플러그인 snapshot(useAgents)에는 pendingPermissions 가 없고, attentionReason 은 믿을 수 없다.
- * 2026-11-25 실행 확인: 하위 에이전트(paseo.parent-agent-id 라벨)는 권한 요청이 대기 중이어도
- * requiresAttention=false, attentionReason=null 이었다. 그래서 '멈춤' 판정은 daemon 의 전체 snapshot 에서
- * pendingPermissions 가 있는지로 직접 한다. agents.list 구독은 처음에 전체 목록을, 이후 변경을 보낸다.
+ * 플러그인 snapshot(useAgents)에는 pendingPermissions 가 없고, 하위 에이전트는 권한 요청이 대기 중이어도 requiresAttention=false,
+ * attentionReason=null 로 온다. 그래서 '멈춤' 판정은 daemon 의 전체 snapshot 에서 pendingPermissions 가 있는지로 직접 한다.
  */
 export interface PendingDirectory {
   readonly ready: boolean;
@@ -30,6 +28,15 @@ function factsOf(agent: { pendingPermissions?: unknown; lastError?: string | nul
     pending: (Array.isArray(agent.pendingPermissions) ? agent.pendingPermissions : []) as PermissionRequest[],
     lastError: agent.lastError ?? null,
   };
+}
+
+function sameFacts(before: AgentFacts | undefined, after: AgentFacts): boolean {
+  if (!before) return after.pending.length === 0 && !after.lastError;
+  return (
+    before.lastError === after.lastError &&
+    before.pending.length === after.pending.length &&
+    before.pending.every((request, index) => request.id === after.pending[index]?.id)
+  );
 }
 
 function toDirectory(facts: ReadonlyMap<string, AgentFacts>): PendingDirectory {
@@ -58,11 +65,16 @@ export function usePendingDirectory(): PendingDirectory {
             for (const { agent } of entries) facts.set(agent.id, factsOf(agent));
             publish();
           },
+          // 에이전트 갱신은 일하는 동안 계속 온다. 권한 대기나 에러가 실제로 바뀐 때만 다시 그린다. 그러지 않으면 화면 전체가
+          // 다른 에이전트의 활동마다 다시 그려진다.
           update: (message) => {
             if (message.type !== "agent_update") return;
             const update = message.payload;
-            if (update.kind === "upsert") facts.set(update.agent.id, factsOf(update.agent));
-            else facts.delete(update.agentId);
+            if (update.kind === "upsert") {
+              const next = factsOf(update.agent);
+              if (sameFacts(facts.get(update.agent.id), next)) return;
+              facts.set(update.agent.id, next);
+            } else if (!facts.delete(update.agentId)) return;
             publish();
           },
         });
@@ -88,32 +100,17 @@ export function usePending(): PendingDirectory {
   return useContext(PendingContext);
 }
 
+type StateFields = Pick<PluginAgentSnapshot, "id" | "status" | "attentionReason" | "requiresAttention">;
+
 export interface Classifier {
-  state(agent: PluginAgentSnapshot | StateFields): AgentStateKey;
-  column(agent: PluginAgentSnapshot | StateFields): ColumnKey;
-  /** 칸반 카드로 올릴 에이전트. 하위 세션은 부모 카드 안에 접되, 반응이 필요하면 따로 꺼낸다. */
-  isCard(agent: PluginAgentSnapshot): boolean;
-  /**
-   * 인박스 '내 결정 필요'에 에이전트 카드로 올릴 에이전트. 플러그인 워커는 권한 요청만 올린다. 워커의 에러는 작업이 막혀
-   * 멈춘 작업 카드로 이미 오고, 에러 카드까지 뜨면 같은 일에 카드가 두 장이고 에러 카드의 지시는 작업 상태를 바꾸지 않았다
-   * (2026-11-26 전수 검사). 인박스, 탭, 사이드바가 같은 기준으로 센다.
-   */
+  state(agent: StateFields): AgentStateKey;
+  /** 권한 요청이나 에러로 멈춰 사람을 기다린다. */
   needsMyDecision(agent: PluginAgentSnapshot): boolean;
 }
 
-type StateFields = Pick<PluginAgentSnapshot, "id" | "status" | "attentionReason" | "requiresAttention">;
-
 export function classifierFor(directory: PendingDirectory): Classifier {
   const state = (agent: StateFields) => agentState(agent, directory.pending.has(agent.id));
-  const column = (agent: StateFields) => columnOf(state(agent));
-  return {
-    state,
-    column,
-    // 진행 현황의 '직접 띄운 에이전트' 구역. 워커는 요청 행에 있으므로 뺀다.
-    isCard: (agent) => isDirectAgent(agent) && (agent.parentAgentId === null || column(agent) === "react"),
-    needsMyDecision: (agent) =>
-      isVisibleAgent(agent) && column(agent) === "react" && (isDirectAgent(agent) || directory.pending.has(agent.id)),
-  };
+  return { state, needsMyDecision: (agent) => isVisibleAgent(agent) && needsPerson(state(agent)) };
 }
 
 export function useClassifier(): Classifier {
@@ -122,8 +119,8 @@ export function useClassifier(): Classifier {
 }
 
 /**
- * 내 결정 필요 카드 수. 인박스는 대기 중인 권한 요청 하나당 카드 한 장을 그리므로, 에이전트 수가 아니라 요청 수로 센다.
- * 요청이 없는데 멈춘 에이전트(에러)는 한 장이다. (에이전트 수로 셌더니 카드 2장에 숫자 1이 나왔다. 2026-11-25)
+ * 권한·에러 카드 수. 인박스는 대기 중인 권한 요청 하나당 카드 한 장을 그리므로, 에이전트 수가 아니라 요청 수로 센다.
+ * 요청이 없는데 멈춘 에이전트(에러)는 한 장이다.
  */
 export function cardCount(agentIds: readonly string[], directory: PendingDirectory): number {
   return agentIds.reduce((total, id) => total + Math.max(1, directory.pending.get(id)?.length ?? 0), 0);

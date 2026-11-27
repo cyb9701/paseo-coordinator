@@ -1,19 +1,15 @@
-import type { PluginAgentSnapshot } from "@getpaseo/plugin";
 import type { PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { useAgents } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
-import { Text, View } from "react-native";
 import { useMemo } from "react";
-import { CoordinatorStateProvider, requestReactionCount, useCoordinatorState } from "./coordinator-state";
+import { Text, View } from "react-native";
+import { CoordinatorStateProvider, reactionCount, useCoordinatorState } from "./coordinator-state";
 import { useT } from "./i18n";
-import { cardCount, classifierFor, usePendingDirectory } from "./pending-store";
+import { classifierFor, usePendingDirectory } from "./pending-store";
 
 export const SCREEN_ID = "main";
 
-// 사이드바 숫자는 작업이 멈춰 있는 것(내 결정 필요: 권한·질문 대기, 멈춘 작업과 코디네이터)만 센다.
-// 확인 필요(결과 미확인)는 멈춘 것이 아니라 끝난 것이라 세지 않는다. 숫자가 늘 떠 있으면 아무도 보지 않게 된다.
-// 계획 승인 대기도 요청 전체가 멈춘 것이라 센다.
-// 사이드바는 화면과 다른 트리에 그려져서 구독을 따로 갖는다.
+// 사이드바는 화면과 다른 트리에 그려져서 구독을 따로 갖는다. 숫자는 사람을 기다리는 카드만 센다.
 
 export function CoordinatorSidebarItem(props: PluginSidebarItemProps) {
   return (
@@ -28,13 +24,8 @@ function SidebarItemBody({ theme, host, currentScreen, openScreen }: PluginSideb
   const { state } = useCoordinatorState();
   const directory = usePendingDirectory();
   const classify = useMemo(() => classifierFor(directory), [directory]);
-  const blocked = useAgents({
-    hosts: [host.id],
-    where: (agent: PluginAgentSnapshot) => classify.needsMyDecision(agent),
-  });
-  const count =
-    cardCount(blocked.map((ref) => ref.id), directory) +
-    requestReactionCount(state?.requests ?? []);
+  const blocked = useAgents({ hosts: [host.id], where: (agent) => classify.needsMyDecision(agent) });
+  const count = reactionCount(state, blocked.map((ref) => ref.id), directory);
   return (
     <SidebarRow
       icon="LayoutDashboard"
@@ -43,14 +34,8 @@ function SidebarItemBody({ theme, host, currentScreen, openScreen }: PluginSideb
       trailing={
         count > 0 ? (
           <View
-            accessibilityLabel={t("states.permission") + ` ${count}`}
-            style={{
-              minWidth: 18,
-              paddingHorizontal: 5,
-              borderRadius: 9,
-              backgroundColor: theme.colors.statusDanger,
-              alignItems: "center",
-            }}
+            accessibilityLabel={t("sidebar.badge", { count })}
+            style={{ minWidth: 18, paddingHorizontal: 5, borderRadius: 9, backgroundColor: theme.colors.statusDanger, alignItems: "center" }}
           >
             <Text style={{ color: theme.colors.surface0, fontSize: 11, fontWeight: "600" }}>{count}</Text>
           </View>

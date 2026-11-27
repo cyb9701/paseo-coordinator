@@ -2,7 +2,7 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/ui";
 import { type ReactNode, useState } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { type Fonts, useFonts } from "./fonts";
 import type { T } from "./i18n";
 
@@ -19,8 +19,8 @@ export interface ViewContext {
 type Tone = "primary" | "neutral";
 
 /**
- * 클릭 영역이 분명한 박스형 버튼. 글자만 있는 버튼은 눌리는 곳인지 알기 어렵다는 피드백(2026-11-25)에 따라
- * 플러그인의 모든 동작 버튼은 이것을 쓴다.
+ * 클릭 영역이 분명한 박스형 버튼. 글자만 있는 버튼은 눌리는 곳인지 알기 어려워서 플러그인의 모든 동작 버튼은 이것을 쓴다.
+ * 결정하는 버튼(허용, 답 보내기, 맞음, 바꾸기, 완료 등)은 모든 카드에서 기본 크기로 맞춘다. sm 은 펼치기·새로 읽기처럼 보기만 바꾸는 버튼에 쓴다.
  */
 export function CtaButton({
   label,
@@ -201,10 +201,7 @@ export function ChoiceBox({
   );
 }
 
-/**
- * 프로젝트 표시. 위치 정보라서 경로처럼 조용하게 보인다: 폴더 아이콘 + 이름, 테두리와 배경 없음.
- * 등급·종류 칩과 모양이 겹쳐 구분이 안 된다는 피드백(2026-11-25)으로 칩에서 분리했다.
- */
+/** 프로젝트 표시. 위치 정보라서 경로처럼 조용하게 보인다: 폴더 아이콘 + 이름, 테두리와 배경 없음. 종류 칩과 모양이 겹치지 않게 한다. */
 export function ProjectTag({ label, theme }: { label: string; theme: PluginTheme }) {
   const fonts = useFonts();
   return (
@@ -213,46 +210,6 @@ export function ProjectTag({ label, theme }: { label: string; theme: PluginTheme
       <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: fonts.meta, fontWeight: "600", flexShrink: 1 }}>
         {label}
       </Text>
-    </View>
-  );
-}
-
-export type Grade = "A" | "B" | "C" | "D";
-
-function gradeColor(grade: Grade, theme: PluginTheme): string {
-  switch (grade) {
-    case "A":
-      return theme.colors.statusDanger;
-    case "B":
-      return theme.colors.statusWarning;
-    case "C":
-      return theme.colors.accent;
-    default:
-      return theme.colors.foregroundMuted;
-  }
-}
-
-/**
- * 등급 배지. 작업의 무게를 한눈에 알 수 있게 색을 꽉 채운 둥근 배지로 보인다. A 가 가장 무겁다 (RULES.md §10).
- * grade 가 없으면(읽기 요청, 등급 전) 테두리만 있는 배지로 label 을 보인다.
- */
-export function GradeBadge({ grade, label, theme }: { grade: Grade | null; label: string; theme: PluginTheme }) {
-  const fonts = useFonts();
-  const filled = grade !== null;
-  const color = grade ? gradeColor(grade, theme) : theme.colors.foregroundMuted;
-  return (
-    <View
-      style={{
-        alignSelf: "flex-start",
-        paddingHorizontal: 9,
-        paddingVertical: 2,
-        borderRadius: 999,
-        borderWidth: 1,
-        borderColor: color,
-        backgroundColor: filled ? color : "transparent",
-      }}
-    >
-      <Text style={{ color: filled ? theme.colors.surface0 : color, fontSize: fonts.meta, fontWeight: "700" }}>{label}</Text>
     </View>
   );
 }
@@ -303,10 +260,8 @@ export interface FoldItem {
 }
 
 /**
- * 결정 카드의 펼침 층 (DESIGN.md 결정 카드). 카드는 처음에 상황, 결정할 것, 버튼만 보이고 근거와 원문은 여기에 접어 둔다.
- * 모든 항목을 펼쳐 두자 결정 하나에 읽을 것이 너무 많아 판단이 늦어졌다 (2026-11-26 사용자 피드백).
- * 지우지 않고 접는 이유는, 규칙이 카드에 보이라고 정한 정보(워커가 고른 것 RULES.md §10, 자동 결정의 판정 §8)가 있기 때문이다.
- * 닫혀 있어도 무엇이 들어 있는지 알 수 있게 구역 이름을 버튼 옆에 보인다.
+ * 카드의 펼침 층. 카드는 처음에 결정할 것과 버튼만 보이고 근거와 원문은 여기에 접어 둔다. 모두 펼쳐 두면 읽을 것이 너무 많아
+ * 판단이 늦어진다. 닫혀 있어도 무엇이 들어 있는지 알 수 있게 구역 이름을 버튼 옆에 보인다.
  */
 export function Fold({ items, ctx }: { items: readonly (FoldItem | null | false)[]; ctx: ViewContext }) {
   const [open, setOpen] = useState(false);
@@ -349,24 +304,137 @@ export function Fold({ items, ctx }: { items: readonly (FoldItem | null | false)
   );
 }
 
-/**
- * 카드의 결정 구역. 구분선 위는 상황, 아래는 결정이다. 결정할 것은 버튼 바로 위에 둔다. 위에서부터 읽으면 상황을 이해한 자리에서
- * 바로 고르고 누를 수 있게 하기 위해서다 (2026-11-25, 2026-11-26 사용자 피드백). question 에는 '선택지를 고르세요' 같은 안내가 아니라
- * 실제로 정할 것을 쓴다. 안내 문구를 가장 크게 보이자 진짜 질문이 카드 중간에 묻혔다.
- */
-export function Decide({ question, children, ctx }: { question?: string | null; children?: ReactNode; ctx: ViewContext }) {
+export function CodeBox({ text, ctx, maxHeight }: { text: string; ctx: ViewContext; maxHeight?: number }) {
+  const body = (
+    <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.meta, fontFamily: "monospace", lineHeight: Math.round(ctx.fonts.meta * 1.5) }}>
+      {text}
+    </Text>
+  );
   return (
-    <View style={{ borderTopWidth: 1, borderColor: ctx.theme.colors.border, paddingTop: 12 }}>
-      <Row label={ctx.t("inbox.decide")} ctx={ctx}>
-        <View style={{ gap: 8 }}>
-          {question ? (
-            <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>
-              {question}
-            </Text>
-          ) : null}
-          {children}
-        </View>
-      </Row>
+    <View style={{ padding: 10, borderRadius: 6, borderWidth: 1, borderColor: ctx.theme.colors.border, backgroundColor: ctx.theme.colors.surface0 }}>
+      {maxHeight ? <ScrollView style={{ maxHeight }}>{body}</ScrollView> : body}
     </View>
+  );
+}
+
+export function TextBox({
+  value,
+  onChange,
+  placeholder,
+  ctx,
+  minHeight = 72,
+}: {
+  value: string;
+  onChange(text: string): void;
+  placeholder: string;
+  ctx: ViewContext;
+  minHeight?: number;
+}) {
+  return (
+    <TextInput
+      value={value}
+      onChangeText={onChange}
+      placeholder={placeholder}
+      placeholderTextColor={ctx.theme.colors.foregroundMuted}
+      multiline
+      accessibilityLabel={placeholder}
+      style={{
+        minHeight,
+        padding: 10,
+        borderRadius: 8,
+        borderWidth: 1,
+        borderColor: ctx.theme.colors.border,
+        backgroundColor: ctx.theme.colors.surface0,
+        color: ctx.theme.colors.foreground,
+        fontSize: ctx.fonts.body,
+        textAlignVertical: "top",
+      }}
+    />
+  );
+}
+
+/** 글을 쓰고 보내는 상자. 보내면 비운다. */
+export function InstructionBox({
+  placeholder,
+  submitLabel,
+  onSubmit,
+  busy,
+  ctx,
+}: {
+  placeholder: string;
+  submitLabel: string;
+  onSubmit(text: string): Promise<unknown> | void;
+  busy: boolean;
+  ctx: ViewContext;
+}) {
+  const [text, setText] = useState("");
+  return (
+    <View style={{ gap: 8 }}>
+      <TextBox value={text} onChange={setText} placeholder={placeholder} ctx={ctx} />
+      <View style={{ flexDirection: "row" }}>
+        <CtaButton
+          label={submitLabel}
+          tone="primary"
+          disabled={busy || text.trim().length === 0}
+          theme={ctx.theme}
+          onPress={() => {
+            const done = onSubmit(text.trim());
+            if (done) void Promise.resolve(done).then(() => setText(""), () => undefined);
+            else setText("");
+          }}
+        />
+      </View>
+    </View>
+  );
+}
+
+export function ErrorLine({ error, ctx }: { error: unknown; ctx: ViewContext }) {
+  if (!error) return null;
+  return (
+    <Text style={{ color: ctx.theme.colors.statusDanger, fontSize: ctx.fonts.meta }}>
+      {ctx.t("common.failed", { message: error instanceof Error ? error.message : String(error) })}
+    </Text>
+  );
+}
+
+/** 카드 틀. 왼쪽 띠 색으로 사람을 기다리는지(빨강), 확인할 것인지(노랑)를 가른다. */
+export function Card({ color, ctx, children }: { color: string; ctx: ViewContext; children: ReactNode }) {
+  return (
+    <View
+      style={{
+        borderWidth: 1,
+        borderColor: ctx.theme.colors.border,
+        borderLeftWidth: 3,
+        borderLeftColor: color,
+        borderRadius: 10,
+        backgroundColor: ctx.theme.colors.surface1,
+        padding: ctx.compact ? 12 : 16,
+        gap: 12,
+      }}
+    >
+      {children}
+    </View>
+  );
+}
+
+export function SectionHeader({ title, count, hint, color, ctx }: { title: string; count?: number; hint?: string; color?: string; ctx: ViewContext }) {
+  return (
+    <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "baseline", gap: 8 }}>
+      <Text style={{ color: color ?? ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600" }}>{title}</Text>
+      {count !== undefined ? <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading }}>{String(count)}</Text> : null}
+      {hint ? <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{hint}</Text> : null}
+    </View>
+  );
+}
+
+export function Muted({ text, ctx }: { text: string; ctx: ViewContext }) {
+  return <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{text}</Text>;
+}
+
+export function Body({ text, ctx, strong = false }: { text: string; ctx: ViewContext; strong?: boolean }) {
+  return (
+    <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.45), fontWeight: strong ? "600" : "400" }}>
+      {text}
+    </Text>
   );
 }
