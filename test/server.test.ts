@@ -11,7 +11,7 @@ import { Actions, answerFromQuestion } from "../server/actions";
 import { agentInstructions, recordDecision, relativeTo, saveSuggestion, shouldStop } from "../server/agent-tools";
 import { outputLanguage } from "../shared/settings";
 import { readError } from "../shared/errors";
-import { MESSAGE_SEPARATOR, answerMessage, askMessage, readSentMessage, redoMessage, requestMessage, revertMessage } from "../shared/messages";
+import { MESSAGE_SEPARATOR, answerMessage, describeSentMessage, askMessage, readSentMessage, redoMessage, requestMessage, revertMessage } from "../shared/messages";
 import { AgentGoneError, Outbox } from "../server/outbox";
 import { replayLostCalls } from "../server/replay";
 import type { PaseoApi } from "../server/paseo-api";
@@ -525,4 +525,11 @@ test("coded errors keep their code through a message string", () => {
   assert.deepEqual(readError(sent), { code: "agentGone", message: "Plugin RPC failed: Agent a1 is gone (archived or deleted). Nothing was sent." });
   assert.deepEqual(readError(new Error("git diff: fatal: bad revision")), { code: null, message: "git diff: fatal: bad revision" });
   assert.deepEqual(readError("x [coordinator:unknownCode]"), { code: null, message: "x" });
+});
+
+test("the summary sees what the person did, not the plugin's long message", () => {
+  const decisions = [{ id: "d1", number: 26, title: "Box count", decision: "N before 박스 must be a standalone number." }];
+  const sent = [answerMessage(decisions, composeAnswer(decisions, {}, "테스트 먼저")), requestMessage("README 에 적기")].join(MESSAGE_SEPARATOR);
+  assert.equal(describeSentMessage(sent), "[answered stopped decisions] #26 go ahead as proposed. Note: 테스트 먼저\n[additional request] README 에 적기");
+  assert.equal(describeSentMessage("박스 수량 고쳐 줘"), "박스 수량 고쳐 줘");
 });

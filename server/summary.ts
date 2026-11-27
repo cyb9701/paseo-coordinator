@@ -3,6 +3,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { describeSentMessage } from "../shared/messages";
 import { type CoordinatorSettings, type Language, outputLanguage } from "../shared/settings";
 import { type CoordinatorState, type Decision, type Summary, summaryResultSchema } from "../shared/model";
 import type { PaseoApi } from "./paseo-api";
@@ -174,7 +175,8 @@ export class Summarizer {
     // 보드와 같은 묶음(지켜보는 프로젝트 전체)으로 읽어 캐시를 함께 쓴다. 한 프로젝트만 읽으면 git 을 한 번 더 돌린다.
     const statuses = entry ? await this.statuses.read(paseo, settingsProjects(await this.readSettings().catch(() => null), entry.projectId)).catch(() => []) : [];
     const status = statuses.find((item) => item.workspaceId === workspaceId);
-    const users = exchanges.filter((item) => item.role === "user");
+    // 플러그인이 사람 대신 보낸 메시지도 사람 메시지로 남는다. 원문은 길고 에이전트용이라, 사람이 한 일만 한 줄로 줄여 넣는다.
+    const users = exchanges.filter((item) => item.role === "user").map((item) => ({ ...item, text: describeSentMessage(item.text) }));
     const lastAgent = [...exchanges].reverse().find((item) => item.role === "agent");
     const errors = exchanges.filter((item) => item.role === "error").slice(-2);
     const earlier = state.decisions.filter((item) => item.workspaceId === workspaceId && item.status !== "waiting").slice(-15);
@@ -186,7 +188,7 @@ export class Summarizer {
       `Workspace: ${entry ? `${entry.title ?? entry.name} (project ${entry.projectDisplayName}, branch ${entry.gitRuntime?.currentBranch ?? "unknown"})` : workspaceId}`,
       `Agent: ${snapshot?.agent.title ?? agentId}, status ${snapshot?.agent.status ?? "unknown"}${snapshot?.agent.lastError ? `, last error: ${clip(snapshot.agent.lastError, 1000)}` : ""}`,
       users.length
-        ? `What the person asked (the earliest message in the recent history, then the latest messages):\n${[users[0]!, ...users.slice(1).slice(-3)].map((item) => `- ${clip(item.text, 2000)}`).join("\n")}`
+        ? `What the person asked or did (the earliest message in the recent history, then the latest messages; [bracketed] lines are actions the person took in the coordinator):\n${[users[0]!, ...users.slice(1).slice(-3)].map((item) => `- ${clip(item.text, 2000)}`).join("\n")}`
         : "No request text was found.",
       lastAgent ? `The agent's last message:\n${clip(lastAgent.text, 4000)}` : "",
       errors.length ? `Errors:\n${errors.map((item) => `- ${clip(item.text, 1000)}`).join("\n")}` : "",

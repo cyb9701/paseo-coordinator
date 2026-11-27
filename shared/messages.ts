@@ -108,3 +108,24 @@ function readPart(text: string): SentPart {
 export function readSentMessage(text: string): SentPart[] {
   return text.split(MESSAGE_SEPARATOR).map(readPart);
 }
+
+/**
+ * 요약 에이전트에게 줄 한 줄. 플러그인 메시지 원문은 결정 목록과 에이전트용 지시를 되풀이해 길고, 사람이 한 일이 묻힌다. 사람이 고르거나
+ * 쓴 것만 남긴다. 요약 프롬프트는 영어라 이 줄도 영어로 쓴다.
+ */
+export function describeSentMessage(text: string): string {
+  const ids = (numbers: readonly number[]) => numbers.map((number) => `#${number}`).join(", ");
+  return readSentMessage(text)
+    .map((part) => {
+      if (part.kind === "text") return part.text;
+      if (part.kind === "request") return `[additional request] ${part.text}`;
+      if (part.kind === "ask") return `[asked before deciding] ${part.text}`;
+      if (part.kind === "answer") {
+        const picks = part.choices.map((item) => (item.choice ? `#${item.number} use "${item.choice}" instead of the proposal` : `#${item.number} go ahead as proposed`));
+        return `[answered stopped decisions] ${picks.join("; ")}${part.note ? `. Note: ${part.note}` : ""}`;
+      }
+      if (part.kind === "revert") return `[asked to revert decisions ${ids(part.numbers)}]${part.note ? ` Note: ${part.note}` : ""}`;
+      return `[asked to redo decisions ${ids(part.numbers)} differently] ${part.note}`;
+    })
+    .join("\n");
+}
