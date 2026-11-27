@@ -164,7 +164,6 @@ export const answerDecisionsRpc = defineRpc({
   output: z.object({ delivery: z.enum(["sent", "queued"]) }),
 });
 
-/** 진행한 결정을 확인한다. undo 면 text 를 되돌리기 지시로 에이전트에게 보낸다. */
 /**
  * 진행한 결정을 확인한다. approved 는 그대로 둔다. revert 는 되돌리라고 보내고(text 는 덧붙일 말, 없어도 된다),
  * undo 는 text 로 쓴 방식으로 바꿔서 다시 하라고 보낸다(text 필요).

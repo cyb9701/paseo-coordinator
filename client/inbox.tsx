@@ -1,8 +1,10 @@
 import type { PluginAgentSnapshot } from "@getpaseo/plugin";
 import { useAgents, useWorkspace } from "@getpaseo/plugin/client";
 import { Text, View } from "react-native";
-import { type Decision, openDecisions, unreviewedDecisions } from "../shared/model";
-import { reactionCount, statusOf, useCoordinatorState, useWorkspaceStatuses } from "./coordinator-state";
+import type { Decision } from "../shared/model";
+import { inboxGroups, reactionCount } from "./attention";
+import { toWorkspaceRef } from "./refs";
+import { statusOf, useCoordinatorState, useWorkspaceStatuses } from "./coordinator-state";
 import { AgentAttention } from "./permission-cards";
 import { useClassifier, usePending } from "./pending-store";
 import { WorkspaceProjectChip } from "./project-chip";
@@ -14,17 +16,11 @@ function oldestFirst(a: PluginAgentSnapshot, b: PluginAgentSnapshot): number {
   return Date.parse(a.lastActivityAt) - Date.parse(b.lastActivityAt);
 }
 
-function groupBy<T>(items: readonly T[], key: (item: T) => string): [string, T[]][] {
-  const groups = new Map<string, T[]>();
-  for (const item of items) groups.set(key(item), [...(groups.get(key(item)) ?? []), item]);
-  return [...groups.entries()];
-}
-
 /** 확인 필요 카드: 한 워크스페이스에서 에이전트가 기록하고 진행한 결정들. 판단 흐름을 그대로 펼쳐 보인다. */
 function ReviewCard({ workspaceId, decisions, ctx }: { workspaceId: string; decisions: readonly Decision[]; ctx: ViewContext }) {
   const { state } = useCoordinatorState();
   const statuses = useWorkspaceStatuses(ctx.hostId);
-  const name = useWorkspace(workspaceId, (w) => w.title ?? w.name);
+  const name = useWorkspace(toWorkspaceRef(ctx.hostId, workspaceId), (w) => w.title ?? w.name);
   const all = (state?.decisions ?? []).filter((item) => item.workspaceId === workspaceId);
   return (
     <Card color={ctx.theme.colors.statusWarning} ctx={ctx}>
@@ -48,8 +44,7 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
   const directory = usePending();
   const reacting = useAgents({ hosts: [ctx.hostId], where: (agent) => classify.needsMyDecision(agent), orderBy: oldestFirst });
   const { state } = useCoordinatorState();
-  const stopped = state ? groupBy(openDecisions(state), (item) => item.agentId).sort((a, b) => a[1][0]!.at.localeCompare(b[1][0]!.at)) : [];
-  const review = state ? groupBy(unreviewedDecisions(state), (item) => item.workspaceId).sort((a, b) => a[1][0]!.at.localeCompare(b[1][0]!.at)) : [];
+  const { stopped, review } = inboxGroups(state);
   const stoppedAgents = new Set(stopped.map(([agentId]) => agentId));
   const reactCount = reactionCount(state, reacting.map((ref) => ref.id), directory);
   const reviewCount = review.reduce((total, [, items]) => total + items.length, 0);

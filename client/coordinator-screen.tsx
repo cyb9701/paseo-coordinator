@@ -2,7 +2,8 @@ import type { PluginScreenProps, PluginSurfaceProps } from "@getpaseo/plugin/cli
 import { useAgents } from "@getpaseo/plugin/client";
 import { useState } from "react";
 import { ScrollView, Text, View } from "react-native";
-import { CoordinatorStateProvider, reactionCount, useCoordinatorState } from "./coordinator-state";
+import { reactionCount } from "./attention";
+import { CoordinatorStateProvider, useCoordinatorState } from "./coordinator-state";
 import { FontProvider, useFonts } from "./fonts";
 import { useT } from "./i18n";
 import { InboxView } from "./inbox";
@@ -16,9 +17,12 @@ import { CtaButton, TabBar, type ViewContext } from "./ui";
 
 type Tab = "inbox" | "progress" | "requests" | "settings";
 
+/**
+ * 화면은 한 호스트의 것이다. 호스트를 바꾸면 key 로 트리를 새로 만들어, 앞 호스트의 탭·입력·구독이 다음 호스트에 남지 않게 한다.
+ */
 export function CoordinatorScreen(props: PluginScreenProps) {
   return (
-    <FontProvider>
+    <FontProvider key={props.host.id}>
       <PendingProvider>
         <CoordinatorStateProvider>
           <ScreenBody {...props} />

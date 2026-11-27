@@ -2,7 +2,7 @@
  * 사람이 화면에서 마주칠 수 있는 서버 오류. 오류는 RPC 를 거치며 message 문자열만 남으므로, 문구 끝에 코드를 붙여 두고 화면이 그 코드로
  * 화면 언어 문구를 고른다. 코드가 없는 오류(git, Paseo SDK)는 원문 그대로 보인다.
  */
-export const ERROR_CODES = ["agentGone", "noWaitingDecision", "notReviewable", "suggestionClosed", "requestClosed", "requestSent", "noBaseBranch"] as const;
+export const ERROR_CODES = ["agentGone", "noWaitingDecision", "notReviewable", "suggestionClosed", "requestClosed", "requestSent", "noBaseBranch", "agentNotInWorkspace"] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
 const CODE_PATTERN = / ?\[coordinator:(\w+)\]/;

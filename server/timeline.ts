@@ -1,9 +1,12 @@
 import type { PaseoApi } from "./paseo-api";
 
-interface Entry {
-  item?: { type?: string; text?: string; message?: string; name?: string; agentMessage?: { text?: string } };
-  timestamp?: string;
-  createdAt?: string;
+type TimelinePage = Awaited<ReturnType<ReturnType<PaseoApi["agents"]["ref"]>["timeline"]["refetch"]>>;
+export type TimelineEntry = TimelinePage["entries"][number];
+export type TimelineItem = TimelineEntry["item"];
+
+/** 읽지 못한 페이지(error)는 빈 목록으로 본다. 앞 상황이 조금 빠질 뿐 결정이나 답을 잘못 만들지는 않는다. */
+export function timelineEntries(page: TimelinePage): readonly TimelineEntry[] {
+  return page.error ? [] : page.entries;
 }
 
 /** 요약과 화면에 넣을 대화. 도구 호출과 생각은 길고 사람이 판단하는 데 덜 필요해서, 사람과 에이전트가 주고받은 말과 에러만 남긴다. */
@@ -17,21 +20,19 @@ export interface Exchange {
 const SYSTEM_BLOCK = /<paseo-system[\s\S]*?(<\/paseo-system>|$)/g;
 
 export async function recentExchanges(paseo: PaseoApi, agentId: string, limit = 200): Promise<Exchange[]> {
-  const page = await paseo.agents.ref(agentId).timeline.refetch({ direction: "tail", limit });
-  const entries = ((page as { entries?: readonly Entry[] }).entries ?? []) as readonly Entry[];
+  const entries = timelineEntries(await paseo.agents.ref(agentId).timeline.refetch({ direction: "tail", limit }));
   const out: Exchange[] = [];
-  for (const entry of entries) {
-    const item = entry.item;
-    const at = entry.timestamp ?? entry.createdAt ?? null;
-    if (item?.type === "user_message" && item.text) {
+  for (const { item, timestamp } of entries) {
+    const at = timestamp ?? null;
+    if (item.type === "user_message" && item.text) {
       const text = item.text.replace(SYSTEM_BLOCK, "").trim();
       if (text) out.push({ role: "user", text, at });
-    } else if (item?.type === "tool_call" && item.name === "agent_message" && item.agentMessage?.text?.trim()) {
+    } else if (item.type === "tool_call" && item.name === "agent_message" && item.agentMessage?.text?.trim()) {
       // 다른 에이전트(예: 사람이 쓰는 상위 에이전트)가 보낸 일감. 이 에이전트에게는 사람의 요청과 같은 자리다.
       out.push({ role: "user", text: item.agentMessage.text.trim(), at });
-    } else if (item?.type === "assistant_message" && item.text?.trim()) {
+    } else if (item.type === "assistant_message" && item.text.trim()) {
       out.push({ role: "agent", text: item.text.trim(), at });
-    } else if (item?.type === "error" && item.message) {
+    } else if (item.type === "error" && item.message) {
       out.push({ role: "error", text: item.message, at });
     }
   }

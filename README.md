@@ -76,7 +76,7 @@ Open **Coordinator** from the sidebar, go to **Settings** and choose the project
 
 ## What it reads, runs and stores
 
-- State (decisions, requests, questions you asked agents, summaries, messages waiting for a busy agent): `plugin-data/paseo-coordinator/state.json` under the Paseo home (`$PASEO_HOME` or `~/.paseo`).
+- State (decisions, requests, questions you asked agents, summaries, messages waiting for a busy agent): `plugin-data/paseo-coordinator/state.json` under the Paseo home (`$PASEO_HOME` or `~/.paseo`), readable only by your account.
 - It reads each watched agent's messages to show what was asked and to build summaries.
 - It runs read-only `git` commands (`rev-parse`, `merge-base`, `diff`, `ls-files`), at most four workspaces at a time, in watched workspaces. Diffs are shown only for files the workspace changed.
 - A summary runs one background agent with the summary model (default `claude/claude-haiku-5-5`) in a single hidden workspace the plugin reuses, then archives the agent. With Claude its tools are removed; with any provider it runs in a mode that asks for permission, and the plugin denies every request. Summaries run only when an agent stops for your decision, a turn fails (at most once every 10 minutes per agent), or you ask for one; at most two run at once. Turning summaries off stops the automatic ones; the button on a card still works.
@@ -89,14 +89,16 @@ See [OVERVIEW.md](OVERVIEW.md) for limits.
 ## Develop
 
 ```bash
-npm install
+npm ci
 npm run typecheck
-npm test                                # server tests with a fake Paseo API and temporary git repositories
+npm test                                # server and screen-logic tests with a fake Paseo API and temporary git repositories
 paseo plugin install /absolute/path/to/paseo-coordinator
 paseo plugin reload paseo-coordinator   # after each change
 ```
 
-No build step and no runtime dependencies beyond what Paseo provides. `npm test` covers the stop rule, decision paths, answering stopped decisions in one message, delivery only to idle agents, refusing to send to a gone agent, reviews and undo instructions, requests and suggestions, revert and redo, asking first, summary batching, the error-summary interval, summaries interrupted by a restart, answers given in a question window, tool calls lost to a restart, and, against real git worktrees, changed files, overlaps, non-ASCII names, a workspace in a repository subfolder, separate caches per project set and the diff path guard.
+No build step and no runtime dependencies beyond what Paseo provides. `npm test` covers the stop rule, decision paths, answering stopped decisions in one message, delivery only to idle agents, refusing to send to a gone agent, reviews and undo instructions, requests and suggestions, revert and redo, asking first, summary batching, the error-summary interval, summaries interrupted by a restart, answers given in a question window, tool calls lost to a restart, and, against real git worktrees, changed files, overlaps, non-ASCII names, a workspace in a repository subfolder, separate caches per project set and the diff path guard. `test/client.test.ts` covers the screen logic kept out of `.tsx` files: badge and inbox counts, row columns and order, request recipients, which summary a card shows, previews and host-scoped refs.
+
+Releases are the `vX.Y.Z` git tags the release workflow creates from conventional commits; `package.json` keeps `0.0.0`. Pull requests run typecheck and tests (`.github/workflows/verify.yml`) before anything reaches `main`, which is what users install.
 
 ## Documents
 

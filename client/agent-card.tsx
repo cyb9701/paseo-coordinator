@@ -3,34 +3,23 @@ import { useAgent, useAgents, usePaseo } from "@getpaseo/plugin/client";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
+import { lastAssistantText, previewBucket } from "./agent-preview";
 import { type ColumnKey, columnColor, isVisibleAgent, stateColor } from "./agent-state";
 import { useClassifier } from "./pending-store";
 import { formatAgo } from "./time";
 import { CtaButton, type ViewContext } from "./ui";
 
-// 실행 중인 에이전트는 lastActivityAt 이 계속 바뀐다. 바뀔 때마다 timeline 을 다시 읽지 않도록 30초 단위로 묶는다.
-function previewBucket(lastActivityAt: string, running: boolean): string {
-  if (!running) return lastActivityAt;
-  return String(Math.floor(Date.parse(lastActivityAt) / 30_000));
-}
-
 /** 카드 본문에 보일 마지막 어시스턴트 응답. 사람이 카드만 보고 무슨 일이 있었는지 알 수 있게 한다. */
-function useLastAssistantText(agentId: string, hostId: string, bucket: string) {
+function useLastAssistantText(agent: AgentRef, bucket: string | null) {
   const paseo = usePaseo();
   return useQuery({
-    queryKey: ["coordinator", "last-assistant-text", hostId, agentId, bucket],
+    queryKey: ["coordinator", "last-assistant-text", agent.hostId, agent.id, bucket],
+    // 에이전트가 목록에서 사라지면(닫힘, 다른 호스트) 읽을 것이 없다.
+    enabled: bucket !== null,
     staleTime: Infinity,
     // 30초마다 key 가 바뀌는데, 이전 값을 유지하지 않으면 새로 읽는 동안 미리보기가 사라졌다 나타난다.
     placeholderData: keepPreviousData,
-    queryFn: async () => {
-      const page = await paseo.agents.ref(agentId).timeline.refetch({ direction: "tail", limit: 20 });
-      const entries = (page as { entries?: readonly { item?: { type?: string; text?: string } }[] }).entries ?? [];
-      for (let index = entries.length - 1; index >= 0; index -= 1) {
-        const item = entries[index]?.item;
-        if (item?.type === "assistant_message" && item.text?.trim()) return item.text.replace(/\s+/g, " ").trim();
-      }
-      return null;
-    },
+    queryFn: async () => lastAssistantText(await paseo.agents.ref(agent).timeline.refetch({ direction: "tail", limit: 20 })),
   });
 }
 
@@ -125,7 +114,7 @@ export function AgentCard({
     parentAgentId: a.parentAgentId,
   }));
   const running = agent?.status === "running";
-  const preview = useLastAssistantText(agentRef.id, ctx.hostId, agent ? previewBucket(agent.lastActivityAt, running) : "");
+  const preview = useLastAssistantText(agentRef, agent ? previewBucket(agent.lastActivityAt, running) : null);
   if (!agent) return null;
   const state = classify.state(agent);
   const color = columnColor(column, ctx.theme);

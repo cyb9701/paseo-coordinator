@@ -3,8 +3,11 @@ import { useAgent, usePaseo, useRpc, useWorkspace } from "@getpaseo/plugin/clien
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
-import { latestSummary, sendInstructionRpc } from "../shared/model";
+import { sendInstructionRpc } from "../shared/model";
 import { useCoordinatorState } from "./coordinator-state";
+import { attentionCards } from "./attention";
+import { summaryForError } from "./card-summaries";
+import { toAgentRef, toWorkspaceRef } from "./refs";
 import { usePending } from "./pending-store";
 import {
   type PermissionAction,
@@ -37,7 +40,7 @@ export interface CardAgent {
 
 /** 카드 머리: 종류, 프로젝트, 워크스페이스 › 에이전트, 기다린 시간. 여러 워크스페이스의 카드가 섞여도 어디 일인지 바로 보이게 한다. */
 export function CardHead({ kind, color, agent, ctx }: { kind: string; color: string; agent: CardAgent; ctx: ViewContext }) {
-  const workspace = useWorkspace(agent.workspaceId, (w) => w.title ?? w.name);
+  const workspace = useWorkspace(toWorkspaceRef(agent.hostId, agent.workspaceId), (w) => w.title ?? w.name);
   // 윗줄은 종류·프로젝트·기다린 시간, 아랫줄은 워크스페이스 › 에이전트다. 한 줄에 모두 두면 좁은 화면에서 이름이 잘리고 시간이
   // 혼자 다음 줄로 떨어진다.
   return (
@@ -168,7 +171,7 @@ function PermissionCard({ request, agent, ctx }: { request: PermissionRequest; a
 export function PermissionBody({ request, agent, ctx }: { request: PermissionRequest; agent: CardAgent; ctx: ViewContext }) {
   const paseo = usePaseo();
   const respond = useMutation({
-    mutationFn: (response: PermissionResponse) => paseo.agents.ref(agent.agentId).respondToPermission({ requestId: request.id, response }),
+    mutationFn: (response: PermissionResponse) => paseo.agents.ref(toAgentRef(agent.hostId, agent.agentId)).respondToPermission({ requestId: request.id, response }),
   });
   const [instructing, setInstructing] = useState(false);
   const [selected, setSelected] = useState<Record<string, string[]>>({});
@@ -280,9 +283,7 @@ function ErrorCard({ message, agent, ctx }: { message: string | null; agent: Car
   const instruct = useRpc(sendInstructionRpc);
   const send = useMutation({ mutationFn: (text: string) => instruct({ agentId: agent.agentId, text }) });
   const [instructing, setInstructing] = useState(false);
-  const summary = state ? latestSummary(state, agent.agentId) : null;
-  // 이 에러 뒤에 만든 요약만 이 에러의 설명이다.
-  const current = summary && Date.parse(summary.at) >= Date.parse(agent.since) - 60_000 ? summary : null;
+  const current = summaryForError(state, agent.agentId, agent.since);
   return (
     <Card color={ctx.theme.colors.statusDanger} ctx={ctx}>
       <CardHead kind={ctx.t("kinds.error")} color={ctx.theme.colors.statusDanger} agent={agent} ctx={ctx} />
@@ -333,8 +334,8 @@ export function AgentAttention({ agentRef, ctx, folded = false }: { agentRef: Ag
     since: agent.lastActivityAt,
   };
   // 멈춘 결정이 있는 에이전트의 질문은 그 결정 카드 안에 그린다(folded). 카드가 두 장 뜨지 않게 여기서는 뺀다.
-  const pending = (directory.pending.get(agentRef.id) ?? []).filter((request) => !(folded && request.kind === "question"));
-  if (folded && pending.length === 0 && (directory.pending.get(agentRef.id) ?? []).length > 0) return null;
+  const { requests: pending, hidden } = attentionCards(directory, agentRef.id, folded);
+  if (hidden) return null;
   if (pending.length > 0) {
     return (
       <>
@@ -351,7 +352,13 @@ export function AgentAttention({ agentRef, ctx, folded = false }: { agentRef: Ag
   return (
     <Card color={ctx.theme.colors.statusDanger} ctx={ctx}>
       <CardHead kind={ctx.t("kinds.other")} color={ctx.theme.colors.statusDanger} agent={cardAgent} ctx={ctx} />
-      <Text style={{ color: ctx.theme.colors.foreground }}>{directory.ready ? ctx.t("permission.requestNotFound") : ctx.t("permission.loadingRequest")}</Text>
+      <Text style={{ color: ctx.theme.colors.foreground }}>
+        {directory.failure
+          ? ctx.t("permission.requestListFailed", { reason: directory.failure })
+          : directory.ready
+            ? ctx.t("permission.requestNotFound")
+            : ctx.t("permission.loadingRequest")}
+      </Text>
       <View style={{ flexDirection: "row" }}>
         <OpenAgentButton agent={cardAgent} ctx={ctx} />
       </View>

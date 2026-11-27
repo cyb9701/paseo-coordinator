@@ -9,6 +9,17 @@ export const RECORD_DECISION_TOOL = "record_decision";
 export const ADD_FOLLOWUP_TOOL = "add_followup";
 export const AGENT_TOOL_NAMES = [RECORD_DECISION_TOOL, ADD_FOLLOWUP_TOOL];
 
+/** 플러그인 도구는 daemon 의 "paseo" MCP 서버로 나가서, Claude 에서는 이 접두사가 붙은 이름이 된다. */
+export const PLUGIN_MCP_PREFIX = "mcp__paseo__";
+
+/**
+ * 이 플러그인 도구의 이름인지. 이름 끝만 비교하면 다른 MCP 서버의 같은 이름 도구도 걸린다. 권한 허용과 잃은 호출 되살리기가 같은
+ * 기준을 쓴다.
+ */
+export function isPluginTool(name: string, tool: string): boolean {
+  return name === tool || name === `${PLUGIN_MCP_PREFIX}${tool}`;
+}
+
 /**
  * 사람이 정할 결정. 범위, 데이터 구조, 공개 인터페이스, 사용자에게 보이는 동작은 종류만으로 멈춘다. 되돌리기 어렵거나 확인하지 않은
  * 가정에 기대는 결정도 멈춘다. 나머지는 기록하고 진행해서 나중에 몰아서 확인한다. 에이전트가 아니라 플러그인이 판정해서 기준이 흔들리지 않는다.
@@ -53,17 +64,20 @@ export interface DecisionContext {
   locate(agent: AgentToolContext["agent"], paseo: PaseoApi): Promise<{ workspaceId: string; projectId: string | null; cwd: string } | null>;
 }
 
-export async function recordDecision(
-  store: StateStore,
-  agentId: string,
-  where: { workspaceId: string; projectId: string | null; cwd: string },
-  input: DecisionInput,
-  callId: string | null = null,
-): Promise<Decision> {
+type Where = { workspaceId: string; projectId: string | null; cwd: string };
+
+/**
+ * 결정을 기록한다. callId 가 있으면 같은 호출을 이미 기록했는지 저장하는 자리에서 확인하고, 이미 있으면 null 을 돌려준다. 확인을
+ * 밖에서 미리 하면 턴 끝과 질문 창 hook 이 겹칠 때 같은 호출이 두 번 기록된다.
+ */
+export async function recordDecision(store: StateStore, agentId: string, where: Where, input: DecisionInput): Promise<Decision>;
+export async function recordDecision(store: StateStore, agentId: string, where: Where, input: DecisionInput, callId: string): Promise<Decision | null>;
+export async function recordDecision(store: StateStore, agentId: string, where: Where, input: DecisionInput, callId: string | null = null): Promise<Decision | null> {
   const stop = shouldStop(input);
   // 에이전트는 절대 경로나 ./ 로 시작하는 경로를 적기도 한다. git 이 내는 워크스페이스 기준 경로로 맞춰야 diff 와 짝지을 수 있다.
   const files = [...new Set(input.files.map((file) => relativeTo(where.cwd, file)))];
   return store.update((state) => {
+    if (callId && state.decisions.some((item) => item.callId === callId)) return { state, result: null };
     const { state: next, id, number } = nextId(state, "d");
     const decision: Decision = {
       ...input,
@@ -115,15 +129,16 @@ export function decisionTools(store: StateStore, context: DecisionContext) {
   return [record, followup];
 }
 
-/** 에이전트가 남긴 범위 밖의 일. 사람이 추가 요청 목록에서 보내거나 버린다. */
+/** 에이전트가 남긴 범위 밖의 일. 사람이 추가 요청 목록에서 보내거나 버린다. 같은 callId 를 이미 저장했으면 false. */
 export async function saveSuggestion(
   store: StateStore,
   agentId: string,
   where: { workspaceId: string; projectId: string | null } | null,
   text: string,
   callId: string | null = null,
-): Promise<void> {
-  await store.update((state) => {
+): Promise<boolean> {
+  return store.update((state) => {
+    if (callId && state.requests.some((item) => item.callId === callId)) return { state, result: false };
     const { state: next, id } = nextId(state, "r");
     const request: WorkRequest = {
       id,
@@ -137,7 +152,7 @@ export async function saveSuggestion(
       sentAt: null,
       callId,
     };
-    return { state: { ...next, requests: [...next.requests, request] }, result: undefined };
+    return { state: { ...next, requests: [...next.requests, request] }, result: true };
   });
 }
 

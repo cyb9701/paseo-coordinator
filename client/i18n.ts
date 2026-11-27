@@ -108,6 +108,7 @@ const en = {
     errorNoMessage: "The agent stopped with an error and no message.",
     requestNotFound: "The request is no longer pending. Open the agent to check.",
     loadingRequest: "Loading the request…",
+    requestListFailed: "Could not read pending requests ({{reason}}). Retrying shortly; open the agent to answer now.",
   },
   decisionKinds: {
     scope: "Scope",
@@ -323,6 +324,7 @@ const en = {
     requestClosed: "This request was already sent or closed.",
     requestSent: "This request was already sent, so it cannot be cancelled.",
     noBaseBranch: "No base branch found to compare changes with.",
+    agentNotInWorkspace: "That agent is no longer in this workspace. Nothing was sent; pick the agent again.",
   },
 };
 
@@ -433,6 +435,7 @@ const ko: typeof en = {
     errorNoMessage: "에이전트가 메시지 없이 에러로 멈췄습니다.",
     requestNotFound: "요청이 더 이상 대기 중이 아닙니다. 에이전트를 열어 확인하세요.",
     loadingRequest: "요청을 불러오는 중…",
+    requestListFailed: "대기 중인 요청을 읽지 못했습니다({{reason}}). 곧 다시 시도합니다. 지금 답하려면 에이전트를 여세요.",
   },
   decisionKinds: {
     scope: "범위",
@@ -648,6 +651,7 @@ const ko: typeof en = {
     requestClosed: "이 요청은 이미 보냈거나 닫혔습니다.",
     requestSent: "이 요청은 이미 보내서 취소할 수 없습니다.",
     noBaseBranch: "변경을 비교할 기준 브랜치를 찾지 못했습니다.",
+    agentNotInWorkspace: "그 에이전트는 이 워크스페이스에 없습니다. 보내지 않았으니 에이전트를 다시 고르세요.",
   },
 };
 

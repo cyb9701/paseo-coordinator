@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -37,7 +37,7 @@ async function tempStore() {
 }
 
 /** 에이전트 상태와 보낸 메시지를 흉내 내는 가짜 Paseo. 테스트가 필요한 부분만 있다. */
-function fakePaseo(options: { status?: Record<string, string>; workspaces?: unknown[]; gone?: string[] } = {}) {
+function fakePaseo(options: { status?: Record<string, string>; workspaces?: unknown[]; gone?: string[]; workspaceOf?: Record<string, string> } = {}) {
   const sent: { agentId: string; text: string }[] = [];
   const created: { prompt?: string; config?: { modeId?: string }; cwd?: string }[] = [];
   const reused: string[] = [];
@@ -47,7 +47,16 @@ function fakePaseo(options: { status?: Record<string, string>; workspaces?: unkn
         refresh: async () =>
           options.gone?.includes(agentId)
             ? null
-            : { agent: { status: options.status?.[agentId] ?? "idle", pendingPermissions: [], archivedAt: null, title: agentId, lastError: null } },
+            : {
+                agent: {
+                  status: options.status?.[agentId] ?? "idle",
+                  pendingPermissions: [],
+                  archivedAt: null,
+                  title: agentId,
+                  lastError: null,
+                  workspaceId: options.workspaceOf?.[agentId] ?? "w1",
+                },
+              },
         send: async (text: string) => {
           sent.push({ agentId, text });
         },
@@ -532,4 +541,76 @@ test("the summary sees what the person did, not the plugin's long message", () =
   const sent = [answerMessage(decisions, composeAnswer(decisions, {}, "테스트 먼저")), requestMessage("README 에 적기")].join(MESSAGE_SEPARATOR);
   assert.equal(describeSentMessage(sent), "[answered stopped decisions] #26 go ahead as proposed. Note: 테스트 먼저\n[additional request] README 에 적기");
   assert.equal(describeSentMessage("박스 수량 고쳐 줘"), "박스 수량 고쳐 줘");
+});
+
+test("a request for one workspace is not sent to an agent of another workspace", async () => {
+  const store = await tempStore();
+  const { actions } = wired(store);
+  const { paseo, sent } = fakePaseo({ workspaceOf: { a1: "w2" } });
+  await assert.rejects(actions.addRequest(paseo, { workspaceId: "w1", agentId: "a1", text: "README", projectId: "p1" }), /not in the workspace/);
+  assert.equal(sent.length, 0);
+  assert.equal((await store.read()).requests.length, 0);
+});
+
+test("after a turn, an agent that still looks busy for a moment gets the message once it is idle", async () => {
+  const store = await tempStore();
+  const outbox = new Outbox(store);
+  const sent: string[] = [];
+  let checks = 0;
+  const paseo = {
+    agents: {
+      ref: () => ({
+        // 턴 끝 hook 이 idle 반영보다 먼저 오는 경우를 흉내 낸다. 처음 두 번은 아직 running 이다.
+        refresh: async () => ({ agent: { status: (checks += 1) <= 2 ? "running" : "idle", pendingPermissions: [], archivedAt: null } }),
+        send: async (text: string) => {
+          sent.push(text);
+        },
+      }),
+    },
+  } as unknown as PaseoApi;
+  assert.equal(await outbox.deliver(paseo, "a1", "hello"), "queued");
+  assert.equal(await outbox.flushAfterTurn(paseo, "a1", [1, 1, 1]), true);
+  assert.deepEqual(sent, ["hello"]);
+  // 계속 바쁘면 몇 번만 보고 멈춘다. 메시지는 남아 다음 턴 끝에 나간다.
+  const stuck = fakePaseo({ status: { a2: "running" } });
+  await outbox.deliver(stuck.paseo, "a2", "later");
+  assert.equal(await outbox.flushAfterTurn(stuck.paseo, "a2", [1, 1]), false);
+  assert.equal((await store.read()).outbox.a2?.length, 1);
+});
+
+test("two hooks replaying the same lost calls at once record them once, and other servers' tools are left alone", async () => {
+  const store = await tempStore();
+  const entries = [
+    { item: { type: "tool_call", callId: "c1", name: "mcp__paseo__record_decision", status: "failed", error: { content: "Tool record_decision not found" }, detail: { type: "unknown", input: { ...base, kind: "api" }, output: null } } },
+    { item: { type: "tool_call", callId: "c2", name: "mcp__other__record_decision", status: "failed", error: { content: "Tool record_decision not found" }, detail: { type: "unknown", input: base, output: null } } },
+  ];
+  const paseo = { agents: { ref: () => ({ timeline: { refetch: async () => ({ entries }) } }) } } as unknown as PaseoApi;
+  const counts = await Promise.all([replayLostCalls(paseo, store, "a1", where), replayLostCalls(paseo, store, "a1", where)]);
+  assert.deepEqual(counts.sort(), [0, 1]);
+  assert.deepEqual((await store.read()).decisions.map((item) => item.callId), ["c1"]);
+});
+
+test("the state file is readable only by its owner", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coord-mode-"));
+  const store = new StateStore(directory);
+  await store.update((state) => ({ state: { ...state, appLanguage: "en" as const }, result: undefined }));
+  assert.equal((await stat(join(directory, "state.json"))).mode & 0o777, 0o600);
+});
+
+test("plugin messages read back even when the person's words look like the message format", () => {
+  const decisions = [
+    { id: "d1", number: 12, title: "Paging", decision: "page and limit" },
+    { id: "d2", number: 120, title: "Sort", decision: "by id" },
+  ];
+  // 고른 대안에 따옴표와 마침표가 들어 있고, 메모가 여러 문단이며 플러그인 문구 일부를 담고 있어도 읽힌다.
+  const note = "첫 문단\n\nAnswer:\n둘째 문단";
+  const card = composeAnswer(decisions, { d2: 'name "asc".' }, note);
+  assert.deepEqual(readAnswer({ number: 12 }, card), { kind: "card", choice: null, note });
+  assert.deepEqual(readAnswer({ number: 120 }, card), { kind: "card", choice: 'name "asc".', note });
+  assert.deepEqual(readSentMessage(answerMessage(decisions, card)), [
+    { kind: "answer", choices: [{ number: 12, choice: null }, { number: 120, choice: 'name "asc".' }], note },
+  ]);
+  assert.deepEqual(readSentMessage(revertMessage(decisions, "줄 하나\n줄 둘")), [{ kind: "revert", numbers: [12, 120], note: "줄 하나\n줄 둘" }]);
+  assert.deepEqual(readSentMessage(redoMessage(decisions, "Do it this way instead:\n다르게")), [{ kind: "redo", numbers: [12, 120], note: "Do it this way instead:\n다르게" }]);
+  assert.deepEqual(readSentMessage(askMessage("여러\n줄 질문")), [{ kind: "ask", text: "여러\n줄 질문" }]);
 });

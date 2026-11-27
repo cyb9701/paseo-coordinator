@@ -3,9 +3,10 @@ import { useAgents } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { useMemo } from "react";
 import { Text, View } from "react-native";
-import { CoordinatorStateProvider, reactionCount, useCoordinatorState } from "./coordinator-state";
+import { classifierFor, reactionCount } from "./attention";
+import { CoordinatorStateProvider, useCoordinatorState } from "./coordinator-state";
 import { useT } from "./i18n";
-import { classifierFor, usePendingDirectory } from "./pending-store";
+import { usePendingDirectory } from "./pending-store";
 
 export const SCREEN_ID = "main";
 

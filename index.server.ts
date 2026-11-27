@@ -14,7 +14,7 @@ import {
   workspaceStatusRpc,
 } from "./shared/model";
 import { type CoordinatorSettings, type Language, coordinatorSettings, outputLanguage } from "./shared/settings";
-import { AGENT_TOOL_NAMES, agentInstructions, decisionTools } from "./server/agent-tools";
+import { AGENT_TOOL_NAMES, PLUGIN_MCP_PREFIX, agentInstructions, decisionTools, isPluginTool } from "./server/agent-tools";
 import { Actions, answerFromQuestion } from "./server/actions";
 import { AgentGoneError, Outbox } from "./server/outbox";
 import type { PaseoApi } from "./server/paseo-api";
@@ -27,11 +27,6 @@ import { WorkspaceDirectory, workspaceDirectoryPath } from "./server/workspaces"
 
 /** hook 이 유실돼도 쌓인 메시지가 나가도록 도는 간격. */
 const PERIODIC_MS = 60_000;
-
-/** 플러그인 도구는 daemon 의 "paseo" MCP 서버로 나가서, Claude 에서는 이 접두사가 붙은 이름이 된다. */
-const PLUGIN_MCP_PREFIX = "mcp__paseo__";
-
-const OUR_TOOL_NAMES = new Set(AGENT_TOOL_NAMES.flatMap((name) => [name, `${PLUGIN_MCP_PREFIX}${name}`]));
 
 /** 에이전트의 마지막 응답. 질문하기의 답으로 붙인다. */
 async function lastAgentText(paseo: PaseoApi, agentId: string): Promise<string | null> {
@@ -59,7 +54,11 @@ export default function contribute(server: PluginServerContext) {
   // 쓰게 하는 데 쓴다. 한 번도 알려 준 적이 없으면 null 이다. 이때 en 으로 가정하면 한국어로 일하는 에이전트에게 결정을 영어로 쓰라고
   // 지시하게 된다.
   const appLanguage = async (): Promise<Language | null> => (await store.read()).appLanguage;
-  let lastPaseo: PaseoApi | null = null;
+  // 화면이 열려 있는 동안의 Paseo 연결. Paseo 는 원격 호출을 그 연결을 가진 handler 범위 안에서 하라고 하므로, 주기 전송은 구독이
+  // 살아 있는 연결만 쓰고 구독이 끝나면 뺀다. 화면이 하나도 없으면 턴 끝 hook 과 다음 구독이 쌓인 메시지를 내보낸다.
+  // 화면과 사이드바가 같은 연결로 따로 구독할 수 있어서 연결마다 구독 수를 센다.
+  const liveConnections = new Map<PaseoApi, number>();
+  const hasOpenAsk = async (agentId: string) => (await store.read()).asks.some((item) => item.agentId === agentId && !item.answer);
 
   /**
    * 결정 기록 도구를 붙일 세션인지. 사람이 설정에서 고른 프로젝트의 워크스페이스에 있고, 사람이 보는 세션(background 가 아님)이어야 한다.
@@ -83,7 +82,6 @@ export default function contribute(server: PluginServerContext) {
   });
 
   server.addHook("agent.open.before", async ({ request }, { paseo }) => {
-    lastPaseo = paseo;
     if (request.background || request.purpose !== "interactive" || isSummarizer(request)) return request;
     const found = await watchedWorkspace(paseo, request.workspaceId).catch((error) => {
       console.error("[coordinator] could not check the workspace of a session", error);
@@ -117,10 +115,12 @@ export default function contribute(server: PluginServerContext) {
   });
 
   server.addHook("agent.permission.before", async ({ agent, request }, { paseo }) => {
-    lastPaseo = paseo;
     if (request.kind === "question") {
-      // 질문하기로 물었던 것이 있으면, 에이전트가 다시 질문 창을 띄우기 전에 쓴 응답이 그 답이다.
-      await actions.recordAskAnswer(agent.id, await lastAgentText(paseo, agent.id)).catch(logFailure("record ask answer"));
+      // 질문하기로 물었던 것이 있으면, 에이전트가 다시 질문 창을 띄우기 전에 쓴 응답이 그 답이다. 이 hook 은 host 의 모든 에이전트의
+      // 질문 창에 돌므로, 물은 것이 없으면 대화를 읽지 않는다.
+      if (await hasOpenAsk(agent.id)) {
+        await actions.recordAskAnswer(agent.id, await lastAgentText(paseo, agent.id)).catch(logFailure("record ask answer"));
+      }
       // 플러그인 재시작으로 잃은 결정이 있으면 질문 창이 뜨기 전에 되살린다. 그래야 결정 카드 안에 이 질문이 들어가고, 답하면 결정에 남는다.
       const found = await watchedWorkspace(paseo, agent.workspaceId).catch(() => null);
       if (found) {
@@ -138,8 +138,7 @@ export default function contribute(server: PluginServerContext) {
       return;
     }
     // 결정을 기록하는 일이 사람의 승인을 기다리면 안 된다. 기록은 상태 파일에만 쓴다.
-    // 이름 끝만 비교하면 다른 MCP 서버의 같은 이름 도구도 허용된다. 이 플러그인 도구의 이름과 정확히 같을 때만 허용한다.
-    if (request.kind === "tool" && OUR_TOOL_NAMES.has(request.name)) await respond({ behavior: "allow" });
+    if (request.kind === "tool" && AGENT_TOOL_NAMES.some((tool) => isPluginTool(request.name, tool))) await respond({ behavior: "allow" });
   });
 
   // 에이전트의 질문 창(AskUserQuestion)에 사람이 답하면 그 에이전트의 멈춘 결정에 그 답을 남긴다. 질문 창의 답은 updatedInput.answers 로
@@ -153,12 +152,11 @@ export default function contribute(server: PluginServerContext) {
   });
 
   server.addHook("agent.turn.after", async ({ agent, outcome }, { paseo }) => {
-    lastPaseo = paseo;
     if (agent.background) return;
-    if ((await store.read()).asks.some((item) => item.agentId === agent.id && !item.answer)) {
+    if (await hasOpenAsk(agent.id)) {
       await actions.recordAskAnswer(agent.id, await lastAgentText(paseo, agent.id)).catch(logFailure("record ask answer"));
     }
-    await outbox.flush(paseo, agent.id).catch((error) => {
+    await outbox.flushAfterTurn(paseo, agent.id).catch((error) => {
       if (!(error instanceof AgentGoneError)) logFailure("flush outbox")(error);
     });
     const found = await watchedWorkspace(paseo, agent.workspaceId).catch(() => null);
@@ -209,13 +207,22 @@ export default function contribute(server: PluginServerContext) {
     store
       .update((state) => (state.appLanguage === input.language ? { state, result: undefined } : { state: { ...state, appLanguage: input.language }, result: undefined }))
       .catch(logFailure("save app language"));
-    lastPaseo = paseo;
     outbox.flushAll(paseo).catch(logFailure("flush on subscribe"));
     const send = (state: Parameters<typeof push>[0]) => {
       push(state).catch(() => undefined);
     };
     const unsubscribe = store.subscribe(send);
-    signal.addEventListener("abort", unsubscribe, { once: true });
+    liveConnections.set(paseo, (liveConnections.get(paseo) ?? 0) + 1);
+    signal.addEventListener(
+      "abort",
+      () => {
+        unsubscribe();
+        const left = (liveConnections.get(paseo) ?? 1) - 1;
+        if (left > 0) liveConnections.set(paseo, left);
+        else liveConnections.delete(paseo);
+      },
+      { once: true },
+    );
     store.read().then(send, logFailure("read state"));
   });
 
@@ -250,7 +257,8 @@ export default function contribute(server: PluginServerContext) {
   });
 
   const timer = setInterval(() => {
-    if (lastPaseo) outbox.flushAll(lastPaseo).catch(logFailure("periodic flush"));
+    const [paseo] = liveConnections.keys();
+    if (paseo) outbox.flushAll(paseo).catch(logFailure("periodic flush"));
   }, PERIODIC_MS);
   return () => clearInterval(timer);
 }

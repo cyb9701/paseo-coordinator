@@ -1,8 +1,7 @@
 import { useRpc, useSubscription } from "@getpaseo/plugin/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { type CoordinatorState, type WorkspaceStatus, openDecisions, watchStateSubscription, workspaceStatusRpc } from "../shared/model";
-import type { PendingDirectory } from "./pending-store";
+import { type CoordinatorState, type WorkspaceStatus, watchStateSubscription, workspaceStatusRpc } from "../shared/model";
 import { useT } from "./i18n";
 
 interface StateContextValue {
@@ -52,38 +51,21 @@ export function useCoordinatorState(): StateContextValue {
 /**
  * 워크스페이스의 바뀐 파일, PR, 겹침. git 을 돌리므로 1분마다만 다시 읽는다. refresh 는 사람이 누른 새로 읽기다. 서버 캐시를
  * 건너뛰지 않으면 20초 안에 누른 새로 읽기가 같은 값을 받는다.
+ * 새로 읽기는 같은 query 로 가져온다. 결과를 따로 받아 덮어쓰면, 그 사이 돌던 정기 조회가 늦게 끝나 서버 캐시 값으로 다시 덮고,
+ * 실패도 query 의 error 에 남지 않아 화면에 보이지 않는다. 돌던 정기 조회는 먼저 취소한다.
  */
 export function useWorkspaceStatuses(hostId: string) {
   const call = useRpc(workspaceStatusRpc);
   const client = useQueryClient();
-  const queryKey = ["coordinator", "workspace-status", hostId];
+  const queryKey = useMemo(() => ["coordinator", "workspace-status", hostId], [hostId]);
   const query = useQuery({ queryKey, queryFn: () => call({ force: false }), refetchInterval: 60_000, staleTime: 20_000 });
   const refresh = useCallback(async () => {
-    client.setQueryData(queryKey, await call({ force: true }));
-  }, [client, call, hostId]);
+    await client.cancelQueries({ queryKey });
+    await client.fetchQuery({ queryKey, queryFn: () => call({ force: true }), staleTime: 0 });
+  }, [client, call, queryKey]);
   return { ...query, refresh };
 }
 
 export function statusOf(statuses: readonly WorkspaceStatus[] | undefined, workspaceId: string): WorkspaceStatus | null {
   return statuses?.find((item) => item.workspaceId === workspaceId) ?? null;
-}
-
-/**
- * 사람을 기다리는 카드 수. 사이드바 배지, 인박스 탭, 인박스 머리가 같이 쓴다. 멈춘 결정은 에이전트마다 한 장, 권한 요청은 요청마다 한 장,
- * 에러는 에이전트마다 한 장이다. 멈춘 결정이 있는 에이전트의 질문 창은 그 결정 카드 안에 들어가므로 따로 세지 않는다.
- * 확인 필요(기록하고 진행한 결정)는 일이 멈춘 것이 아니라 세지 않는다. 숫자가 늘 떠 있으면 아무도 보지 않는다.
- */
-export function reactionCount(state: CoordinatorState | null, reactingAgentIds: readonly string[], directory: PendingDirectory): number {
-  const stopped = new Set(state ? openDecisions(state).map((item) => item.agentId) : []);
-  let count = stopped.size;
-  for (const agentId of reactingAgentIds) {
-    const folded = stopped.has(agentId);
-    const all = directory.pending.get(agentId) ?? [];
-    const requests = all.filter((request) => !(folded && request.kind === "question"));
-    if (requests.length > 0) count += requests.length;
-    // 권한 요청이 없는데 사람을 기다리면 에러 카드(또는 요청을 읽는 중인 카드) 한 장이다. 질문만 있고 그 질문이 결정 카드에
-    // 들어간 경우는 따로 세지 않는다. AgentAttention 의 folded 처리와 같은 기준이다.
-    else if (all.length === 0) count += 1;
-  }
-  return count;
 }

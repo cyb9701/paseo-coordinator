@@ -1,10 +1,12 @@
-import { useAgent, useAgents, useRpc, useWorkspace, useWorkspaces } from "@getpaseo/plugin/client";
+import { type AgentRef, type WorkspaceRef, useAgent, useAgents, useRpc, useWorkspace, useWorkspaces } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Text, View } from "react-native";
 import { type WorkRequest, addRequestRpc, dismissRequestRpc, sendSuggestionRpc } from "../shared/model";
 import { isVisibleAgent } from "./agent-state";
 import { useCoordinatorState } from "./coordinator-state";
+import { toAgentRef, toWorkspaceRef } from "./refs";
+import { isOpenRequest, pickRecipient, requestsByWorkspace } from "./requests";
 import { formatAgo } from "./time";
 import { Card, ChoiceBox, CtaButton, ErrorLine, Muted, SectionHeader, TextBox, type ViewContext } from "./ui";
 
@@ -17,22 +19,22 @@ function useWorkspaceAgents(workspaceId: string, ctx: ViewContext) {
   });
 }
 
-function AgentChoice({ agentId, selected, onPress, ctx }: { agentId: string; selected: boolean; onPress(): void; ctx: ViewContext }) {
-  const title = useAgent(agentId, (a) => a.title);
+function AgentChoice({ agent, selected, onPress, ctx }: { agent: AgentRef; selected: boolean; onPress(): void; ctx: ViewContext }) {
+  const title = useAgent(agent, (a) => a.title);
   return <ChoiceBox label={title ?? ctx.t("common.untitledAgent")} selected={selected} onPress={onPress} theme={ctx.theme} />;
 }
 
 /** 받을 에이전트 고르기. 하나면 고를 것 없이 그 에이전트다. */
 function AgentPicker({ workspaceId, value, onChange, ctx }: { workspaceId: string; value: string | null; onChange(agentId: string): void; ctx: ViewContext }) {
   const agents = useWorkspaceAgents(workspaceId, ctx);
-  const chosen = value ?? agents[0]?.id ?? null;
+  const chosen = pickRecipient(agents.map((ref) => ref.id), value);
   if (!agents.length) return <Muted text={ctx.t("requests.noAgent")} ctx={ctx} />;
   // 하나뿐이면 고를 것이 없다. 보내기 버튼에 받을 에이전트 이름이 적힌다.
   if (agents.length === 1) return null;
   return (
     <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
       {agents.slice(0, 8).map((ref) => (
-        <AgentChoice key={ref.key} agentId={ref.id} selected={chosen === ref.id} onPress={() => onChange(ref.id)} ctx={ctx} />
+        <AgentChoice key={ref.key} agent={ref} selected={chosen === ref.id} onPress={() => onChange(ref.id)} ctx={ctx} />
       ))}
     </View>
   );
@@ -41,13 +43,14 @@ function AgentPicker({ workspaceId, value, onChange, ctx }: { workspaceId: strin
 /**
  * 진행 중인 워크스페이스에 일을 더 맡긴다. 받을 에이전트가 쉬면 바로, 일하는 중이면 턴이 끝난 뒤 순서대로 받는다.
  * 플러그인은 새 에이전트나 워크스페이스를 만들지 않는다. 이미 그 워크스페이스에서 일하는 에이전트에게만 보낸다.
+ * 고른 에이전트는 워크스페이스마다 다르므로, 워크스페이스를 바꿔 쓰는 곳은 key 로 이 컴포넌트를 새로 만든다.
  */
 export function RequestComposer({ workspaceId, onDone, ctx }: { workspaceId: string; onDone?: () => void; ctx: ViewContext }) {
   const call = useRpc(addRequestRpc);
   const agents = useWorkspaceAgents(workspaceId, ctx);
   const [agentId, setAgentId] = useState<string | null>(null);
   const [text, setText] = useState("");
-  const target = agentId ?? agents[0]?.id ?? null;
+  const target = pickRecipient(agents.map((ref) => ref.id), agentId);
   const send = useMutation({
     mutationFn: () => call({ workspaceId, agentId: target!, text: text.trim() }),
     onSuccess: () => {
@@ -55,7 +58,8 @@ export function RequestComposer({ workspaceId, onDone, ctx }: { workspaceId: str
       onDone?.();
     },
   });
-  const name = useAgent(target ?? "", (a) => a.title);
+  // 받을 에이전트가 없으면 빈 id 의 ref 라 아무것도 찾지 않는다. 그때 버튼은 이름 없이 그린다.
+  const name = useAgent(toAgentRef(ctx.hostId, target ?? ""), (a) => a.title);
   return (
     <View style={{ gap: 8 }}>
       <AgentPicker workspaceId={workspaceId} value={agentId} onChange={setAgentId} ctx={ctx} />
@@ -82,9 +86,9 @@ function RequestRow({ request, ctx }: { request: WorkRequest; ctx: ViewContext }
   const [picking, setPicking] = useState(false);
   const [agentId, setAgentId] = useState<string | null>(null);
   const agents = useWorkspaceAgents(request.workspaceId ?? "", ctx);
-  const target = agentId ?? (agents.some((ref) => ref.id === request.agentId) ? request.agentId : agents[0]?.id) ?? null;
+  const target = pickRecipient(agents.map((ref) => ref.id), agentId, request.agentId);
   const send = useMutation({ mutationFn: () => sendCall({ id: request.id, agentId: target! }) });
-  const to = useAgent(request.agentId ?? "", (a) => a.title);
+  const to = useAgent(toAgentRef(ctx.hostId, request.agentId ?? ""), (a) => a.title);
   const status =
     request.status === "queued"
       ? ctx.t("requests.queued", { name: to ?? ctx.t("common.untitledAgent") })
@@ -126,10 +130,10 @@ function RequestRow({ request, ctx }: { request: WorkRequest; ctx: ViewContext }
 }
 
 function WorkspaceRequests({ workspaceId, requests, ctx }: { workspaceId: string; requests: readonly WorkRequest[]; ctx: ViewContext }) {
-  const workspace = useWorkspace(workspaceId, (w) => ({ name: w.title ?? w.name, project: w.projectDisplayName }));
+  const workspace = useWorkspace(toWorkspaceRef(ctx.hostId, workspaceId), (w) => ({ name: w.title ?? w.name, project: w.projectDisplayName }));
   const [composing, setComposing] = useState(false);
   const [showSent, setShowSent] = useState(false);
-  const open = requests.filter((item) => item.status === "queued" || item.status === "suggested");
+  const open = requests.filter(isOpenRequest);
   const sent = requests.filter((item) => item.status === "sent").slice(-10).reverse();
   return (
     <Card color={open.some((item) => item.status === "suggested") ? ctx.theme.colors.statusWarning : ctx.theme.colors.accent} ctx={ctx}>
@@ -181,16 +185,16 @@ function WorkspacePickerComposer({ onClose, ctx }: { onClose(): void; ctx: ViewC
       </View>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
         {workspaces.slice(0, 16).map((ref) => (
-          <WorkspaceChoice key={ref.key} workspaceId={ref.id} selected={workspaceId === ref.id} onPress={() => setWorkspaceId(ref.id)} ctx={ctx} />
+          <WorkspaceChoice key={ref.key} workspace={ref} selected={workspaceId === ref.id} onPress={() => setWorkspaceId(ref.id)} ctx={ctx} />
         ))}
       </View>
-      {workspaceId ? <RequestComposer workspaceId={workspaceId} onDone={onClose} ctx={ctx} /> : <Muted text={ctx.t("requests.pickWorkspace")} ctx={ctx} />}
+      {workspaceId ? <RequestComposer key={workspaceId} workspaceId={workspaceId} onDone={onClose} ctx={ctx} /> : <Muted text={ctx.t("requests.pickWorkspace")} ctx={ctx} />}
     </View>
   );
 }
 
-function WorkspaceChoice({ workspaceId, selected, onPress, ctx }: { workspaceId: string; selected: boolean; onPress(): void; ctx: ViewContext }) {
-  const workspace = useWorkspace(workspaceId, (w) => ({ name: w.title ?? w.name, project: w.projectDisplayName }));
+function WorkspaceChoice({ workspace: ref, selected, onPress, ctx }: { workspace: WorkspaceRef; selected: boolean; onPress(): void; ctx: ViewContext }) {
+  const workspace = useWorkspace(ref, (w) => ({ name: w.title ?? w.name, project: w.projectDisplayName }));
   if (!workspace) return null;
   return <ChoiceBox label={workspace.name} detail={workspace.project} selected={selected} onPress={onPress} theme={ctx.theme} />;
 }
@@ -201,12 +205,8 @@ function WorkspaceChoice({ workspaceId, selected, onPress, ctx }: { workspaceId:
  */
 export function RequestsView({ ctx }: { ctx: ViewContext }) {
   const { state } = useCoordinatorState();
-  const requests = (state?.requests ?? []).filter((item) => item.status !== "dismissed" && item.workspaceId);
-  const open = requests.filter((item) => item.status === "queued" || item.status === "suggested");
-  const byWorkspace = new Map<string, WorkRequest[]>();
-  for (const item of requests) byWorkspace.set(item.workspaceId!, [...(byWorkspace.get(item.workspaceId!) ?? []), item]);
-  // 열린 요청이 있는 워크스페이스가 먼저 온다.
-  const order = [...byWorkspace.entries()].sort((a, b) => Number(b[1].some((item) => item.status !== "sent")) - Number(a[1].some((item) => item.status !== "sent")));
+  const order = requestsByWorkspace(state?.requests ?? []);
+  const open = order.flatMap(([, items]) => items.filter(isOpenRequest));
   return (
     <View style={{ gap: 16, maxWidth: 880 }}>
       <SectionHeader title={ctx.t("requests.title")} count={open.length} hint={ctx.t("requests.hint")} ctx={ctx} />

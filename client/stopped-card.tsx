@@ -2,10 +2,12 @@ import { useAgent, useRpc } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { type Decision, answerDecisionsRpc, askAgentRpc, composeAnswer, decisionTitle, latestSummary } from "../shared/model";
+import { type Decision, answerDecisionsRpc, askAgentRpc, composeAnswer, decisionTitle } from "../shared/model";
 import { useCoordinatorState } from "./coordinator-state";
 import { DecisionDetails } from "./decision-view";
 import { usePending } from "./pending-store";
+import { toAgentRef } from "./refs";
+import { asksForStopped, summaryForStopped } from "./card-summaries";
 import { type CardAgent, CardHead, OpenAgentButton, PermissionBody } from "./permission-cards";
 import { SummaryBlock } from "./summary-view";
 import { formatAgo } from "./time";
@@ -88,13 +90,12 @@ export function StoppedCard({ agentId, decisions, ctx }: { agentId: string; deci
   const [choices, setChoices] = useState<Choices>({});
   const [note, setNote] = useState("");
   const [asking, setAsking] = useState(false);
-  const agent = useAgent(agentId, (a) => ({ title: a.title, hostId: a.hostId, workspaceId: a.workspaceId }));
+  const agent = useAgent(toAgentRef(ctx.hostId, agentId), (a) => ({ title: a.title, hostId: a.hostId, workspaceId: a.workspaceId }));
   const first = decisions[0]!;
   // 사용자 지침에 따라 에이전트가 질문 창(AskUserQuestion)으로 묻기도 한다. 그러면 답은 그 질문 창으로 해야 에이전트가 받는다.
   const question = (usePending().pending.get(agentId) ?? []).find((request) => request.kind === "question") ?? null;
-  const summary = state ? latestSummary(state, agentId) : null;
-  const covering = summary && (summary.at >= first.at || decisions.some((item) => summary.decisionIds.includes(item.id))) ? summary : null;
-  const asks = (state?.asks ?? []).filter((item) => item.agentId === agentId && item.at >= first.at);
+  const covering = summaryForStopped(state, agentId, decisions);
+  const asks = asksForStopped(state, agentId, decisions);
   const cardAgent: CardAgent = {
     agentId,
     hostId: agent?.hostId ?? ctx.hostId,
@@ -132,7 +133,8 @@ export function StoppedCard({ agentId, decisions, ctx }: { agentId: string; deci
             <CtaButton
               label={changed || note.trim() ? ctx.t("stopped.sendAnswer") : ctx.t("stopped.goAhead")}
               tone="primary"
-              disabled={answer.isPending}
+              // 보낸 뒤 상태가 다시 오기 전까지 카드가 남아 있다. 그동안 다시 눌러 같은 답이 두 번 가지 않게 막는다.
+              disabled={answer.isPending || answer.isSuccess}
               theme={ctx.theme}
               onPress={() => answer.mutate(composeAnswer(decisions, choices, note))}
             />

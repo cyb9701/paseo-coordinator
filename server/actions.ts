@@ -80,7 +80,11 @@ export class Actions {
 
   /** 워크스페이스에 추가 요청을 넣는다. 에이전트가 쉬면 바로 받고, 일하는 중이면 턴이 끝난 뒤 순서대로 받는다. */
   async addRequest(paseo: PaseoApi, input: { workspaceId: string; agentId: string; text: string; projectId: string | null }) {
-    await this.outbox.ensureReachable(paseo, input.agentId);
+    // 화면이 고른 에이전트와 워크스페이스가 어긋나면 요청은 한 워크스페이스에 기록되고 다른 워크스페이스의 에이전트가 받는다.
+    const snapshot = await this.outbox.ensureReachable(paseo, input.agentId);
+    if (snapshot.agent.workspaceId !== input.workspaceId) {
+      throw new CoordinatorError("agentNotInWorkspace", "This agent is not in the workspace the request is for. Nothing was sent.");
+    }
     const id = await this.store.update((state) => {
       const { state: next, id } = nextId(state, "r");
       const request: WorkRequest = {

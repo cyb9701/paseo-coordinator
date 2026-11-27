@@ -12,6 +12,9 @@ export class AgentGoneError extends CoordinatorError {
   }
 }
 
+/** 턴 끝에 아직 바빠 보일 때 다시 볼 간격. 합쳐서 5초 안쪽이라 사람이 기다리는 느낌은 거의 없다. */
+const AFTER_TURN_RETRY_MS = [250, 1_000, 3_000];
+
 type Snapshot = NonNullable<Awaited<ReturnType<ReturnType<PaseoApi["agents"]["ref"]>["refresh"]>>>;
 
 function busy(snapshot: Snapshot): boolean {
@@ -35,9 +38,10 @@ export class Outbox {
   ) {}
 
   /** 받을 에이전트가 있는지 상태를 바꾸기 전에 확인한다. 없으면 AgentGoneError. */
-  async ensureReachable(paseo: PaseoApi, agentId: string): Promise<void> {
+  async ensureReachable(paseo: PaseoApi, agentId: string): Promise<Snapshot> {
     const snapshot = await paseo.agents.ref(agentId).refresh();
     if (!snapshot || snapshot.agent.archivedAt) throw new AgentGoneError(agentId);
+    return snapshot;
   }
 
   async deliver(paseo: PaseoApi, agentId: string, text: string, requestId: string | null = null): Promise<Delivery> {
@@ -90,6 +94,19 @@ export class Outbox {
       }));
       throw error;
     }
+  }
+
+  /**
+   * 턴이 끝났을 때 내보낸다. 턴 끝 hook 이 에이전트 상태가 idle 로 바뀌기 전에 올 수 있어서, 아직 바빠 보이면 잠깐씩 기다렸다가
+   * 몇 번 더 본다. 그 사이 사람이 새 턴을 시작했으면 끝까지 바쁘고, 메시지는 그 턴이 끝날 때 나간다.
+   */
+  async flushAfterTurn(paseo: PaseoApi, agentId: string, delays: readonly number[] = AFTER_TURN_RETRY_MS): Promise<boolean> {
+    for (const delay of [0, ...delays]) {
+      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+      if (await this.flush(paseo, agentId)) return true;
+      if (!(await this.store.read()).outbox[agentId]?.length) return false;
+    }
+    return false;
   }
 
   /** 아직 보내지 않은 추가 요청을 뺀다. 이미 보냈으면 false. */

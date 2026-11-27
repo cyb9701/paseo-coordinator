@@ -108,10 +108,11 @@ export class StateStore {
     return () => this.listeners.delete(listener);
   }
 
+  /** 사람의 답, 에이전트 대화에서 뽑은 요약, 결정 근거가 들어 있어서 같은 컴퓨터의 다른 사용자가 읽지 못하게 한다. */
   private async persist(state: CoordinatorState) {
-    await mkdir(this.directory, { recursive: true });
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const temp = `${this.file}.${process.pid}.tmp`;
-    await writeFile(temp, JSON.stringify(state), "utf8");
+    await writeFile(temp, JSON.stringify(state), { encoding: "utf8", mode: 0o600 });
     await rename(temp, this.file);
   }
 }

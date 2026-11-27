@@ -6,13 +6,16 @@ import type { Decision, WorkspaceStatus } from "../shared/model";
 import { coordinatorSettings } from "../shared/settings";
 import { AgentCard } from "./agent-card";
 import { COLUMN_KEYS, type ColumnKey, columnColor, columnFor, isVisibleAgent, needsPerson } from "./agent-state";
+import { type DecisionIndex, type WorkspaceSignals, boardCells, indexDecisions, rowColumn, signals, sortRows } from "./board";
 import { statusOf, useCoordinatorState, useWorkspaceStatuses } from "./coordinator-state";
 import { useClassifier } from "./pending-store";
 import { formatAgo } from "./time";
 import { CtaButton, ErrorLine, Muted, ProjectTag, type ViewContext, errorText } from "./ui";
 import { shortPath } from "./workspace-place";
 import { RequestComposer } from "./requests-view";
-import { PullRequestLine, WorkspaceReview, unexplainedFiles } from "./workspace-review";
+import { PullRequestLine, WorkspaceReview } from "./workspace-review";
+import { openRequestCounts } from "./requests";
+import { toWorkspaceRef } from "./refs";
 
 const SEPARATOR = "::";
 const WORKSPACE_COLUMN_WIDTH = 260;
@@ -23,51 +26,6 @@ const NO_REQUESTS = { queued: 0, suggested: 0 };
 type Cells = Map<ColumnKey, readonly AgentRef[]>;
 /** 행 아래에 펼치는 것: 결정 목록이나 추가 요청 작성. 한 번에 하나만 연다. */
 type Panel = "review" | "request" | null;
-
-interface DecisionIndex {
-  byWorkspace: Map<string, Decision[]>;
-  byAgent: Map<string, { waiting: number; unreviewed: number }>;
-}
-
-function indexDecisions(decisions: readonly Decision[]): DecisionIndex {
-  const byWorkspace = new Map<string, Decision[]>();
-  const byAgent = new Map<string, { waiting: number; unreviewed: number }>();
-  for (const item of decisions) {
-    byWorkspace.set(item.workspaceId, [...(byWorkspace.get(item.workspaceId) ?? []), item]);
-    if (item.status !== "waiting" && item.status !== "unreviewed") continue;
-    const counts = byAgent.get(item.agentId) ?? { waiting: 0, unreviewed: 0 };
-    if (item.status === "waiting") counts.waiting += 1;
-    else counts.unreviewed += 1;
-    byAgent.set(item.agentId, counts);
-  }
-  return { byWorkspace, byAgent };
-}
-
-/** 지켜보는 워크스페이스에서 사람이 봐야 할 신호. 행의 띠 색과 정렬에 쓴다. */
-function signals(status: WorkspaceStatus | null, decisions: readonly Decision[]) {
-  const pr = status?.pullRequest;
-  const prOpen = Boolean(pr && !pr.isMerged && pr.state.toLowerCase() === "open");
-  // 결정이 하나도 없는 워크스페이스(플러그인을 켜기 전부터 하던 일)는 바뀐 파일이 모두 '결정에 없는 변경'이 된다. 경고로 세면
-  // 정작 봐야 할 신호가 묻혀서, 결정이 기록된 워크스페이스에서만 센다.
-  const recorded = decisions.some((item) => item.status !== "dropped");
-  return {
-    recorded,
-    waiting: decisions.filter((item) => item.status === "waiting").length,
-    unreviewed: decisions.filter((item) => item.status === "unreviewed").length,
-    unexplained: recorded ? unexplainedFiles(status, decisions).length : 0,
-    overlaps: status?.overlaps.length ?? 0,
-    // 머지되거나 닫힌 PR 의 체크 실패와 충돌은 더 할 일이 없다.
-    prTrouble: prOpen && (pr?.checks === "failure" || pr?.mergeable === "CONFLICTING"),
-  };
-}
-
-function rowColumn(cells: Cells | undefined, flags: ReturnType<typeof signals> | null): ColumnKey {
-  if (flags && (flags.waiting > 0 || flags.prTrouble)) return "react";
-  const fromAgents = COLUMN_KEYS.find((key) => (cells?.get(key)?.length ?? 0) > 0);
-  if (fromAgents) return fromAgents;
-  if (flags && (flags.unreviewed || flags.unexplained || flags.overlaps)) return "review";
-  return "waiting";
-}
 
 /** 행 머리: 어느 프로젝트의 어느 워크스페이스인지, 어디서 도는지. 지켜보는 프로젝트면 PR 과 결정 신호를 더한다. */
 function WorkspaceCell({
@@ -81,13 +39,13 @@ function WorkspaceCell({
 }: {
   workspaceId: string;
   status: WorkspaceStatus | null;
-  flags: ReturnType<typeof signals> | null;
+  flags: WorkspaceSignals | null;
   panel: Panel;
   onPanel(panel: Panel): void;
   requests: { queued: number; suggested: number };
   ctx: ViewContext;
 }) {
-  const workspace = useWorkspace(workspaceId, (w) => ({
+  const workspace = useWorkspace(toWorkspaceRef(ctx.hostId, workspaceId), (w) => ({
     project: w.projectDisplayName,
     name: w.title ?? w.name,
     branch: w.branch,
@@ -318,39 +276,19 @@ export function ProgressBoard({ ctx }: { ctx: ViewContext }) {
     hosts: [ctx.hostId],
     where: (w) => projectIds.includes(w.projectId) && !w.background && !w.archivingAt,
   });
-  const { board, totals } = useMemo(() => {
-    const board = new Map<string, Cells>();
-    const totals = new Map<ColumnKey, number>();
-    for (const group of groups) {
-      const [workspaceId, key] = group.key.split(SEPARATOR) as [string, ColumnKey];
-      if (!board.has(workspaceId)) board.set(workspaceId, new Map());
-      board.get(workspaceId)!.set(key, group.items);
-      totals.set(key, (totals.get(key) ?? 0) + group.items.length);
-    }
-    return { board, totals };
-  }, [groups]);
+  const { board, totals } = useMemo(() => boardCells(groups, SEPARATOR), [groups]);
   const watchedIds = new Set(watched.map((ref) => ref.id));
-  const rank = (workspaceId: string) => {
+  const rows = sortRows([...board.keys(), ...watchedIds], (workspaceId) => {
     const flags = watchedIds.has(workspaceId) ? signals(statusOf(statuses.data?.workspaces, workspaceId), index.byWorkspace.get(workspaceId) ?? NO_DECISIONS) : null;
-    return COLUMN_KEYS.indexOf(rowColumn(board.get(workspaceId), flags));
-  };
-  const rows = [...new Set([...board.keys(), ...watchedIds])].sort((a, b) => rank(a) - rank(b));
+    return rowColumn(board.get(workspaceId), flags);
+  });
   const refresh = async () => {
     setRefreshing(true);
+    // 실패는 같은 query 의 error 로 남아 아래 ErrorLine 에 보인다(useWorkspaceStatuses). 여기서는 버튼만 되살린다.
     await statuses.refresh().catch(() => undefined);
     setRefreshing(false);
   };
-  const requestCounts = useMemo(() => {
-    const counts = new Map<string, { queued: number; suggested: number }>();
-    for (const item of state?.requests ?? []) {
-      if (!item.workspaceId || (item.status !== "queued" && item.status !== "suggested")) continue;
-      const current = counts.get(item.workspaceId) ?? { queued: 0, suggested: 0 };
-      if (item.status === "queued") current.queued += 1;
-      else current.suggested += 1;
-      counts.set(item.workspaceId, current);
-    }
-    return counts;
-  }, [state?.requests]);
+  const requestCounts = useMemo(() => openRequestCounts(state?.requests ?? []), [state?.requests]);
   const rowProps = (workspaceId: string) => ({
     workspaceId,
     requestCounts,

@@ -24,7 +24,7 @@ Paseo 0.17.4 or later with plugins enabled. Tested on macOS with Claude agents. 
 
 ## What it reads, runs and stores
 
-- State (decisions, requests, questions you asked agents, summaries, messages waiting for a busy agent): `plugin-data/paseo-coordinator/state.json` under the Paseo home (`$PASEO_HOME` or `~/.paseo`).
+- State (decisions, requests, questions you asked agents, summaries, messages waiting for a busy agent): `plugin-data/paseo-coordinator/state.json` under the Paseo home (`$PASEO_HOME` or `~/.paseo`), readable only by your account.
 - It reads each agent's messages to show what was asked and to build summaries.
 - It runs read-only `git` commands in watched workspaces (`rev-parse`, `merge-base`, `diff`, `ls-files`), at most four workspaces at a time, to find changed files, overlaps and diffs. Diffs are shown only for files the workspace changed.
 - Pull request state comes from what Paseo already attaches to each workspace. The plugin does not call GitHub, merge pull requests, delete branches or archive workspaces.

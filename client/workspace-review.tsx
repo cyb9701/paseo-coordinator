@@ -4,6 +4,8 @@ import { useState } from "react";
 import { Text, View } from "react-native";
 import { type Decision, type PullRequest, type WorkspaceStatus, agentRequestsRpc, reviewDecisionsRpc } from "../shared/model";
 import { type SentPart, readSentMessage } from "../shared/messages";
+import { isOpenPullRequest, pullRequestState, unexplainedFiles } from "./board";
+import { toWorkspaceRef } from "./refs";
 import { DecisionRow, DiffToggle } from "./decision-view";
 import { formatAgo } from "./time";
 import { Chip, CtaButton, ErrorLine, Fold, Muted, TextBox, type ViewContext } from "./ui";
@@ -11,12 +13,8 @@ import { Chip, CtaButton, ErrorLine, Fold, Muted, TextBox, type ViewContext } fr
 /** PR 상태 한 줄. Paseo 가 워크스페이스에 붙여 준 GitHub 정보를 읽기만 한다. 머지는 사람이 GitHub 이나 Paseo 에서 한다. */
 export function PullRequestLine({ pr, ctx }: { pr: PullRequest; ctx: ViewContext }) {
   const parts: { label: string; color: string }[] = [];
-  // 머지 > 닫힘 > 초안 > 열림 순서다. 닫힌 초안을 '초안'으로 보이면 아직 진행 중인 것처럼 읽힌다.
-  const raw = pr.state.toLowerCase();
-  const state = pr.isMerged ? "merged" : raw === "closed" ? "closed" : pr.isDraft ? "draft" : raw;
-  const open = !pr.isMerged && raw === "open";
-  parts.push({ label: ctx.t(`pr.state.${state === "open" || state === "closed" || state === "merged" || state === "draft" ? state : "other"}`, { state: pr.state }), color: pr.isMerged ? ctx.theme.colors.statusSuccess : ctx.theme.colors.accent });
-  if (open) {
+  parts.push({ label: ctx.t(`pr.state.${pullRequestState(pr)}`, { state: pr.state }), color: pr.isMerged ? ctx.theme.colors.statusSuccess : ctx.theme.colors.accent });
+  if (isOpenPullRequest(pr)) {
     if (pr.checks === "failure") parts.push({ label: ctx.t("pr.checksFailed", { names: pr.failedChecks.slice(0, 3).join(", ") }), color: ctx.theme.colors.statusDanger });
     else if (pr.checks === "pending") parts.push({ label: ctx.t("pr.checksPending"), color: ctx.theme.colors.statusWarning });
     else if (pr.checks === "success") parts.push({ label: ctx.t("pr.checksPassed"), color: ctx.theme.colors.statusSuccess });
@@ -34,14 +32,6 @@ export function PullRequestLine({ pr, ctx }: { pr: PullRequest; ctx: ViewContext
       ))}
     </View>
   );
-}
-
-/** 어느 결정에도 적히지 않은 변경 파일. 에이전트가 기록하지 않고 내린 판단이 숨어 있을 수 있는 곳이다. */
-export function unexplainedFiles(status: WorkspaceStatus | null, decisions: readonly Decision[]): string[] {
-  if (!status) return [];
-  // 답을 기다리는 결정은 아직 구현되지 않았다. 그 파일이 바뀌었다면 결정이 설명하는 변경이 아니다.
-  const covered = new Set(decisions.filter((item) => item.status !== "dropped" && item.status !== "waiting").flatMap((item) => item.files));
-  return status.changedFiles.filter((file) => !covered.has(file));
 }
 
 /**
@@ -260,7 +250,7 @@ export function WorkspaceReview({
 }
 
 function OverlapLine({ workspaceId, files, ctx }: { workspaceId: string; files: readonly string[]; ctx: ViewContext }) {
-  const name = useWorkspace(workspaceId, (w) => w.title ?? w.name);
+  const name = useWorkspace(toWorkspaceRef(ctx.hostId, workspaceId), (w) => w.title ?? w.name);
   return (
     <Text selectable style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>
       {`⚠ ${name ?? workspaceId}: ${files.slice(0, 10).join(", ")}${files.length > 10 ? ` +${files.length - 10}` : ""}`}
