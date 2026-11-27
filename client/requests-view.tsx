@@ -7,6 +7,7 @@ import { isVisibleAgent } from "./agent-state";
 import { useCoordinatorState } from "./coordinator-state";
 import { toAgentRef, toWorkspaceRef } from "./refs";
 import { isOpenRequest, pickRecipient, requestsByWorkspace } from "./requests";
+import { breakSentences } from "./sentences";
 import { formatAgo } from "./time";
 import { Card, ChoiceBox, CtaButton, ErrorLine, Muted, SectionHeader, TextBox, type ViewContext } from "./ui";
 
@@ -107,7 +108,7 @@ function RequestRow({ request, ctx }: { request: WorkRequest; ctx: ViewContext }
         <Muted text={formatAgo(request.at, ctx.now, ctx.t)} ctx={ctx} />
       </View>
       <Text selectable numberOfLines={request.status === "sent" ? 2 : undefined} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.45) }}>
-        {request.text}
+        {breakSentences(request.text)}
       </Text>
       {request.status === "queued" ? (
         <View style={{ flexDirection: "row" }}>

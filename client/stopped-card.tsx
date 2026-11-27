@@ -10,6 +10,7 @@ import { toAgentRef } from "./refs";
 import { asksForStopped, summaryForStopped } from "./card-summaries";
 import { type CardAgent, CardHead, OpenAgentButton, PermissionBody } from "./permission-cards";
 import { SummaryBlock } from "./summary-view";
+import { breakSentences } from "./sentences";
 import { formatAgo } from "./time";
 import { Card, Chip, CtaButton, ErrorLine, ExpandableText, Fold, InstructionBox, Muted, TextBox, type ViewContext } from "./ui";
 
@@ -46,6 +47,8 @@ function OptionChip({ label, selected, onPress, ctx }: { label: string; selected
  */
 function StoppedDecision({ decision, choice, onChoose, ctx }: { decision: Decision; choice: string | null | undefined; onChoose?: (choice: string | null) => void; ctx: ViewContext }) {
   const assumption = decision.evidence.find((item) => item.basis === "assumption");
+  const proposal = breakSentences(decision.decision);
+  const assumed = assumption ? breakSentences(`⚠ ${ctx.t("stopped.assumption")} ${assumption.text}`) : null;
   return (
     <View style={{ gap: 6, paddingTop: 10, borderTopWidth: 1, borderColor: ctx.theme.colors.border }}>
       {/* 번호와 종류는 윗줄, 제목은 그 아래 전체 너비다. 한 줄에 두면 좁은 화면에서 제목이 좁은 칸에 여러 줄로 접힌다. */}
@@ -56,13 +59,13 @@ function StoppedDecision({ decision, choice, onChoose, ctx }: { decision: Decisi
       <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600", lineHeight: Math.round(ctx.fonts.heading * 1.35) }}>
         {decisionTitle(decision)}
       </Text>
-      <ExpandableText text={decision.decision} lines={3} ctx={ctx} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.45) }}>
+      <ExpandableText text={proposal} lines={3} ctx={ctx} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.45) }}>
         <Text style={{ color: ctx.theme.colors.foregroundMuted }}>{`${ctx.t("stopped.proposal")} `}</Text>
-        {decision.decision}
+        {proposal}
       </ExpandableText>
-      {assumption ? (
-        <ExpandableText text={assumption.text} lines={2} ctx={ctx} style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta, lineHeight: Math.round(ctx.fonts.meta * 1.45) }}>
-          {`⚠ ${ctx.t("stopped.assumption")} ${assumption.text}`}
+      {assumed ? (
+        <ExpandableText text={assumed} lines={2} ctx={ctx} style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta, lineHeight: Math.round(ctx.fonts.meta * 1.45) }}>
+          {assumed}
         </ExpandableText>
       ) : null}
       {onChoose && decision.alternatives.length ? (
@@ -108,9 +111,9 @@ export function StoppedCard({ agentId, decisions, ctx }: { agentId: string; deci
     <Card color={ctx.theme.colors.statusDanger} ctx={ctx}>
       <CardHead kind={ctx.t("kinds.decision", { count: decisions.length })} color={ctx.theme.colors.statusDanger} agent={cardAgent} ctx={ctx} />
       {covering?.status === "done" && covering.result ? (
-        <ExpandableText text={covering.result.ask} lines={3} ctx={ctx} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.45) }}>
+        <ExpandableText text={breakSentences(covering.result.ask)} lines={3} ctx={ctx} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.45) }}>
           <Text style={{ color: ctx.theme.colors.foregroundMuted, fontWeight: "600" }}>{`${ctx.t("summary.ask")}  `}</Text>
-          {covering.result.ask}
+          {breakSentences(covering.result.ask)}
         </ExpandableText>
       ) : null}
       <View style={{ gap: 4 }}>

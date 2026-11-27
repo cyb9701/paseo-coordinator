@@ -27,6 +27,7 @@ import {
 } from "./permissions";
 import { WorkspaceProjectChip } from "./project-chip";
 import { SummaryBlock } from "./summary-view";
+import { breakSentences } from "./sentences";
 import { formatAgo } from "./time";
 import { Card, Chip, CodeBox, CtaButton, ErrorLine, Fold, InstructionBox, type ViewContext } from "./ui";
 
@@ -96,7 +97,7 @@ function QuestionForm({
           {/* 에이전트의 질문은 길 때가 많다. 굵은 큰 글씨로 두면 벽처럼 보여서 본문 크기로 둔다. 짧은 머리말만 굵게 둔다. */}
           {item.header ? <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, fontWeight: "600" }}>{item.header}</Text> : null}
           <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.5) }}>
-            {item.question}
+            {breakSentences(item.question)}
             {item.multiSelect ? `  ${ctx.t("permission.multiSelect")}` : ""}
           </Text>
           <View style={{ gap: 6 }}>
@@ -122,7 +123,7 @@ function QuestionForm({
                     {active ? "● " : "○ "}
                     {option.label}
                   </Text>
-                  {option.description ? <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{option.description}</Text> : null}
+                  {option.description ? <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{breakSentences(option.description)}</Text> : null}
                 </Pressable>
               );
             })}
@@ -268,7 +269,7 @@ export function PermissionBody({ request, agent, ctx }: { request: PermissionReq
               }
             : null,
           request.description && request.kind !== "question"
-            ? { label: ctx.t("permission.description"), content: <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body }}>{request.description}</Text> }
+            ? { label: ctx.t("permission.description"), content: <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body }}>{breakSentences(request.description)}</Text> }
             : null,
           plan ? { label: ctx.t("permission.plan"), content: <CodeBox text={plan} ctx={ctx} maxHeight={320} /> } : null,
         ]}

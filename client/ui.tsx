@@ -6,6 +6,7 @@ import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { readError } from "../shared/errors";
 import { type Fonts, useFonts } from "./fonts";
 import type { T } from "./i18n";
+import { breakSentences } from "./sentences";
 
 export interface ViewContext {
   theme: PluginTheme;
@@ -245,7 +246,7 @@ export function Lines({ items, ctx, muted = false }: { items: readonly string[];
         <View key={index} style={{ flexDirection: "row", gap: 6 }}>
           <Text style={style}>•</Text>
           <Text selectable style={{ ...style, flex: 1 }}>
-            {item}
+            {breakSentences(item)}
           </Text>
         </View>
       ))}
@@ -441,7 +442,7 @@ export function Muted({ text, ctx }: { text: string; ctx: ViewContext }) {
 export function Body({ text, ctx, strong = false }: { text: string; ctx: ViewContext; strong?: boolean }) {
   return (
     <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.45), fontWeight: strong ? "600" : "400" }}>
-      {text}
+      {breakSentences(text)}
     </Text>
   );
 }
@@ -468,7 +469,7 @@ export function ExpandableText({
   ctx,
 }: {
   children: ReactNode;
-  /** 넘치는지 어림할 원문. */
+  /** 넘치는지 어림할 원문. 줄바꿈이 있으면 줄마다 따로 센다. */
   text: string;
   lines: number;
   style: object;
@@ -477,7 +478,9 @@ export function ExpandableText({
   const [open, setOpen] = useState(false);
   const [measured, setMeasured] = useState(false);
   const fontSize = (style as { fontSize?: number }).fontSize ?? ctx.fonts.body;
-  const overflow = measured || textWidth(text, fontSize) > lines * (ctx.compact ? LINE_WIDTH.compact : LINE_WIDTH.wide);
+  const width = ctx.compact ? LINE_WIDTH.compact : LINE_WIDTH.wide;
+  const estimated = text.split("\n").reduce((sum, line) => sum + Math.max(1, Math.ceil(textWidth(line, fontSize) / width)), 0);
+  const overflow = measured || estimated > lines;
   return (
     <Pressable accessibilityRole={overflow ? "button" : undefined} disabled={!overflow} onPress={() => setOpen((value) => !value)} style={{ gap: 2 }}>
       <Text

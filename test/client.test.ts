@@ -8,6 +8,7 @@ import { attentionCards, classifierFor, factsOf, inboxGroups, reactionCount, sam
 import { boardCells, indexDecisions, pullRequestState, rowColumn, signals, sortRows, unexplainedFiles } from "../client/board";
 import { asksForStopped, summaryForError, summaryForStopped } from "../client/card-summaries";
 import { toAgentRef, toWorkspaceRef } from "../client/refs";
+import { breakSentences } from "../client/sentences";
 import { openRequestCounts, pickRecipient, requestsByWorkspace } from "../client/requests";
 import type { PermissionRequest } from "../client/permissions";
 
@@ -204,4 +205,21 @@ test("refs carry the host and are reused for the same entity", () => {
   assert.equal(toAgentRef("host-a", "a1"), ref);
   assert.notEqual(toAgentRef("host-b", "a1"), ref);
   assert.equal(toWorkspaceRef("host-a", "a1").kind, "workspace");
+});
+
+test("long texts break into one sentence per line", () => {
+  assert.equal(
+    breakSentences("박스 수 규칙을 어떻게 할까요? 총 팩 수가 있으면 공통입니다. 지금은 첫 번째 안이 반영돼 있습니다(커밋 안 함)."),
+    "박스 수 규칙을 어떻게 할까요?\n총 팩 수가 있으면 공통입니다.\n지금은 첫 번째 안이 반영돼 있습니다(커밋 안 함).",
+  );
+  assert.equal(breakSentences("Ends here.) Next one! \"Quoted.\" Last"), "Ends here.)\nNext one!\n\"Quoted.\"\nLast");
+  // 뒤에 글자가 바로 붙는 점, 코드, 목록 번호, 줄임말, 말줄임에서는 나누지 않는다.
+  assert.equal(breakSentences("BoxRule.FromName reads v1.2 names."), "BoxRule.FromName reads v1.2 names.");
+  assert.equal(breakSentences("Run `a. b` now. Then stop."), "Run `a. b` now.\nThen stop.");
+  assert.equal(breakSentences("확인했습니다. `dotnet test`를 돌려 주세요."), "확인했습니다.\n`dotnet test`를 돌려 주세요.");
+  assert.equal(breakSentences("1. 제품 정보를 고칩니다.\n2. 이름을 고칩니다."), "1. 제품 정보를 고칩니다.\n2. 이름을 고칩니다.");
+  assert.equal(breakSentences("The rule gives 1. See #23. Done"), "The rule gives 1.\nSee #23.\nDone");
+  assert.equal(breakSentences("Use a flag, e.g. --force. Wait... then go."), "Use a flag, e.g. --force.\nWait... then go.");
+  // 이미 있는 줄바꿈과 끝의 마침표는 그대로 둔다.
+  assert.equal(breakSentences("첫 줄입니다.\n둘째 줄입니다. "), "첫 줄입니다.\n둘째 줄입니다. ");
 });

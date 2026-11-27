@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { type Decision, decisionTitle, fileDiffRpc, readAnswer } from "../shared/model";
+import { breakSentences } from "./sentences";
 import { formatAgo } from "./time";
 import { Chip, CodeBox, CtaButton, ErrorLine, Muted, Row, type ViewContext } from "./ui";
 
@@ -102,17 +103,17 @@ export function DecisionDetails({ decision, ctx }: { decision: Decision; ctx: Vi
     <View style={{ gap: 8 }}>
       <Row label={ctx.t("decision.what")} ctx={ctx}>
         <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.45) }}>
-          {decision.decision}
+          {breakSentences(decision.decision)}
         </Text>
       </Row>
       <Row label={ctx.t("decision.why")} ctx={ctx}>
-        {line(decision.why)}
+        {line(breakSentences(decision.why))}
       </Row>
-      {assumptions.length ? <Row label={ctx.t("decision.assumptions")} ctx={ctx}>{assumptions.map((item, index) => <View key={index}>{line(`? ${item.text}`, ctx.theme.colors.statusWarning)}</View>)}</Row> : null}
-      {verified.length ? <Row label={ctx.t("decision.verified")} ctx={ctx}>{verified.map((item, index) => <View key={index}>{line(`✓ ${item.text}`)}</View>)}</Row> : null}
+      {assumptions.length ? <Row label={ctx.t("decision.assumptions")} ctx={ctx}>{assumptions.map((item, index) => <View key={index}>{line(`? ${breakSentences(item.text)}`, ctx.theme.colors.statusWarning)}</View>)}</Row> : null}
+      {verified.length ? <Row label={ctx.t("decision.verified")} ctx={ctx}>{verified.map((item, index) => <View key={index}>{line(`✓ ${breakSentences(item.text)}`)}</View>)}</Row> : null}
       {decision.alternatives.length ? (
         <Row label={ctx.t("decision.alternatives")} ctx={ctx}>
-          {decision.alternatives.map((item, index) => <View key={index}>{line(`✗ ${item.option} — ${item.whyNot}`)}</View>)}
+          {decision.alternatives.map((item, index) => <View key={index}>{line(`✗ ${item.option} — ${breakSentences(item.whyNot)}`)}</View>)}
         </Row>
       ) : null}
       <Row label={ctx.t("decision.undoCost")} ctx={ctx}>

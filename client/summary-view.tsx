@@ -3,6 +3,7 @@ import { useMutation } from "@tanstack/react-query";
 import { Text, View } from "react-native";
 import { type Summary, summarizeRpc } from "../shared/model";
 import { useT } from "./i18n";
+import { breakSentences } from "./sentences";
 import { formatAgo } from "./time";
 import { Body, CtaButton, ErrorLine, Lines, Muted, Row, type ViewContext } from "./ui";
 
@@ -81,7 +82,7 @@ export function SummaryBlock({ summary, agentId, ctx }: { summary: Summary | nul
           <View style={{ gap: 4 }}>
             {result.watchOut.map((item, index) => (
               <Text key={index} selectable style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.body }}>
-                {`⚠ ${item}`}
+                {breakSentences(`⚠ ${item}`)}
               </Text>
             ))}
           </View>
