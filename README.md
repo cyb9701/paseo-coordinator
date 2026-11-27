@@ -41,19 +41,18 @@ Work for later goes to the follow-up list through `add_followup` instead of bein
 
 If the agent asks with a question tool such as AskUserQuestion, the question's options take the place of the answer box in the same card, and the answer is recorded on the decisions.
 
-"To review" groups the decisions agents made and kept going with, per workspace. The sidebar badge counts only what waits on you. Permission requests, questions and errors come from every agent on the host; decisions, summaries, the board and follow-ups cover the watched projects.
+"To review" groups the decisions agents made and kept going with, per workspace. The sidebar badge counts only what waits on you. Permission requests, questions and errors come from every agent on the host; decisions, summaries, pull request state and follow-ups cover the watched projects.
 
-**Workspaces.** The open workspaces of the watched projects, by project. Each row shows:
+**Progress.** A table of every agent on the host. Each row is a workspace; the columns say how much it waits on you: needs my decision, to review, working, waiting. Each cell holds agent cards with the state, the last reply and the agent's decisions waiting or to review. Rows that wait on you come first. Rows of watched projects also show, under the workspace name:
 
-- agents and their state
 - pull request state: checks, conflicts, review
 - decisions waiting and decisions to review
-- changed files that no decision covers
+- changed files that no decision covers (counted once the workspace has recorded decisions)
 - files another workspace of the same project also changed
 
-Expanding a row shows the judgment trail: what was asked, the decisions with their diffs, the changes no decision explains, and the overlaps.
+"Decisions and changes" opens the judgment trail under the row: what was asked, the decisions with their diffs, the changes no decision explains, and the overlaps. On a narrow screen each workspace becomes a card with its agents stacked.
 
-![Workspaces: two workspaces of one project that both changed src/server.js; the expanded one lists two changed files no decision covers, with a diff toggle, the overlap and earlier decisions](assets/workspaces.png)
+![Progress: two workspaces of one project as rows; an agent with three decisions waiting in Needs my decision and a finished agent in To review; the row headers show the decisions waiting, the changed files and the toggle for decisions and changes](assets/progress.png)
 
 **Follow-ups.** Work for later, from agents and from you, by project. Hand one to an agent in the same project (that closes it), mark it done or dismiss it.
 

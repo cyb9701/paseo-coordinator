@@ -12,11 +12,11 @@ The plugin decides whether a recorded decision stops the agent: scope, data shap
 ## Screens
 
 - **Inbox.** "Needs my decision" has one card per agent with stopped decisions, plus permission requests, questions and errors. A stopped-decision card shows a context summary (what led here, what you decide now, what each answer leads to, what to watch out for), each decision with its evidence, assumptions and diff, and a box for your answer or "Go ahead as proposed". "To review" groups decisions agents made and kept going with, per workspace.
-- **Workspaces.** Open workspaces of the watched projects, by project: agents and their state, pull request state (checks, conflicts, review), decisions waiting or to review, changed files no decision covers, and files also changed in another workspace. Expanding a row shows what was asked, the decisions and the changes.
+- **Progress.** A table of every agent on the host: one row per workspace, columns for needs my decision, to review, working and waiting, with agent cards in the cells. Rows of watched projects also show pull request state (checks, conflicts, review), decisions waiting or to review, changed files no decision covers, and files also changed in another workspace; "Decisions and changes" opens what was asked, the decisions and the changes.
 - **Follow-ups.** Work for later from agents and from you. Hand one to an agent in the same project (that closes it), or close it yourself.
 - **Settings.** Projects to watch, context summaries on or off with their model (default `claude/claude-haiku-5-5`) and effort, summary language, text size.
 
-The sidebar badge counts only cards that wait on you. Permission requests, questions and errors come from every agent on the host, watched project or not; decisions, summaries, the board and follow-ups cover the watched projects.
+The sidebar badge counts only cards that wait on you. Permission requests, questions and errors come from every agent on the host, watched project or not; decisions, summaries, pull request state and follow-ups cover the watched projects.
 
 ## Setup
 

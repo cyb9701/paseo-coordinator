@@ -8,12 +8,13 @@ import { FontProvider, useFonts } from "./fonts";
 import { useT } from "./i18n";
 import { InboxView } from "./inbox";
 import { PendingProvider, useClassifier, usePending } from "./pending-store";
+import { ProgressBoard } from "./progress-board";
 import { SettingsView } from "./settings-view";
 import { useNow } from "./time";
 import { CtaButton, TabBar, type ViewContext } from "./ui";
-import { WorkspacesView } from "./workspaces-view";
 
-type Tab = "inbox" | "workspaces" | "followups" | "settings";
+
+type Tab = "inbox" | "progress" | "followups" | "settings";
 
 export function CoordinatorScreen(props: PluginScreenProps) {
   return (
@@ -41,7 +42,7 @@ function ScreenBody({ theme, layout, host, navigation }: PluginScreenProps) {
   const followups = (state?.followups ?? []).filter((item) => item.status === "open").length;
   const tabs: readonly { key: Tab; label: string }[] = [
     { key: "inbox", label: blocked > 0 ? t("tabs.inboxCount", { count: blocked }) : t("tabs.inbox") },
-    { key: "workspaces", label: t("tabs.workspaces") },
+    { key: "progress", label: t("tabs.progress") },
     { key: "followups", label: followups > 0 ? t("tabs.followupsCount", { count: followups }) : t("tabs.followups") },
   ];
   // 설정은 자주 쓰지 않아서 일하는 탭과 떨어뜨려 오른쪽 끝에 둔다.
@@ -55,7 +56,7 @@ function ScreenBody({ theme, layout, host, navigation }: PluginScreenProps) {
       </View>
       <ConnectionBanner ctx={ctx} />
       {tab === "inbox" ? <InboxView ctx={ctx} /> : null}
-      {tab === "workspaces" ? <WorkspacesView ctx={ctx} /> : null}
+      {tab === "progress" ? <ProgressBoard ctx={ctx} /> : null}
       {tab === "followups" ? <FollowupsView ctx={ctx} /> : null}
       {tab === "settings" ? <SettingsView theme={theme} hostId={host.id} t={t} /> : null}
     </ScrollView>

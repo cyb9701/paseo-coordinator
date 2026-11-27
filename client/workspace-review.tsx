@@ -151,7 +151,7 @@ export function WorkspaceReview({
       ) : null}
       {extra.length ? (
         <Row label={ctx.t("review.unexplained")} ctx={ctx}>
-          <Body text={ctx.t("review.unexplainedHint", { count: extra.length })} ctx={ctx} />
+          <Body text={live.length ? ctx.t("review.unexplainedHint", { count: extra.length }) : ctx.t("review.noDecisionsHint", { count: extra.length })} ctx={ctx} />
           <Muted text={extra.slice(0, 30).join(", ")} ctx={ctx} />
           <DiffToggle workspaceId={workspaceId} files={extra.slice(0, 40)} ctx={ctx} />
         </Row>
