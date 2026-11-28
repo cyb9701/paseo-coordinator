@@ -2,6 +2,11 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {
   addRequestRpc,
   askAgentRpc,
+  coordinatorDigestRpc,
+  coordinatorSendRpc,
+  judgmentDismissRpc,
+  judgmentReplyRpc,
+  reportCloseRpc,
   dismissRequestRpc,
   agentRequestsRpc,
   answerDecisionsRpc,
@@ -16,9 +21,11 @@ import {
 import { type CoordinatorSettings, type Language, coordinatorSettings, outputLanguage } from "./shared/settings";
 import { AGENT_TOOL_NAMES, PLUGIN_MCP_PREFIX, agentInstructions, decisionTools, isPluginTool } from "./server/agent-tools";
 import { Actions, answerFromQuestion } from "./server/actions";
+import { COORDINATOR_TOOL_NAMES, CoordinatorHome, coordinatorCharter, coordinatorTools, isCoordinatorAgent, requestDigest, sendToCoordinator } from "./server/coordinator";
 import { AgentGoneError, Outbox } from "./server/outbox";
 import type { PaseoApi } from "./server/paseo-api";
 import { replayLostCalls } from "./server/replay";
+import { AutoJudge, isJudge } from "./server/judge";
 import { StateStore } from "./server/store";
 import { Summarizer, isSummarizer } from "./server/summary";
 import { mergeRuns, recentExchanges } from "./server/timeline";
@@ -46,8 +53,15 @@ export default function contribute(server: PluginServerContext) {
   const statuses = new WorkspaceStatusReader(directory);
   // 추가 요청을 보내면 그 요청을 sent 로 바꾼다. actions 는 outbox 를 받으므로 늦게 묶는다.
   const outbox: Outbox = new Outbox(store, (requestIds): Promise<void> => actions.markSent(requestIds));
-  const summarizer = new Summarizer(store, readSettings, directory, statuses);
+  const home = new CoordinatorHome(store, directory);
+  const summarizer = new Summarizer(store, readSettings, directory, statuses, home);
   const actions: Actions = new Actions(store, outbox);
+  const coordinatorDeps = { store, outbox, directory, statuses, readSettings };
+  const autoJudge = new AutoJudge(coordinatorDeps, home, () => appLanguage());
+  const boardTools = coordinatorTools(coordinatorDeps);
+  /** 코디네이터 세션인지. 라벨이 없는 hook 입력도 있어서 저장한 id 로도 본다. */
+  const isCoordinator = async (agent: { id?: string; agentId?: string; labels?: Readonly<Record<string, string>>; metadata?: Readonly<Record<string, unknown>> }) =>
+    isCoordinatorAgent(agent) || (await store.read()).coordinator.agentId === (agent.agentId ?? agent.id);
   const logFailure = (what: string) => (error: unknown) => console.error(`[coordinator] ${what} failed`, error);
 
   // 앱 언어. 서버는 모르므로 화면이 구독할 때 알려 주고, 상태 파일에 남겨 재시작 뒤에도 쓴다. 요약과 결정 기록을 사람이 읽을 언어로
@@ -82,6 +96,15 @@ export default function contribute(server: PluginServerContext) {
   });
 
   server.addHook("agent.open.before", async ({ request }, { paseo }) => {
+    // 상주 코디네이터: 판정·대답·검토 도구와 지침을 붙인다. 지침은 저장하지 않아서 고치면 다음 열기부터 적용된다.
+    if (request.purpose === "interactive" && !request.background && (await isCoordinator(request))) {
+      const values = await readSettings().catch(() => null);
+      return {
+        ...request,
+        tools: [...request.tools, ...boardTools],
+        appendSystemPrompt: [...(request.appendSystemPrompt ?? []), coordinatorCharter(values ? outputLanguage(values, await appLanguage()) : await appLanguage())],
+      };
+    }
     if (request.background || request.purpose !== "interactive" || isSummarizer(request)) return request;
     const found = await watchedWorkspace(paseo, request.workspaceId).catch((error) => {
       console.error("[coordinator] could not check the workspace of a session", error);
@@ -132,8 +155,14 @@ export default function contribute(server: PluginServerContext) {
     }
     const respond = (response: { behavior: "allow" } | { behavior: "deny"; message: string }) =>
       paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response }).catch(logFailure("answer permission"));
-    // 요약 에이전트는 받은 글만 정리한다. 어떤 도구도 쓰지 않는다.
-    if (isSummarizer(agent)) {
+    // 코디네이터는 자기 도구만 쓴다. 파일을 고치거나 명령을 돌리거나 다른 에이전트를 움직이는 일은 사람의 확인 없이 하지 않는다.
+    if (await isCoordinator(agent)) {
+      if (request.kind === "tool" && COORDINATOR_TOOL_NAMES.some((tool) => isPluginTool(request.name, tool))) await respond({ behavior: "allow" });
+      else await respond({ behavior: "deny", message: "The coordinator only uses its board tools (read_sessions, record_judgment, answer_fact, review_reports). Ask the user for anything else." });
+      return;
+    }
+    // 요약·질문 찾기 에이전트는 받은 글만 정리한다. 어떤 도구도 쓰지 않는다.
+    if (isSummarizer(agent) || isJudge(agent)) {
       await respond({ behavior: "deny", message: "You only summarize the text you were given. Answer with the JSON now." });
       return;
     }
@@ -153,6 +182,14 @@ export default function contribute(server: PluginServerContext) {
 
   server.addHook("agent.turn.after", async ({ agent, outcome }, { paseo }) => {
     if (agent.background) return;
+    // 턴이 끝났으면 대화가 바뀌었다. 코디네이터의 판정은 낡았으니 내리고, 다음 다이제스트에서 다시 판정하게 한다.
+    await store
+      .update((state) =>
+        state.judgments.some((item) => item.agentId === agent.id)
+          ? { state: { ...state, judgments: state.judgments.filter((item) => item.agentId !== agent.id) }, result: undefined }
+          : { state, result: undefined },
+      )
+      .catch(logFailure("drop stale judgment"));
     if (await hasOpenAsk(agent.id)) {
       await actions.recordAskAnswer(agent.id, await lastAgentText(paseo, agent.id)).catch(logFailure("record ask answer"));
     }
@@ -166,16 +203,26 @@ export default function contribute(server: PluginServerContext) {
     await summarizer
       .afterTurn(paseo, agent.id, found.entry.id, outcome.kind === "failed", await appLanguage(), found.values)
       .catch(logFailure("summary after turn"));
+    // 카드 없이 끝난 턴은 질문 찾기 에이전트가 읽고 판정한다. 실패한 턴은 에러 카드가, 취소한 턴은 사람이 이미 보고 있다.
+    if (outcome.kind === "completed") autoJudge.request(paseo, agent.id);
   });
 
   // 답을 기다리던 에이전트가 archive 되면 그 카드는 답할 곳이 없다. 사람의 인박스에 영영 남지 않게 내린다.
+  // 판정과 보고도 받을 곳이 없어지므로 내린다. 코디네이터 세션이 archive 되면 다음에 누를 때 새로 만든다.
   server.addHook("agent.archive.after", async ({ agent }) => {
     await store.update((state) => {
-      if (!state.decisions.some((item) => item.agentId === agent.id && item.status === "waiting")) return { state, result: undefined };
+      const waiting = state.decisions.some((item) => item.agentId === agent.id && item.status === "waiting");
+      const judged = state.judgments.some((item) => item.agentId === agent.id);
+      const reported = state.reports.some((item) => item.agentId === agent.id && !item.closed);
+      const coordinator = state.coordinator.agentId === agent.id;
+      if (!waiting && !judged && !reported && !coordinator) return { state, result: undefined };
       return {
         state: {
           ...state,
           decisions: state.decisions.map((item) => (item.agentId === agent.id && item.status === "waiting" ? { ...item, status: "dropped" as const } : item)),
+          judgments: state.judgments.filter((item) => item.agentId !== agent.id),
+          reports: state.reports.map((item) => (item.agentId === agent.id && !item.closed ? { ...item, closed: true } : item)),
+          coordinator: coordinator ? { ...state.coordinator, agentId: null } : state.coordinator,
         },
         result: undefined,
       };
@@ -191,12 +238,22 @@ export default function contribute(server: PluginServerContext) {
     await store.update((state) => {
       const open = (item: (typeof state.decisions)[number]) => item.workspaceId === workspace.id && (item.status === "waiting" || item.status === "unreviewed");
       const waiting = (item: (typeof state.requests)[number]) => item.workspaceId === workspace.id && (item.status === "queued" || item.status === "suggested");
-      if (!state.decisions.some(open) && !state.requests.some(waiting)) return { state, result: undefined };
+      const home = state.coordinator.workspaceId === workspace.id;
+      const touched =
+        state.decisions.some(open) ||
+        state.requests.some(waiting) ||
+        state.judgments.some((item) => item.workspaceId === workspace.id) ||
+        state.reports.some((item) => item.workspaceId === workspace.id && !item.closed);
+      if (!touched && !home) return { state, result: undefined };
       return {
         state: {
           ...state,
           decisions: state.decisions.map((item) => (open(item) ? { ...item, status: "dropped" as const } : item)),
           requests: state.requests.map((item) => (waiting(item) ? { ...item, status: "dismissed" as const } : item)),
+          judgments: state.judgments.filter((item) => item.workspaceId !== workspace.id),
+          reports: state.reports.map((item) => (item.workspaceId === workspace.id && !item.closed ? { ...item, closed: true } : item)),
+          // 코디네이터 워크스페이스를 사람이 archive 했으면 다음에 누를 때 새로 만든다.
+          coordinator: home ? { workspaceId: null, agentId: null } : state.coordinator,
         },
         result: undefined,
       };
@@ -250,6 +307,18 @@ export default function contribute(server: PluginServerContext) {
     const values = await readSettings();
     return { workspaces: await statuses.read(paseo, values.projectIds, input.force), at: new Date().toISOString() };
   });
+  server.handle(coordinatorDigestRpc, async (input, { paseo }) => {
+    const values = await readSettings();
+    return requestDigest(paseo, coordinatorDeps, home, outputLanguage(values, input.language));
+  });
+  server.handle(coordinatorSendRpc, async (input, { paseo }) => {
+    const values = await readSettings();
+    const agentId = await home.agent(paseo, values, outputLanguage(values, await appLanguage()));
+    return { delivery: await sendToCoordinator(paseo, outbox, agentId, input.text) };
+  });
+  server.handle(judgmentReplyRpc, (input, { paseo }) => actions.replyJudgment(paseo, input.agentId, input.text));
+  server.handle(judgmentDismissRpc, (input) => actions.dismissJudgment(input.agentId));
+  server.handle(reportCloseRpc, (input) => actions.closeReport(input.id));
   server.handle(fileDiffRpc, (input, { paseo }) => statuses.diff(paseo, input.workspaceId, input.files));
   server.handle(agentRequestsRpc, async ({ agentId }, { paseo }) => {
     const exchanges = mergeRuns(await recentExchanges(paseo, agentId, 400));

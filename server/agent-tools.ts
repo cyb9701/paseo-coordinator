@@ -1,13 +1,14 @@
 import { type AgentToolContext, defineAgentTool } from "@getpaseo/plugin/server";
 import { z } from "zod";
-import { type Decision, type DecisionInput, STOP_KINDS, type WorkRequest, decisionInputSchema } from "../shared/model";
+import { type Decision, type DecisionInput, type Report, STOP_KINDS, type WorkRequest, decisionInputSchema, reportInputSchema } from "../shared/model";
 import type { PaseoApi } from "./paseo-api";
 import { type StateStore, nextId } from "./store";
 import type { Language } from "../shared/settings";
 
 export const RECORD_DECISION_TOOL = "record_decision";
 export const ADD_FOLLOWUP_TOOL = "add_followup";
-export const AGENT_TOOL_NAMES = [RECORD_DECISION_TOOL, ADD_FOLLOWUP_TOOL];
+export const REPORT_WORK_TOOL = "report_work";
+export const AGENT_TOOL_NAMES = [RECORD_DECISION_TOOL, ADD_FOLLOWUP_TOOL, REPORT_WORK_TOOL];
 
 /** 플러그인 도구는 daemon 의 "paseo" MCP 서버로 나가서, Claude 에서는 이 접두사가 붙은 이름이 된다. */
 export const PLUGIN_MCP_PREFIX = "mcp__paseo__";
@@ -42,7 +43,7 @@ export function agentInstructions(language: Language | null): string {
  */
 export function decisionLanguageLine(language: Language | null): string {
   const target = language === "ko" ? "Korean" : language === "en" ? "English" : "the language the user writes to you in";
-  return `Write the text of ${RECORD_DECISION_TOOL} (title, decision, why, alternatives, evidence) and ${ADD_FOLLOWUP_TOOL} in ${target}; the person reads them on screen in that language. Keep code identifiers, file paths, commands and quoted output as they are.`;
+  return `Write the text of ${RECORD_DECISION_TOOL} (title, decision, why, alternatives, evidence), ${ADD_FOLLOWUP_TOOL} and ${REPORT_WORK_TOOL} in ${target}; the person reads them on screen in that language. Keep code identifiers, file paths, commands and quoted output as they are.`;
 }
 
 const AGENT_INSTRUCTIONS = `## Decision log (Coordinator plugin)
@@ -56,6 +57,8 @@ Give each decision a short title (one line, under 80 characters) that names the 
 Record a decision before you ask the user about it, even when you would ask anyway; the user reviews decisions from this log. The tool answers "continue" or "stop". On "stop", do not implement that decision. Record the other decisions you need first, then ask the user about every stopped decision together, once: with your question tool if you have one (such as AskUserQuestion), otherwise in one short message at the end of your turn. Then wait.
 
 When you notice work outside this request that should be done later, or the user mentions something for later, call ${ADD_FOLLOWUP_TOOL} instead of doing it.
+
+When you finish what the user asked, or cannot go further without them, call ${REPORT_WORK_TOOL} once before you end your turn: status "done" or "blocked", what you did or what blocks you, and the evidence (tests and commands you ran with their results, files you checked). Mark evidence "verified" only if you checked it. The coordinator compares the report with this conversation, so report only what happened.
 
 Do not merge pull requests unless the user explicitly asks for it in this conversation.`;
 
@@ -126,7 +129,20 @@ export function decisionTools(store: StateStore, context: DecisionContext) {
       return { text: "Saved as a suggestion for the user. Do not do it now; continue with your task." };
     },
   });
-  return [record, followup];
+  const report = defineAgentTool({
+    name: REPORT_WORK_TOOL,
+    title: "Report your work",
+    description:
+      "Report once when you finish the user's request or cannot go further without them: status done or blocked, a summary of what you did or what blocks you, and the evidence (verified or assumption). The coordinator checks the report against this conversation and shows it to the user.",
+    input: reportInputSchema,
+    execute: async (input, { agent, paseo }) => {
+      const where = await context.locate(agent, paseo);
+      if (!where) return { text: "Not recorded: this agent is not in a workspace the coordinator watches.", isError: true };
+      await saveReport(store, agent.id, where, input);
+      return { text: "Report saved for the user. End your turn with a short message as usual." };
+    },
+  });
+  return [record, followup, report];
 }
 
 /** 에이전트가 남긴 범위 밖의 일. 사람이 추가 요청 목록에서 보내거나 버린다. 같은 callId 를 이미 저장했으면 false. */
@@ -161,4 +177,32 @@ export function relativeTo(cwd: string, file: string): string {
   const trimmed = file.trim();
   if (trimmed.startsWith(root)) return trimmed.slice(root.length);
   return trimmed.replace(/^\.\//, "");
+}
+
+/** 작업 보고를 남긴다. callId 가 있으면 같은 호출을 이미 남겼는지 저장하는 자리에서 확인하고, 이미 있으면 null 이다. */
+export async function saveReport(
+  store: StateStore,
+  agentId: string,
+  where: Where,
+  input: z.output<typeof reportInputSchema>,
+  callId: string | null = null,
+): Promise<Report | null> {
+  const files = [...new Set(input.files.map((file) => relativeTo(where.cwd, file)))];
+  return store.update((state) => {
+    if (callId && state.reports.some((item) => item.callId === callId)) return { state, result: null };
+    const { state: next, id } = nextId(state, "w");
+    const report: Report = {
+      ...input,
+      files,
+      id,
+      agentId,
+      workspaceId: where.workspaceId,
+      projectId: where.projectId,
+      at: new Date().toISOString(),
+      review: null,
+      closed: false,
+      callId,
+    };
+    return { state: { ...next, reports: [...next.reports, report] }, result: report };
+  });
 }

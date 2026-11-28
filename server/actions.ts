@@ -161,6 +161,38 @@ export class Actions {
     return {};
   }
 
+  /**
+   * 코디네이터 판정 카드에서 사람이 쓴 답장(추천을 그대로 두거나 고친 것)을 보낸다. 사람의 말이라 그대로 보낸다.
+   * 판정은 먼저 내린다. 같은 답장이 두 번 가지 않게 하고, 보낸 뒤 대화가 바뀌어 판정이 낡기 때문이다.
+   */
+  async replyJudgment(paseo: PaseoApi, agentId: string, text: string): Promise<{ delivery: "sent" | "queued" }> {
+    await this.outbox.ensureReachable(paseo, agentId);
+    const had = await this.store.update((state) => {
+      if (!state.judgments.some((item) => item.agentId === agentId && item.kind !== "idle")) return { state, result: false };
+      return { state: { ...state, judgments: state.judgments.filter((item) => item.agentId !== agentId) }, result: true };
+    });
+    if (!had) throw new CoordinatorError("noJudgment", "This judgment is no longer open.");
+    return { delivery: await this.outbox.deliver(paseo, agentId, text) };
+  }
+
+  async dismissJudgment(agentId: string): Promise<Record<string, never>> {
+    await this.store.update((state) =>
+      state.judgments.some((item) => item.agentId === agentId)
+        ? { state: { ...state, judgments: state.judgments.filter((item) => item.agentId !== agentId) }, result: undefined }
+        : { state, result: undefined },
+    );
+    return {};
+  }
+
+  async closeReport(id: string): Promise<Record<string, never>> {
+    const closed = await this.store.update((state) => {
+      if (!state.reports.some((item) => item.id === id && !item.closed)) return { state, result: false };
+      return { state: { ...state, reports: state.reports.map((item) => (item.id === id ? { ...item, closed: true } : item)) }, result: true };
+    });
+    if (!closed) throw new CoordinatorError("reportClosed", "This report is already closed.");
+    return {};
+  }
+
   /** 답을 기다리는 질문에 에이전트의 응답을 붙인다. 에이전트가 턴을 끝내거나 다시 질문 창을 띄울 때 부른다. */
   async recordAskAnswer(agentId: string, answer: string | null): Promise<void> {
     if (!answer?.trim()) return;

@@ -25,7 +25,7 @@ import {
   requestActions,
   toolFacts,
 } from "./permissions";
-import { WorkspaceProjectChip } from "./project-chip";
+import { CardTop } from "./project-chip";
 import { SummaryBlock } from "./summary-view";
 import { breakSentences } from "./sentences";
 import { formatAgo } from "./time";
@@ -39,27 +39,18 @@ export interface CardAgent {
   since: string;
 }
 
-/** 카드 머리: 종류, 프로젝트, 워크스페이스 › 에이전트, 기다린 시간. 여러 워크스페이스의 카드가 섞여도 어디 일인지 바로 보이게 한다. */
+/** 카드 머리: 종류와 기다린 시간, 프로젝트 › 워크스페이스, 에이전트. 여러 워크스페이스의 카드가 섞여도 어디 일인지 바로 보이게 한다. */
 export function CardHead({ kind, color, agent, ctx }: { kind: string; color: string; agent: CardAgent; ctx: ViewContext }) {
-  const workspace = useWorkspace(toWorkspaceRef(agent.hostId, agent.workspaceId), (w) => w.title ?? w.name);
-  // 윗줄은 종류·프로젝트·기다린 시간, 아랫줄은 워크스페이스 › 에이전트다. 한 줄에 모두 두면 좁은 화면에서 이름이 잘리고 시간이
-  // 혼자 다음 줄로 떨어진다.
   return (
-    <View style={{ gap: 4 }}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <Chip label={kind} color={color} theme={ctx.theme} />
-        <View style={{ flexShrink: 1 }}>
-          <WorkspaceProjectChip workspaceId={agent.workspaceId} ctx={ctx} />
-        </View>
-        <View style={{ flex: 1 }} />
-        <Text numberOfLines={1} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
-          {ctx.t("time.waiting", { ago: formatAgo(agent.since, ctx.now, ctx.t) })}
-        </Text>
-      </View>
-      <Text numberOfLines={2} style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>
-        {`${workspace ?? ""} › ${agent.title}`}
-      </Text>
-    </View>
+    <CardTop
+      kind={kind}
+      color={color}
+      workspaceId={agent.workspaceId}
+      hostId={agent.hostId}
+      right={ctx.t("time.waiting", { ago: formatAgo(agent.since, ctx.now, ctx.t) })}
+      subtitle={ctx.t("card.agentLine", { name: agent.title })}
+      ctx={ctx}
+    />
   );
 }
 

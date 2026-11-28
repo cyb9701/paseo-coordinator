@@ -127,6 +127,88 @@ export const summarySchema = z.object({
 });
 export type Summary = z.output<typeof summarySchema>;
 
+/**
+ * 코디네이터가 세션 대화를 읽고 남긴 판정. 세션마다 하나다. 사람이 다이제스트를 요청할 때만 코디네이터가 만든다.
+ * question: 사람이 정하거나 답할 일이 있다. 한 문장 질문과 바로 보낼 수 있는 추천 답장(또는 부족한 정보)을 쓴다.
+ * review: 사람이 확인할 결과가 있다(일을 마쳤다는 보고, 근거를 봐야 하는 결과).
+ * idle: 사람이 할 일이 없다. 화면에는 보이지 않고, 다음 다이제스트에서 같은 대화를 다시 판정하지 않게 남긴다.
+ * evidenceId 는 판정할 때 읽은 대화의 지문이다. 대화가 바뀐 뒤에 쓴 판정은 받지 않는다.
+ */
+export const JUDGMENT_KINDS = ["question", "review", "idle"] as const;
+
+export const judgmentInputSchema = z.object({
+  kind: z.enum(JUDGMENT_KINDS),
+  /** 사람이 정할 것 한 문장. question 에만. */
+  question: text(400).nullable().default(null),
+  /** 고쳐서 바로 보낼 수 있는 완성된 답장. 근거가 있을 때만. */
+  recommendation: text(2000).nullable().default(null),
+  /** 추천 답장의 근거. 짧게. */
+  reason: text(800).nullable().default(null),
+  /** 추천할 근거가 부족하면 사람이 채워야 할 정보. */
+  needsInput: text(600).nullable().default(null),
+  /** review 에서 사람이 확인할 것. */
+  check: text(800).nullable().default(null),
+  /** 고를 수 있는 짧은 선택지. 사람이 누르면 답장 칸에 들어간다. */
+  options: z.array(text(200)).max(4).default([]),
+});
+
+export const judgmentSchema = judgmentInputSchema.extend({
+  agentId: z.string(),
+  workspaceId: z.string(),
+  projectId: z.string().nullable(),
+  evidenceId: z.string(),
+  at: z.string(),
+});
+export type Judgment = z.output<typeof judgmentSchema>;
+
+/** 코디네이터가 사람이 요청한 다이제스트 동안 에이전트의 사실 질문에 대신 답한 기록. 사람이 무엇이 오갔는지 볼 수 있게 남긴다. */
+export const factAnswerSchema = z.object({
+  id: z.string(),
+  agentId: z.string(),
+  workspaceId: z.string(),
+  answer: z.string(),
+  cycleId: z.string(),
+  at: z.string(),
+});
+export type FactAnswer = z.output<typeof factAnswerSchema>;
+
+/**
+ * 에이전트가 report_work 로 남긴 작업 보고. 일을 마쳤거나 더 갈 수 없을 때 한 번 쓴다.
+ * 코디네이터가 다이제스트에서 대화와 대조해 verified(근거 확인, 닫음) 또는 needsPerson(사람이 봐야 함)으로 검토한다.
+ * 검토하지 않았거나 needsPerson 인 보고는 사람이 확인할 때까지 인박스 '확인 필요'에 남는다.
+ */
+export const REPORT_STATUSES = ["done", "blocked"] as const;
+
+export const reportInputSchema = z.object({
+  status: z.enum(REPORT_STATUSES),
+  summary: text(1500),
+  evidence: z.array(evidenceSchema).min(1).max(10),
+  files: z.array(text(500)).max(60).default([]),
+});
+
+export const reportSchema = reportInputSchema.extend({
+  id: z.string(),
+  agentId: z.string(),
+  workspaceId: z.string(),
+  projectId: z.string().nullable(),
+  at: z.string(),
+  review: z.object({ verdict: z.enum(["verified", "needsPerson"]), note: z.string().nullable(), at: z.string() }).nullable().default(null),
+  /** 코디네이터가 verified 로 닫았거나 사람이 확인했다. */
+  closed: z.boolean().default(false),
+  callId: z.string().nullable().default(null),
+});
+export type Report = z.output<typeof reportSchema>;
+
+/** 상주 코디네이터. 워크스페이스는 요약 에이전트도 쓰므로 코디네이터 세션보다 먼저 생길 수 있다. */
+export const coordinatorSchema = z.object({
+  workspaceId: z.string().nullable().default(null),
+  agentId: z.string().nullable().default(null),
+});
+
+/** 사람이 누른 다이제스트. 사실 질문 대답은 이 주기 안에서만 받는다. 코디네이터가 스스로 에이전트에게 말을 걸지 못하게 하기 위해서다. */
+export const digestSchema = z.object({ cycleId: z.string(), at: z.string(), agentId: z.string() });
+export type Digest = z.output<typeof digestSchema>;
+
 /** requestId 가 있으면 추가 요청이다. 보내면 그 요청이 sent 가 되고, 받기 전에 취소하면 여기서 뺀다. */
 export const outboxMessageSchema = z.object({ text: z.string(), at: z.string(), requestId: z.string().nullable().default(null) });
 
@@ -144,10 +226,29 @@ export const stateSchema = z.object({
    * 다시 구독하기 전까지 언어를 몰라, 앱을 닫아 둔 동안 만든 요약이 영어가 된다.
    */
   appLanguage: z.enum(["en", "ko"]).nullable().default(null),
+  coordinator: coordinatorSchema.default({ workspaceId: null, agentId: null }),
+  judgments: z.array(judgmentSchema).default([]),
+  facts: z.array(factAnswerSchema).default([]),
+  reports: z.array(reportSchema).default([]),
+  digest: digestSchema.nullable().default(null),
 });
 export type CoordinatorState = z.output<typeof stateSchema>;
 
-export const EMPTY_STATE: CoordinatorState = { version: 1, seq: 0, decisions: [], requests: [], asks: [], summaries: [], outbox: {}, appLanguage: null };
+export const EMPTY_STATE: CoordinatorState = {
+  version: 1,
+  seq: 0,
+  decisions: [],
+  requests: [],
+  asks: [],
+  summaries: [],
+  outbox: {},
+  appLanguage: null,
+  coordinator: { workspaceId: null, agentId: null },
+  judgments: [],
+  facts: [],
+  reports: [],
+  digest: null,
+};
 
 const language = z.enum(["en", "ko"]);
 
@@ -214,6 +315,44 @@ export const sendSuggestionRpc = defineRpc({
 /** 아직 받지 않은 요청을 취소하거나 제안을 버린다. */
 export const dismissRequestRpc = defineRpc({
   name: "requests.dismiss",
+  input: z.object({ id: z.string() }),
+  output: z.object({}),
+});
+
+/**
+ * 다이제스트를 요청한다. 코디네이터가 관리 세션을 읽고 판정하고, 사실 질문에 답하고, 보고를 검토한다. 사람이 누를 때만 돈다.
+ * 코디네이터 세션이 없으면 이때 만든다. 코디네이터가 일하는 중이면 그 턴이 끝난 뒤 받는다.
+ */
+export const coordinatorDigestRpc = defineRpc({
+  name: "coordinator.digest",
+  input: z.object({ language }),
+  output: z.object({ delivery: z.enum(["sent", "queued"]) }),
+});
+
+/** 코디네이터에게 사람이 쓴 말을 보낸다. 세션이 없으면 이때 만든다. */
+export const coordinatorSendRpc = defineRpc({
+  name: "coordinator.send",
+  input: z.object({ text: z.string().trim().min(1) }),
+  output: z.object({ delivery: z.enum(["sent", "queued"]) }),
+});
+
+/** 판정 카드에서 사람이 쓴(또는 추천을 고친) 답장을 그 에이전트에게 보낸다. 보내면 판정은 내린다. */
+export const judgmentReplyRpc = defineRpc({
+  name: "judgments.reply",
+  input: z.object({ agentId: z.string(), text: z.string().trim().min(1) }),
+  output: z.object({ delivery: z.enum(["sent", "queued"]) }),
+});
+
+/** 판정 카드를 내린다. 답장 없이 확인만 했거나 판정이 틀렸을 때. */
+export const judgmentDismissRpc = defineRpc({
+  name: "judgments.dismiss",
+  input: z.object({ agentId: z.string() }),
+  output: z.object({}),
+});
+
+/** 보고를 확인했다고 닫는다. */
+export const reportCloseRpc = defineRpc({
+  name: "reports.close",
   input: z.object({ id: z.string() }),
   output: z.object({}),
 });
@@ -332,4 +471,14 @@ export function decisionTitle(decision: Pick<Decision, "title" | "decision">): s
   if (decision.title.trim()) return decision.title.trim();
   const first = decision.decision.split("\n")[0]!.trim();
   return first.length > 90 ? `${first.slice(0, 88)}…` : first;
+}
+
+/** 화면에 보일 판정. idle 은 사람이 할 일이 없어서 뺀다. */
+export function visibleJudgments(state: CoordinatorState, kind: "question" | "review"): Judgment[] {
+  return state.judgments.filter((item) => item.kind === kind);
+}
+
+/** 사람이 확인할 보고: 닫히지 않은 것. 코디네이터가 verified 로 검토한 보고는 닫혀서 빠진다. */
+export function openReports(state: CoordinatorState): Report[] {
+  return state.reports.filter((item) => !item.closed);
 }

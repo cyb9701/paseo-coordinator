@@ -93,6 +93,54 @@ function Stepper({ name, hint, value, onChange, theme, t }: { name: string; hint
   );
 }
 
+/** 모델과 추론 강도 고르기. 요약과 코디네이터가 같이 쓴다. 모델을 바꿀 때 그 모델에 없는 추론 강도는 기본값으로 돌린다. */
+function ModelPicker({
+  models,
+  value,
+  effort,
+  onChange,
+  theme,
+  t,
+}: {
+  models: readonly ModelOption[];
+  value: string;
+  effort: string | null;
+  onChange(next: { model: string; effort: string | null }): void;
+  theme: PluginTheme;
+  t: T;
+}) {
+  const fonts = useFonts();
+  const current = models.find((model) => model.value === value);
+  return (
+    <View style={{ gap: 10 }}>
+      {models.length > 0 && !current ? <Note text={t("settings.modelMissing", { model: value })} color={theme.colors.statusWarning} /> : null}
+      <Wrap>
+        {models.map((model) => (
+          <ChoiceBox
+            key={model.value}
+            label={model.label}
+            detail={model.provider}
+            selected={value === model.value}
+            onPress={() => onChange({ model: model.value, effort: effort && model.efforts.includes(effort) ? effort : null })}
+            theme={theme}
+          />
+        ))}
+      </Wrap>
+      {current && current.efforts.length > 0 ? (
+        <View style={{ gap: 6 }}>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: fonts.meta }}>{t("settings.effort")}</Text>
+          <Wrap>
+            <ChoiceBox label={t("settings.effortDefault")} selected={effort === null} onPress={() => onChange({ model: value, effort: null })} theme={theme} />
+            {current.efforts.map((option) => (
+              <ChoiceBox key={option} label={option} selected={effort === option} onPress={() => onChange({ model: value, effort: option })} theme={theme} />
+            ))}
+          </Wrap>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 function FontSizeBlock({ theme, t }: { theme: PluginTheme; t: T }) {
   const display = useSettings(displaySettings);
   const values = display.status === "ready" ? display.values : { interfaceSize: DEFAULT_INTERFACE_SIZE, contentSize: DEFAULT_CONTENT_SIZE };
@@ -148,7 +196,6 @@ export function SettingsView({ theme, hostId, t }: { theme: PluginTheme; hostId:
     setDraft((current) => (current ? patch(current) : current));
   };
   const models = catalog.data?.models ?? [];
-  const current = models.find((model) => model.value === draft.summary.model);
   const save = async () => {
     const ok = await settings.save(draft, ready.revision);
     if (ok) setSavedAt(new Date().toISOString());
@@ -179,38 +226,29 @@ export function SettingsView({ theme, hostId, t }: { theme: PluginTheme; hostId:
           <ChoiceBox label={t("settings.summaryOff")} selected={!draft.summary.enabled} onPress={() => update((value) => ({ ...value, summary: { ...value.summary, enabled: false } }))} theme={theme} />
         </Wrap>
         {catalog.isPending ? <Note text={t("settings.loadingModels")} color={theme.colors.foregroundMuted} /> : null}
-        {!catalog.isPending && models.length > 0 && !current ? <Note text={t("settings.modelMissing", { model: draft.summary.model })} color={theme.colors.statusWarning} /> : null}
         {(catalog.data?.failed ?? []).map((provider) => (
           <Note key={provider} text={t("settings.modelsFailed", { provider })} color={theme.colors.statusDanger} />
         ))}
-        <Wrap>
-          {models.map((model) => (
-            <ChoiceBox
-              key={model.value}
-              label={model.label}
-              detail={model.provider}
-              selected={draft.summary.model === model.value}
-              onPress={() =>
-                update((value) => ({
-                  ...value,
-                  summary: { ...value.summary, model: model.value, effort: value.summary.effort && model.efforts.includes(value.summary.effort) ? value.summary.effort : null },
-                }))
-              }
-              theme={theme}
-            />
-          ))}
-        </Wrap>
-        {current && current.efforts.length > 0 ? (
-          <View style={{ gap: 6 }}>
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: fonts.meta }}>{t("settings.effort")}</Text>
-            <Wrap>
-              <ChoiceBox label={t("settings.effortDefault")} selected={draft.summary.effort === null} onPress={() => update((value) => ({ ...value, summary: { ...value.summary, effort: null } }))} theme={theme} />
-              {current.efforts.map((effort) => (
-                <ChoiceBox key={effort} label={effort} selected={draft.summary.effort === effort} onPress={() => update((value) => ({ ...value, summary: { ...value.summary, effort } }))} theme={theme} />
-              ))}
-            </Wrap>
-          </View>
-        ) : null}
+        <ModelPicker
+          models={models}
+          value={draft.summary.model}
+          effort={draft.summary.effort}
+          onChange={({ model, effort }) => update((value) => ({ ...value, summary: { ...value.summary, model, effort } }))}
+          theme={theme}
+          t={t}
+        />
+      </Block>
+
+      <Block title={t("settings.coordinatorModel")} hint={t("settings.coordinatorModelHint")} theme={theme}>
+        {catalog.isPending ? <Note text={t("settings.loadingModels")} color={theme.colors.foregroundMuted} /> : null}
+        <ModelPicker
+          models={models}
+          value={draft.coordinator.model}
+          effort={draft.coordinator.effort}
+          onChange={({ model, effort }) => update((value) => ({ ...value, coordinator: { ...value.coordinator, model, effort } }))}
+          theme={theme}
+          t={t}
+        />
       </Block>
 
       <Block title={t("settings.language")} hint={t("settings.languageHint")} theme={theme}>

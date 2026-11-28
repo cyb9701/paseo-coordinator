@@ -177,7 +177,9 @@ function NewRequest({ ctx }: { ctx: ViewContext }) {
 
 /** 워크스페이스를 고르고 요청을 쓴다. 고를 목록이 길어서 '새 요청'을 눌렀을 때만 펼친다. */
 function WorkspacePickerComposer({ onClose, ctx }: { onClose(): void; ctx: ViewContext }) {
-  const workspaces = useWorkspaces({ hosts: [ctx.hostId], where: (w) => !w.background && !w.archivingAt, orderBy: ["lastPromptAt", "desc"] });
+  // 코디네이터 워크스페이스는 일을 맡는 곳이 아니라 뺀다.
+  const home = useCoordinatorState().state?.coordinator.workspaceId ?? null;
+  const workspaces = useWorkspaces({ hosts: [ctx.hostId], where: (w) => !w.background && !w.archivingAt && w.id !== home, orderBy: ["lastPromptAt", "desc"] });
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   return (
     <View style={{ gap: 8 }}>

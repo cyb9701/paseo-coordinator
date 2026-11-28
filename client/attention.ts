@@ -1,5 +1,5 @@
 import type { PluginAgentSnapshot } from "@getpaseo/plugin";
-import { type CoordinatorState, type Decision, openDecisions, unreviewedDecisions } from "../shared/model";
+import { type CoordinatorState, type Decision, type Judgment, type Report, openDecisions, openReports, unreviewedDecisions, visibleJudgments } from "../shared/model";
 import { type AgentStateKey, agentState, isVisibleAgent, needsPerson } from "./agent-state";
 import type { PermissionRequest } from "./permissions";
 
@@ -78,7 +78,9 @@ export function attentionCards(directory: PendingDirectory, agentId: string, fol
 /**
  * 사람을 기다리는 카드 수. 사이드바 배지, 인박스 탭, 인박스 머리가 같이 쓴다. 멈춘 결정은 에이전트마다 한 장, 권한 요청은 요청마다 한 장,
  * 에러는 에이전트마다 한 장이다. 멈춘 결정이 있는 에이전트의 질문 창은 그 결정 카드 안에 들어가므로 따로 세지 않는다.
- * 확인 필요(기록하고 진행한 결정)는 일이 멈춘 것이 아니라 세지 않는다. 숫자가 늘 떠 있으면 아무도 보지 않는다.
+ * 코디네이터가 '사람이 답할 일'로 판정한 세션도 한 장이다. 그 에이전트는 사람의 답을 기다리며 쉬고 있다. 다른 카드가 이미 있는 에이전트는
+ * 판정하지 않지만, 판정 뒤에 생긴 카드와 겹치면 한 번만 센다.
+ * 확인 필요(기록하고 진행한 결정, 확인할 결과, 보고)는 일이 멈춘 것이 아니라 세지 않는다. 숫자가 늘 떠 있으면 아무도 보지 않는다.
  */
 export function reactionCount(state: CoordinatorState | null, reactingAgentIds: readonly string[], directory: PendingDirectory): number {
   const stopped = new Set(state ? openDecisions(state).map((item) => item.agentId) : []);
@@ -89,7 +91,15 @@ export function reactionCount(state: CoordinatorState | null, reactingAgentIds: 
     if (requests.length > 0) count += requests.length;
     else if (!hidden) count += 1;
   }
+  const reacting = new Set(reactingAgentIds);
+  if (state) count += questionJudgments(state, reacting).length;
   return count;
+}
+
+/** 인박스에 그릴 질문 판정. 멈춘 결정·권한·에러 카드가 있는 에이전트는 그 카드로 답하므로 뺀다. */
+export function questionJudgments(state: CoordinatorState, reacting: ReadonlySet<string>): Judgment[] {
+  const stopped = new Set(openDecisions(state).map((item) => item.agentId));
+  return visibleJudgments(state, "question").filter((item) => !stopped.has(item.agentId) && !reacting.has(item.agentId));
 }
 
 function groupBy<T>(items: readonly T[], key: (item: T) => string): [string, T[]][] {
@@ -105,9 +115,11 @@ const oldestFirst = (a: [string, readonly { at: string }[]], b: [string, readonl
  * 오래 기다린 것이 위로 온다.
  */
 export function inboxGroups(state: CoordinatorState | null) {
-  if (!state) return { stopped: [] as [string, Decision[]][], review: [] as [string, Decision[]][] };
+  if (!state) return { stopped: [] as [string, Decision[]][], review: [] as [string, Decision[]][], checks: [] as Judgment[], reports: [] as Report[] };
   return {
     stopped: groupBy(openDecisions(state), (item) => item.agentId).sort(oldestFirst),
     review: groupBy(unreviewedDecisions(state), (item) => item.workspaceId).sort(oldestFirst),
+    checks: visibleJudgments(state, "review"),
+    reports: openReports(state),
   };
 }

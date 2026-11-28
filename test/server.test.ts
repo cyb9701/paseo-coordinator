@@ -6,9 +6,9 @@ import { mkdtemp, mkdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ANSWERED_IN_QUESTION_WINDOW, type DecisionInput, composeAnswer, readAnswer } from "../shared/model";
+import { ANSWERED_IN_QUESTION_WINDOW, type DecisionInput, composeAnswer, openReports, readAnswer } from "../shared/model";
 import { Actions, answerFromQuestion } from "../server/actions";
-import { agentInstructions, recordDecision, relativeTo, saveSuggestion, shouldStop } from "../server/agent-tools";
+import { agentInstructions, recordDecision, relativeTo, saveReport, saveSuggestion, shouldStop } from "../server/agent-tools";
 import { outputLanguage } from "../shared/settings";
 import { readError } from "../shared/errors";
 import { MESSAGE_SEPARATOR, answerMessage, describeSentMessage, askMessage, readSentMessage, redoMessage, requestMessage, revertMessage } from "../shared/messages";
@@ -17,6 +17,8 @@ import { replayLostCalls } from "../server/replay";
 import type { PaseoApi } from "../server/paseo-api";
 import { StateStore } from "../server/store";
 import { Summarizer, parseResult } from "../server/summary";
+import { CoordinatorHome, coordinatorCharter, coordinatorTools, digestPrompt, requestDigest } from "../server/coordinator";
+import { AutoJudge, parseJudgment } from "../server/judge";
 import { WorkspaceStatusReader } from "../server/workspace-status";
 import { WorkspaceDirectory } from "../server/workspaces";
 
@@ -41,6 +43,7 @@ function fakePaseo(options: { status?: Record<string, string>; workspaces?: unkn
   const sent: { agentId: string; text: string }[] = [];
   const created: { prompt?: string; config?: { modeId?: string }; cwd?: string }[] = [];
   const reused: string[] = [];
+  const workspacesCreated: unknown[] = [];
   const paseo = {
     agents: {
       ref: (agentId: string) => ({
@@ -80,9 +83,13 @@ function fakePaseo(options: { status?: Record<string, string>; workspaces?: unkn
           },
         },
       }),
+      create: async (input: unknown) => {
+        workspacesCreated.push(input);
+        return { id: `wnew${workspacesCreated.length}` };
+      },
       list: async () => ({ entries: options.workspaces ?? [], pageInfo: { hasMore: false, nextCursor: null, prevCursor: null } }) },
   };
-  return { paseo: paseo as unknown as PaseoApi, sent, created, reused };
+  return { paseo: paseo as unknown as PaseoApi, sent, created, reused, workspacesCreated };
 }
 
 const where = { workspaceId: "w1", projectId: "p1", cwd: "/repo" };
@@ -259,9 +266,9 @@ test("summary JSON is parsed even inside a code block", () => {
 test("one summary covers the stopped decisions of a turn; nothing new means no second summary", async () => {
   const store = await tempStore();
   const { paseo, created } = fakePaseo();
-  const settings = async () => ({ projectIds: ["p1"], summary: { enabled: true, model: "claude/claude-haiku-5-5", effort: null }, outputLanguage: "auto" as const });
+  const settings = async () => ({ projectIds: ["p1"], summary: { enabled: true, model: "claude/claude-haiku-5-5", effort: null }, coordinator: { model: "claude/claude-sonnet-5-5", effort: null }, outputLanguage: "auto" as const });
   const directory = new WorkspaceDirectory();
-  const summarizer = new Summarizer(store, settings, directory, new WorkspaceStatusReader(directory), await mkdtemp(join(tmpdir(), "coord-summary-")));
+  const summarizer = new Summarizer(store, settings, directory, new WorkspaceStatusReader(directory), new CoordinatorHome(store, directory, await mkdtemp(join(tmpdir(), "coord-home-"))));
   await recordDecision(store, "a1", where, { ...base, kind: "api" });
   await recordDecision(store, "a1", where, { ...base, kind: "data" });
   await summarizer.afterTurn(paseo, "a1", "w1", false, "ko", await settings());
@@ -340,9 +347,9 @@ test("workspace status: changed files against the base, overlaps, and no diff ou
 test("a failed turn is summarized at most once every 10 minutes per agent", async () => {
   const store = await tempStore();
   const { paseo, created } = fakePaseo();
-  const values = { projectIds: ["p1"], summary: { enabled: true, model: "claude/claude-haiku-5-5", effort: null }, outputLanguage: "auto" as const };
+  const values = { projectIds: ["p1"], summary: { enabled: true, model: "claude/claude-haiku-5-5", effort: null }, coordinator: { model: "claude/claude-sonnet-5-5", effort: null }, outputLanguage: "auto" as const };
   const directory = new WorkspaceDirectory();
-  const summarizer = new Summarizer(store, async () => values, directory, new WorkspaceStatusReader(directory), await mkdtemp(join(tmpdir(), "coord-summary-")));
+  const summarizer = new Summarizer(store, async () => values, directory, new WorkspaceStatusReader(directory), new CoordinatorHome(store, directory, await mkdtemp(join(tmpdir(), "coord-home-"))));
   await summarizer.afterTurn(paseo, "a1", "w1", true, "en", values);
   await waitFor(async () => (await store.read()).summaries[0]?.status === "done");
   await summarizer.afterTurn(paseo, "a1", "w1", true, "en", values);
@@ -460,17 +467,37 @@ test("a lost stopped decision that the person already answered is not asked agai
   assert.equal((await store.read()).decisions[0]!.status, "answered");
 });
 
-test("summaries reuse one background workspace instead of creating one each time", async () => {
+test("summaries run in the coordinator workspace instead of a project of their own", async () => {
   const store = await tempStore();
-  const home = await mkdtemp(join(tmpdir(), "coord-summary-"));
-  const { paseo, created, reused } = fakePaseo({ workspaces: [{ id: "wsum", projectId: "psum", workspaceDirectory: home, projectRootPath: home, archivingAt: null, background: true }] });
-  const values = { projectIds: ["p1"], summary: { enabled: true, model: "claude/claude-haiku-5-5", effort: null }, outputLanguage: "auto" as const };
-  const directory = new WorkspaceDirectory();
-  const summarizer = new Summarizer(store, async () => values, directory, new WorkspaceStatusReader(directory), home);
-  summarizer.request(paseo, "a1", "w1", "manual", "en");
-  await waitFor(async () => (await store.read()).summaries[0]?.status === "done");
-  assert.deepEqual(reused, ["wsum"]);
-  assert.equal(created[0]!.cwd, undefined);
+  const folder = await mkdtemp(join(tmpdir(), "coord-home-"));
+  const values = { projectIds: ["p1"], summary: { enabled: true, model: "claude/claude-haiku-5-5", effort: null }, coordinator: { model: "claude/claude-sonnet-5-5", effort: null }, outputLanguage: "auto" as const };
+  // 지난 버전이 같은 폴더로 만든 워크스페이스가 있으면 그것을 쓴다.
+  {
+    const { paseo, created, reused, workspacesCreated } = fakePaseo({ workspaces: [{ id: "wold", projectId: "pc", workspaceDirectory: folder, projectRootPath: folder, archivingAt: null }] });
+    const directory = new WorkspaceDirectory();
+    const summarizer = new Summarizer(store, async () => values, directory, new WorkspaceStatusReader(directory), new CoordinatorHome(store, directory, folder));
+    summarizer.request(paseo, "a1", "w1", "manual", "en");
+    await waitFor(async () => (await store.read()).summaries[0]?.status === "done");
+    assert.deepEqual(reused, ["wold"]);
+    assert.equal(workspacesCreated.length, 0);
+    assert.equal((created[0] as { background?: boolean }).background, true);
+    assert.equal((await store.read()).coordinator.workspaceId, "wold");
+  }
+  // 없으면 코디네이터 워크스페이스를 한 번 만들고 그다음부터는 그것을 쓴다.
+  {
+    const fresh = await tempStore();
+    const { paseo, reused, workspacesCreated } = fakePaseo({ workspaces: [{ id: "wnew1", projectId: "pc", workspaceDirectory: folder, projectRootPath: folder, archivingAt: null }] });
+    const directory = new WorkspaceDirectory();
+    const home = new CoordinatorHome(fresh, directory, join(folder, "other"));
+    const summarizer = new Summarizer(fresh, async () => values, directory, new WorkspaceStatusReader(directory), home);
+    summarizer.request(paseo, "a1", "w1", "manual", "en");
+    await waitFor(async () => (await fresh.read()).summaries[0]?.status === "done");
+    summarizer.request(paseo, "a2", "w1", "manual", "en");
+    await waitFor(async () => (await fresh.read()).summaries[1]?.status === "done");
+    assert.equal(workspacesCreated.length, 1);
+    assert.deepEqual((workspacesCreated[0] as { source: unknown }).source, { kind: "directory", path: join(folder, "other") });
+    assert.deepEqual(reused, ["wnew1", "wnew1"]);
+  }
 });
 
 test("agent instructions name the language decisions are written in", () => {
@@ -613,4 +640,282 @@ test("plugin messages read back even when the person's words look like the messa
   assert.deepEqual(readSentMessage(revertMessage(decisions, "줄 하나\n줄 둘")), [{ kind: "revert", numbers: [12, 120], note: "줄 하나\n줄 둘" }]);
   assert.deepEqual(readSentMessage(redoMessage(decisions, "Do it this way instead:\n다르게")), [{ kind: "redo", numbers: [12, 120], note: "Do it this way instead:\n다르게" }]);
   assert.deepEqual(readSentMessage(askMessage("여러\n줄 질문")), [{ kind: "ask", text: "여러\n줄 질문" }]);
+});
+
+/** 코디네이터 도구용 가짜 Paseo. 관리 세션 목록과 세션마다 대화가 있다. */
+function boardPaseo(agents: { id: string; workspaceId: string; status?: string; text?: string; background?: boolean }[]) {
+  const sent: { agentId: string; text: string }[] = [];
+  const timeline: Record<string, string> = Object.fromEntries(agents.map((item) => [item.id, item.text ?? "Which branch should I base this on?"]));
+  const snapshot = (item: (typeof agents)[number]) => ({
+    id: item.id,
+    title: item.id,
+    status: item.status ?? "idle",
+    workspaceId: item.workspaceId,
+    archivedAt: null,
+    pendingPermissions: [],
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    labels: {},
+    background: item.background ?? false,
+  });
+  const paseo = {
+    agents: {
+      list: async () => ({ entries: agents.map((item) => ({ agent: snapshot(item) })), pageInfo: { hasMore: false, nextCursor: null } }),
+      ref: (agentId: string) => ({
+        refresh: async () => {
+          const item = agents.find((entry) => entry.id === agentId);
+          return item ? { agent: snapshot(item) } : null;
+        },
+        send: async (text: string) => {
+          sent.push({ agentId, text });
+        },
+        timeline: {
+          refetch: async () => ({
+            entries: [
+              { item: { type: "user_message", text: "Add delete endpoints" }, timestamp: "t1" },
+              { item: { type: "assistant_message", text: timeline[agentId] ?? "" }, timestamp: "t2" },
+            ],
+          }),
+        },
+      }),
+    },
+    workspaces: {
+      list: async () => ({
+        entries: [
+          { id: "w1", projectId: "p1", projectDisplayName: "app", name: "feature", title: null, workspaceDirectory: "/repo", projectRootPath: "/repo", archivingAt: null },
+          { id: "w9", projectId: "p9", projectDisplayName: "other", name: "x", title: null, workspaceDirectory: "/other", projectRootPath: "/other", archivingAt: null },
+        ],
+        pageInfo: { hasMore: false, nextCursor: null },
+      }),
+    },
+  };
+  return { paseo: paseo as unknown as PaseoApi, sent, timeline };
+}
+
+async function boardSetup(agents: Parameters<typeof boardPaseo>[0]) {
+  const store = await tempStore();
+  await store.update((state) => ({ state: { ...state, coordinator: { workspaceId: "wc", agentId: "coord" } }, result: undefined }));
+  const fake = boardPaseo(agents);
+  const directory = new WorkspaceDirectory();
+  const values = { projectIds: ["p1"], summary: { enabled: true, model: "claude/claude-haiku-5-5", effort: null }, coordinator: { model: "claude/claude-sonnet-5-5", effort: null }, outputLanguage: "auto" as const };
+  const deps = { store, outbox: new Outbox(store), directory, statuses: new WorkspaceStatusReader(directory), readSettings: async () => values };
+  const [read, judge, fact, review] = coordinatorTools(deps);
+  const ctx = (agentId = "coord") => ({ agent: { id: agentId, workspaceId: "wc" }, paseo: fake.paseo, signal: new AbortController().signal }) as never;
+  const call = async (tool: typeof read, input: unknown, agentId?: string) => JSON.parse((await tool!.execute(input, ctx(agentId))).text ?? "null") as unknown;
+  const run = async (tool: typeof read, input: unknown, agentId?: string) => (await tool!.execute(input, ctx(agentId))).text;
+  return { store, deps, fake, read: read!, judge: judge!, fact: fact!, review: review!, call, run };
+}
+
+test("the coordinator lists only managed sessions and reads one with an evidence id", async () => {
+  const { read, call, run } = await boardSetup([
+    { id: "a1", workspaceId: "w1" },
+    { id: "a2", workspaceId: "w1", status: "running" },
+    { id: "a3", workspaceId: "w9" },
+    { id: "a4", workspaceId: "w1", background: true },
+  ]);
+  const listing = (await call(read, {})) as { agentId: string; needsJudgment: boolean }[];
+  assert.deepEqual(listing.map((item) => [item.agentId, item.needsJudgment]), [["a1", true], ["a2", false]]);
+  const one = (await call(read, { agentId: "a1" })) as { evidenceId: string; turns: unknown[] };
+  assert.equal(one.evidenceId.length, 16);
+  assert.equal(one.turns.length, 2);
+  await assert.rejects(run(read, { agentId: "a3" }), /not a managed session/);
+  // 지정이 바뀐 뒤 이전 코디네이터 세션은 읽지 못한다.
+  await assert.rejects(run(read, {}, "old-coordinator"), /no longer the coordinator/);
+});
+
+test("a judgment needs fresh evidence, an idle session and the fields of its kind", async () => {
+  const { store, read, judge, call, run, fake } = await boardSetup([{ id: "a1", workspaceId: "w1" }]);
+  const { evidenceId } = (await call(read, { agentId: "a1" })) as { evidenceId: string };
+  await assert.rejects(run(judge, { agentId: "a1", evidenceId, kind: "question", question: "Which branch?" }), /recommendation or needsInput/);
+  await assert.rejects(run(judge, { agentId: "a1", evidenceId, kind: "review" }), /needs check/);
+  await run(judge, { agentId: "a1", evidenceId, kind: "question", question: "Which branch?", recommendation: "Use main.", reason: "Repo default" });
+  assert.equal((await store.read()).judgments[0]!.recommendation, "Use main.");
+  // 대화가 바뀐 뒤에 쓴 판정은 받지 않는다.
+  fake.timeline.a1 = "Now I need the API key.";
+  await assert.rejects(run(judge, { agentId: "a1", evidenceId, kind: "idle" }), /changed since you read it/);
+  // 멈춘 결정이 있는 세션은 이미 카드가 있다.
+  const fresh = (await call(read, { agentId: "a1" })) as { evidenceId: string };
+  await recordDecision(store, "a1", where, { ...base, kind: "api" });
+  await assert.rejects(run(judge, { agentId: "a1", evidenceId: fresh.evidenceId, kind: "idle" }), /already has a card/);
+});
+
+test("factual answers go out only inside a digest the person requested, once per session", async () => {
+  const { store, read, fact, call, run, fake } = await boardSetup([{ id: "a1", workspaceId: "w1" }]);
+  const { evidenceId } = (await call(read, { agentId: "a1" })) as { evidenceId: string };
+  await assert.rejects(run(fact, { cycleId: "c1", agentId: "a1", evidenceId, answer: "main" }), /No digest/);
+  await store.update((state) => ({ state: { ...state, digest: { cycleId: "c1", at: new Date().toISOString(), agentId: "coord" } }, result: undefined }));
+  await run(fact, { cycleId: "c1", agentId: "a1", evidenceId, answer: "Base it on main." });
+  assert.equal(fake.sent.length, 1);
+  assert.equal(readSentMessage(fake.sent[0]!.text)[0]!.kind, "fact");
+  assert.equal((await store.read()).facts[0]!.answer, "Base it on main.");
+  await assert.rejects(run(fact, { cycleId: "c1", agentId: "a1", evidenceId, answer: "again" }), /already answered/);
+  // 오래된 주기로는 답하지 못한다.
+  await store.update((state) => ({ state: { ...state, digest: { cycleId: "c2", at: "2020-01-01T00:00:00.000Z", agentId: "coord" } }, result: undefined }));
+  await assert.rejects(run(fact, { cycleId: "c2", agentId: "a1", evidenceId, answer: "x" }), /No digest/);
+});
+
+test("reports: verified ones close, needsPerson ones stay for the person, and the person can close them", async () => {
+  const { store, deps, review, call, run } = await boardSetup([{ id: "a1", workspaceId: "w1" }]);
+  const evidence = [{ basis: "verified" as const, text: "npm test passed" }];
+  const r1 = await saveReport(store, "a1", where, { status: "done", summary: "Added endpoints", evidence, files: ["/repo/src/a.ts"] });
+  const r2 = await saveReport(store, "a1", where, { status: "blocked", summary: "Need API key", evidence, files: [] });
+  assert.deepEqual(r1!.files, ["src/a.ts"]);
+  assert.equal(((await call(review, {})) as unknown[]).length, 2);
+  await run(review, { reportId: r1!.id, verdict: "verified", note: "tests shown" });
+  await run(review, { reportId: r2!.id, verdict: "needsPerson", note: "blocked" });
+  const state = await store.read();
+  assert.deepEqual(openReports(state).map((item) => item.id), [r2!.id]);
+  assert.equal(((await call(review, {})) as unknown[]).length, 0);
+  await new Actions(store, deps.outbox).closeReport(r2!.id);
+  assert.equal(openReports(await store.read()).length, 0);
+});
+
+test("replying to a judgment sends the person's text as is and drops the card", async () => {
+  const { store, deps, read, judge, call, run, fake } = await boardSetup([{ id: "a1", workspaceId: "w1" }]);
+  const { evidenceId } = (await call(read, { agentId: "a1" })) as { evidenceId: string };
+  await run(judge, { agentId: "a1", evidenceId, kind: "question", question: "Which branch?", recommendation: "Use main." });
+  const actions = new Actions(store, deps.outbox);
+  await actions.replyJudgment(fake.paseo, "a1", "Use develop.");
+  assert.deepEqual(fake.sent, [{ agentId: "a1", text: "Use develop." }]);
+  assert.equal((await store.read()).judgments.length, 0);
+  await assert.rejects(actions.replyJudgment(fake.paseo, "a1", "again"), (error) => readError(error).code === "noJudgment");
+});
+
+test("the digest prompt and charter keep the coordinator to judging, answering facts and reviewing", () => {
+  assert.match(digestPrompt("c9"), /cycleId: c9/);
+  const charter = coordinatorCharter("ko");
+  assert.match(charter, /in Korean/);
+  assert.match(charter, /Never use it to approve/);
+  assert.doesNotMatch(charter, /assign_|create_agent/);
+});
+
+test("the coordinator session is created without toolPolicy, with its tools allowed for Claude", async () => {
+  const store = await tempStore();
+  const { paseo, created } = fakePaseo({ workspaces: [{ id: "wc", projectId: "pc", workspaceDirectory: "/home", projectRootPath: "/home", archivingAt: null }] });
+  const directory = new WorkspaceDirectory();
+  const home = new CoordinatorHome(store, directory, "/home");
+  const values = { projectIds: ["p1"], summary: { enabled: true, model: "claude/claude-haiku-5-5", effort: null }, coordinator: { model: "claude/claude-sonnet-5-5", effort: null }, outputLanguage: "auto" as const };
+  await store.update((state) => ({ state: { ...state, coordinator: { workspaceId: "wc", agentId: null } }, result: undefined }));
+  const fake = paseo as unknown as { workspaces: { ref: (id: string) => { agents: { create: (input: unknown) => Promise<{ id: string }> } } } };
+  const inputs: unknown[] = [];
+  fake.workspaces.ref = () => ({ agents: { create: async (input) => (inputs.push(input), { id: "coord-1" }) } });
+  assert.equal(await home.agent(paseo, values, "ko"), "coord-1");
+  const config = (inputs[0] as { config: Record<string, unknown> }).config;
+  assert.equal(config.toolPolicy, undefined);
+  assert.deepEqual((config.options as { allowedTools: string[] }).allowedTools, ["mcp__paseo__read_sessions", "mcp__paseo__record_judgment", "mcp__paseo__answer_fact", "mcp__paseo__review_reports"]);
+  assert.equal((await store.read()).coordinator.agentId, "coord-1");
+  assert.equal(created.length, 0);
+});
+
+/** 판정 에이전트를 흉내 낸다: 코디네이터 워크스페이스에 만들어지고, 정해 둔 JSON 을 돌려준다. */
+function withJudge(fake: ReturnType<typeof boardPaseo>, answer: unknown, onCreate?: () => void) {
+  const created: { background?: boolean; labels?: Record<string, string>; prompt?: string }[] = [];
+  const paseo = fake.paseo as unknown as Record<string, unknown>;
+  paseo.providers = { listModes: async () => ({ modes: [{ id: "default" }] }) };
+  const workspaces = paseo.workspaces as Record<string, unknown>;
+  workspaces.ref = () => ({
+    agents: {
+      create: async (input: (typeof created)[number]) => {
+        created.push(input);
+        onCreate?.();
+        return { waitForFinish: async () => ({ status: "idle", error: null, lastMessage: JSON.stringify(answer) }), archive: async () => ({}) };
+      },
+    },
+  });
+  return created;
+}
+
+async function judgeSetup(agents: Parameters<typeof boardPaseo>[0], answer: unknown, onCreate?: (fake: ReturnType<typeof boardPaseo>) => void) {
+  const setup = await boardSetup(agents);
+  const created = withJudge(setup.fake, answer, () => onCreate?.(setup.fake));
+  const home = new CoordinatorHome(setup.store, setup.deps.directory, "/home");
+  await setup.store.update((state) => ({ state: { ...state, coordinator: { workspaceId: "wc", agentId: "coord" } }, result: undefined }));
+  (setup.deps.directory as unknown as { find: () => Promise<unknown> }).find = async () => ({ id: "wc", archivingAt: null });
+  const judge = new AutoJudge(setup.deps, home, async () => "ko");
+  return { ...setup, created, judge };
+}
+
+test("a turn that ends with no card is judged by a one-off agent that only makes a card", async () => {
+  const answer = { kind: "question", question: "어느 브랜치에서 할까요?", recommendation: "main 에서 하세요.", reason: "기본 브랜치", needsInput: null, check: null, options: ["main", "develop"] };
+  const { store, created, judge, fake } = await judgeSetup([{ id: "a1", workspaceId: "w1" }], answer);
+  judge.request(fake.paseo, "a1");
+  await judge.idle();
+  assert.equal(created.length, 1);
+  assert.equal(created[0]!.background, true);
+  assert.equal(created[0]!.labels?.["paseo-coordinator.role"], "judge");
+  assert.match(created[0]!.prompt ?? "", /in Korean/);
+  const [judgment] = (await store.read()).judgments;
+  assert.equal(judgment!.recommendation, "main 에서 하세요.");
+  assert.deepEqual(judgment!.options, ["main", "develop"]);
+  // 판정은 에이전트에게 말을 걸지 않는다.
+  assert.equal(fake.sent.length, 0);
+});
+
+test("auto judgment skips sessions with a card and drops a judgment the conversation outran", async () => {
+  const answer = { kind: "review", question: null, recommendation: null, reason: null, needsInput: null, check: "PR 을 열어 보세요.", options: [] };
+  // 멈춘 결정이 있으면 판정 에이전트를 띄우지도 않는다.
+  {
+    const { store, created, judge, fake } = await judgeSetup([{ id: "a1", workspaceId: "w1" }], answer);
+    await recordDecision(store, "a1", where, { ...base, kind: "api" });
+    judge.request(fake.paseo, "a1");
+    await judge.idle();
+    assert.equal(created.length, 0);
+  }
+  // 판정하는 동안 대화가 바뀌면 버린다.
+  {
+    const { store, created, judge, fake } = await judgeSetup([{ id: "a1", workspaceId: "w1" }], answer, (current) => {
+      current.timeline.a1 = "다시 일하는 중입니다.";
+    });
+    judge.request(fake.paseo, "a1");
+    await judge.idle();
+    assert.equal(created.length, 1);
+    assert.equal((await store.read()).judgments.length, 0);
+  }
+});
+
+test("a judgment missing the fields of its kind is rejected", () => {
+  assert.throws(() => parseJudgment(JSON.stringify({ kind: "question", question: "x" })), /recommendation or needsInput/);
+  assert.throws(() => parseJudgment(JSON.stringify({ kind: "review" })), /needs check/);
+  assert.equal(parseJudgment("```json\n" + JSON.stringify({ kind: "idle" }) + "\n```").kind, "idle");
+});
+
+test("each digest starts a fresh coordinator session and is refused while the previous one is still working", async () => {
+  const values = { projectIds: ["p1"], summary: { enabled: true, model: "claude/claude-haiku-5-5", effort: null }, coordinator: { model: "claude/claude-sonnet-5-5", effort: null }, outputLanguage: "auto" as const };
+  const run = async (previousStatus: string) => {
+    const store = await tempStore();
+    await store.update((state) => ({ state: { ...state, coordinator: { workspaceId: "wc", agentId: "old" } }, result: undefined }));
+    const archived: string[] = [];
+    const sent: { agentId: string; text: string }[] = [];
+    let made = 0;
+    const statusOf = (id: string) => (id === "old" ? previousStatus : "idle");
+    const paseo = {
+      agents: {
+        ref: (id: string) => ({
+          refresh: async () => (archived.includes(id) ? { agent: { status: "closed", archivedAt: "now", pendingPermissions: [] } } : { agent: { status: statusOf(id), archivedAt: null, pendingPermissions: [] } }),
+          archive: async () => {
+            archived.push(id);
+            return {};
+          },
+          send: async (text: string) => {
+            sent.push({ agentId: id, text });
+          },
+        }),
+      },
+      providers: { listModes: async () => ({ modes: [] }) },
+      workspaces: {
+        ref: () => ({ agents: { create: async () => ({ id: `new${++made}` }) } }),
+        list: async () => ({ entries: [{ id: "wc", projectId: "pc", workspaceDirectory: "/home", projectRootPath: "/home", archivingAt: null }], pageInfo: { hasMore: false } }),
+      },
+    } as unknown as PaseoApi;
+    const directory = new WorkspaceDirectory();
+    const deps = { store, outbox: new Outbox(store), directory, statuses: new WorkspaceStatusReader(directory), readSettings: async () => values };
+    await requestDigest(paseo, deps, new CoordinatorHome(store, directory, "/home"), "ko");
+    return { archived, sent, state: await store.read() };
+  };
+  const idle = await run("idle");
+  assert.deepEqual(idle.archived, ["old"]);
+  assert.equal(idle.state.coordinator.agentId, "new1");
+  assert.equal(idle.state.digest?.agentId, "new1");
+  assert.equal(idle.sent[0]!.agentId, "new1");
+  // 이전 세션이 일하는 중이면 끊지도 쌓지도 않고 거절한다.
+  await assert.rejects(run("running"), (error) => readError(error).code === "coordinatorBusy");
 });

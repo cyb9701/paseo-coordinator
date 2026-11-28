@@ -1,5 +1,5 @@
-import { ANSWERED_IN_CONVERSATION, decisionInputSchema } from "../shared/model";
-import { ADD_FOLLOWUP_TOOL, RECORD_DECISION_TOOL, isPluginTool, recordDecision, saveSuggestion } from "./agent-tools";
+import { ANSWERED_IN_CONVERSATION, decisionInputSchema, reportInputSchema } from "../shared/model";
+import { ADD_FOLLOWUP_TOOL, RECORD_DECISION_TOOL, REPORT_WORK_TOOL, isPluginTool, recordDecision, saveReport, saveSuggestion } from "./agent-tools";
 import type { PaseoApi } from "./paseo-api";
 import type { StateStore } from "./store";
 import { type TimelineItem, timelineEntries } from "./timeline";
@@ -45,6 +45,10 @@ export async function replayLostCalls(
       const text = (toolInput(item) as { text?: unknown } | undefined)?.text;
       if (typeof text !== "string" || !text.trim()) continue;
       if (!(await saveSuggestion(store, agentId, where, text.trim(), item.callId))) continue;
+    } else if (isPluginTool(item.name, REPORT_WORK_TOOL)) {
+      const input = reportInputSchema.safeParse(toolInput(item));
+      if (!input.success) continue;
+      if (!(await saveReport(store, agentId, where, input.data, item.callId))) continue;
     } else continue;
     replayed += 1;
   }

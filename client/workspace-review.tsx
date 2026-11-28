@@ -71,6 +71,14 @@ function SentPartView({ part, ctx }: { part: SentPart; ctx: ViewContext }) {
       </View>
     );
   }
+  if (part.kind === "fact") {
+    return (
+      <View style={{ gap: 2 }}>
+        <Muted text={ctx.t("review.sent.fact")} ctx={ctx} />
+        {body(part.text)}
+      </View>
+    );
+  }
   return (
     <View style={{ gap: 2 }}>
       <Muted text={ctx.t(part.kind === "revert" ? "review.sent.revert" : "review.sent.redo", { numbers: numbers(part.numbers) })} ctx={ctx} />

@@ -27,6 +27,8 @@ const REDO_MARK = "\n\nDo it this way instead:\n";
 const REDO_TAIL = "\n\nChange your work accordingly. Record any new choice this needs with record_decision.";
 const REQUEST_HEAD = "An additional request from the user for this workspace:\n\n";
 const ASK_HEAD = "Before deciding, the user asks about your stopped decisions:\n";
+const FACT_HEAD = "A factual answer from the coordinator. It is information, not a decision or approval from the user:\n\n";
+const FACT_TAIL = "\n\nUse it only as information. Anything that needs the user's decision still goes to the user.";
 const ASK_TAIL = "\n\nAnswer this. Do not implement the stopped decisions yet; ask about them again when you have answered.";
 
 export function answerMessage(decisions: readonly Listed[], answer: string): string {
@@ -45,6 +47,10 @@ export function requestMessage(text: string): string {
   return `${REQUEST_HEAD}${text}`;
 }
 
+export function factMessage(answer: string): string {
+  return `${FACT_HEAD}${answer}${FACT_TAIL}`;
+}
+
 export function askMessage(text: string): string {
   return `${ASK_HEAD}${text}${ASK_TAIL}`;
 }
@@ -59,7 +65,8 @@ export type SentPart =
   | { kind: "answer"; choices: { number: number; choice: string | null }[]; note: string }
   | { kind: "revert"; numbers: number[]; note: string | null }
   | { kind: "redo"; numbers: number[]; note: string }
-  | { kind: "ask"; text: string };
+  | { kind: "ask"; text: string }
+  | { kind: "fact"; text: string };
 
 /**
  * 목록의 결정 번호. 목록 줄은 "#번호 제목: 결정 문장"이고 결정 문장은 여러 줄일 수 있다. 그 안의 줄이 "#7 "처럼 시작하면 번호로
@@ -78,6 +85,7 @@ function between(text: string, head: string, mark: string, tail: string): [strin
 
 function readPart(text: string): SentPart {
   if (text.startsWith(REQUEST_HEAD)) return { kind: "request", text: text.slice(REQUEST_HEAD.length) };
+  if (text.startsWith(FACT_HEAD) && text.endsWith(FACT_TAIL)) return { kind: "fact", text: text.slice(FACT_HEAD.length, text.length - FACT_TAIL.length) };
   if (text.startsWith(ASK_HEAD) && text.endsWith(ASK_TAIL)) return { kind: "ask", text: text.slice(ASK_HEAD.length, text.length - ASK_TAIL.length) };
   const answered = between(text, ANSWER_HEAD, ANSWER_MARK, ANSWER_TAIL);
   if (answered) {
@@ -120,6 +128,7 @@ export function describeSentMessage(text: string): string {
       if (part.kind === "text") return part.text;
       if (part.kind === "request") return `[additional request] ${part.text}`;
       if (part.kind === "ask") return `[asked before deciding] ${part.text}`;
+      if (part.kind === "fact") return `[factual answer from the coordinator] ${part.text}`;
       if (part.kind === "answer") {
         const picks = part.choices.map((item) => (item.choice ? `#${item.number} use "${item.choice}" instead of the proposal` : `#${item.number} go ahead as proposed`));
         return `[answered stopped decisions] ${picks.join("; ")}${part.note ? `. Note: ${part.note}` : ""}`;

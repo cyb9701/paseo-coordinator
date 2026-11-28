@@ -10,6 +10,9 @@ const MAX_DECISIONS = 600;
 const MAX_SUMMARIES = 300;
 const MAX_REQUESTS = 1000;
 const MAX_ASKS = 300;
+const MAX_FACTS = 300;
+const MAX_REPORTS = 500;
+const MAX_JUDGMENTS = 500;
 
 /**
  * 플러그인 데이터 폴더. Paseo 는 플러그인 전용 저장 경로를 주지 않아서 daemon 홈 아래에 만든다.
@@ -43,6 +46,9 @@ function trim(state: CoordinatorState): CoordinatorState {
     summaries: keep(state.summaries, MAX_SUMMARIES, (item) => item.status === "running" || item.decisionIds.some((id) => waiting.has(id))),
     requests: keep(state.requests, MAX_REQUESTS, (item) => item.status === "queued" || item.status === "suggested"),
     asks: keep(state.asks, MAX_ASKS, (item) => !item.answer),
+    facts: keep(state.facts, MAX_FACTS, () => false),
+    reports: keep(state.reports, MAX_REPORTS, (item) => !item.closed),
+    judgments: keep(state.judgments, MAX_JUDGMENTS, (item) => item.kind !== "idle"),
   };
 }
 

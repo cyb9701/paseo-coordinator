@@ -48,28 +48,47 @@ function OptionChip({ label, selected, onPress, ctx }: { label: string; selected
 function StoppedDecision({ decision, choice, onChoose, ctx }: { decision: Decision; choice: string | null | undefined; onChoose?: (choice: string | null) => void; ctx: ViewContext }) {
   const assumption = decision.evidence.find((item) => item.basis === "assumption");
   const proposal = breakSentences(decision.decision);
-  const assumed = assumption ? breakSentences(`⚠ ${ctx.t("stopped.assumption")} ${assumption.text}`) : null;
+  const assumed = assumption ? breakSentences(`${ctx.t("stopped.assumption")} ${assumption.text}`) : null;
+  // 결정마다 상자 하나로 묶는다. 결정이 여럿일 때 선만으로 나누면 어디까지가 한 결정인지 눈으로 따라가기 어렵다.
   return (
-    <View style={{ gap: 6, paddingTop: 10, borderTopWidth: 1, borderColor: ctx.theme.colors.border }}>
+    <View
+      style={{
+        gap: 8,
+        padding: ctx.compact ? 10 : 12,
+        borderRadius: 10,
+        borderWidth: 1,
+        borderColor: ctx.theme.colors.border,
+        backgroundColor: ctx.theme.colors.surface0,
+      }}
+    >
       {/* 번호와 종류는 윗줄, 제목은 그 아래 전체 너비다. 한 줄에 두면 좁은 화면에서 제목이 좁은 칸에 여러 줄로 접힌다. */}
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <Muted text={`#${decision.number}`} ctx={ctx} />
+        <View style={{ paddingHorizontal: 7, paddingVertical: 2, borderRadius: 6, backgroundColor: ctx.theme.colors.surface2 }}>
+          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, fontWeight: "700" }}>{`#${decision.number}`}</Text>
+        </View>
         <Chip label={ctx.t(`decisionKinds.${decision.kind}`)} color={ctx.theme.colors.statusDanger} theme={ctx.theme} />
       </View>
       <Text selectable style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.heading, fontWeight: "600", lineHeight: Math.round(ctx.fonts.heading * 1.35) }}>
         {decisionTitle(decision)}
       </Text>
-      <ExpandableText text={proposal} lines={3} ctx={ctx} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.45) }}>
-        <Text style={{ color: ctx.theme.colors.foregroundMuted }}>{`${ctx.t("stopped.proposal")} `}</Text>
-        {proposal}
-      </ExpandableText>
-      {assumed ? (
-        <ExpandableText text={assumed} lines={2} ctx={ctx} style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta, lineHeight: Math.round(ctx.fonts.meta * 1.45) }}>
-          {assumed}
+      <View style={{ gap: 2 }}>
+        <FieldLabel text={ctx.t("stopped.proposal")} ctx={ctx} />
+        <ExpandableText text={proposal} lines={3} ctx={ctx} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.5) }}>
+          {proposal}
         </ExpandableText>
+      </View>
+      {assumed ? (
+        <View style={{ flexDirection: "row", gap: 6, padding: 8, borderRadius: 8, backgroundColor: ctx.theme.colors.surface1 }}>
+          <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>⚠</Text>
+          <View style={{ flex: 1 }}>
+            <ExpandableText text={assumed} lines={2} ctx={ctx} style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta, lineHeight: Math.round(ctx.fonts.meta * 1.5) }}>
+              {assumed}
+            </ExpandableText>
+          </View>
+        </View>
       ) : null}
       {onChoose && decision.alternatives.length ? (
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, paddingTop: 2 }}>
           <OptionChip label={ctx.t("stopped.asProposed")} selected={!choice} onPress={() => onChoose(null)} ctx={ctx} />
           {decision.alternatives.map((item) => (
             <OptionChip key={item.option} label={item.option} selected={choice === item.option} onPress={() => onChoose(item.option)} ctx={ctx} />
@@ -78,6 +97,11 @@ function StoppedDecision({ decision, choice, onChoose, ctx }: { decision: Decisi
       ) : null}
     </View>
   );
+}
+
+/** 본문 칸 이름. 글 앞에 붙이면 본문과 섞여 읽혀서 위에 작게 둔다. */
+function FieldLabel({ text, ctx }: { text: string; ctx: ViewContext }) {
+  return <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta, fontWeight: "600" }}>{text}</Text>;
 }
 
 /**
@@ -110,13 +134,16 @@ export function StoppedCard({ agentId, decisions, ctx }: { agentId: string; deci
   return (
     <Card color={ctx.theme.colors.statusDanger} ctx={ctx}>
       <CardHead kind={ctx.t("kinds.decision", { count: decisions.length })} color={ctx.theme.colors.statusDanger} agent={cardAgent} ctx={ctx} />
+      {/* 지금 정할 것은 카드에서 가장 먼저 읽을 한 줄이라 띠를 둘러 결정 목록과 가른다. */}
       {covering?.status === "done" && covering.result ? (
-        <ExpandableText text={breakSentences(covering.result.ask)} lines={3} ctx={ctx} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.45) }}>
-          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontWeight: "600" }}>{`${ctx.t("summary.ask")}  `}</Text>
-          {breakSentences(covering.result.ask)}
-        </ExpandableText>
+        <View style={{ gap: 2, paddingVertical: 8, paddingHorizontal: 12, borderLeftWidth: 3, borderColor: ctx.theme.colors.statusDanger, borderRadius: 6, backgroundColor: ctx.theme.colors.surface0 }}>
+          <FieldLabel text={ctx.t("summary.ask")} ctx={ctx} />
+          <ExpandableText text={breakSentences(covering.result.ask)} lines={3} ctx={ctx} style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, lineHeight: Math.round(ctx.fonts.body * 1.5) }}>
+            {breakSentences(covering.result.ask)}
+          </ExpandableText>
+        </View>
       ) : null}
-      <View style={{ gap: 4 }}>
+      <View style={{ gap: 10 }}>
         {decisions.map((decision) => (
           <StoppedDecision
             key={decision.id}

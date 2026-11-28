@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coordinator 한 장 요약</title>
+<style>
+  :root {
+    --bg: #f7f6f3; --surface: #fff; --surface-2: #f0eee9; --text: #1f1e1c; --muted: #6b6862; --border: #e2dfd8;
+    --green: #1f7a4d; --green-soft: #e3f2ea; --red: #b4372f; --red-soft: #f8e6e4; --yellow: #9a6a12; --yellow-soft: #f7eed9;
+    --blue: #2d5f9a; --blue-soft: #e4edf8; --purple: #6b46a8; --purple-soft: #efe8f8; --gray-soft: #eceae5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161614; --surface: #1f1f1c; --surface-2: #2a2a26; --text: #ecebe7; --muted: #a19d95; --border: #34332f;
+      --green: #4fbf86; --green-soft: #1d3328; --red: #e2766d; --red-soft: #3a2220; --yellow: #d9a94a; --yellow-soft: #3a3020;
+      --blue: #7fa9de; --blue-soft: #1f2c3d; --purple: #b294e6; --purple-soft: #2c2440; --gray-soft: #2a2a26;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Noto Sans KR", sans-serif; word-break: keep-all; overflow-wrap: anywhere; }
+  main { max-width: 1040px; margin: 0 auto; padding: 36px 24px 80px; }
+  h1 { font-size: 28px; margin: 4px 0 6px; }
+  h2 { font-size: 20px; margin: 44px 0 12px; display: flex; align-items: center; gap: 10px; }
+  h2 .no { display: inline-flex; width: 26px; height: 26px; border-radius: 50%; background: var(--text); color: var(--bg); font-size: 13px; align-items: center; justify-content: center; }
+  h3 { font-size: 15px; margin: 18px 0 8px; }
+  p { margin: 6px 0; }
+  .eyebrow { color: var(--green); font-weight: 600; font-size: 13px; }
+  .lead { color: var(--muted); font-size: 16px; max-width: 760px; }
+  .muted { color: var(--muted); }
+  code { font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+  .toc { display: flex; flex-wrap: wrap; gap: 6px; margin: 18px 0 0; }
+  .toc a { color: var(--muted); text-decoration: none; font-size: 13px; border: 1px solid var(--border); border-radius: 999px; padding: 3px 11px; background: var(--surface); }
+  .toc a:hover { color: var(--text); }
+
+  /* 시스템 그림 */
+  .system { display: grid; grid-template-columns: 1fr 70px 1.25fr 70px 1fr; align-items: stretch; gap: 0; margin-top: 8px; }
+  .col { display: flex; flex-direction: column; gap: 8px; }
+  .col-title { font-size: 12px; font-weight: 700; color: var(--muted); letter-spacing: .03em; margin-bottom: 2px; }
+  .box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px; font-size: 13.5px; }
+  .box b { display: block; font-size: 14px; }
+  .box small { color: var(--muted); font-size: 12.5px; }
+  .box.worker { border-left: 4px solid var(--blue); }
+  .box.code { border-left: 4px solid var(--muted); }
+  .box.finder { border-left: 4px solid var(--purple); }
+  .box.coord { border-left: 4px solid var(--green); }
+  .box.summary { border-left: 4px solid var(--yellow); }
+  .box.react { border-left: 4px solid var(--red); }
+  .box.review { border-left: 4px solid var(--yellow); }
+  .box.person { border-left: 4px solid var(--text); }
+  .arrow { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 22px; }
+  .arrow span { writing-mode: horizontal-tb; }
+
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+  .agent { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 15px; display: flex; flex-direction: column; gap: 6px; }
+  .agent h4 { margin: 0; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .agent dl { margin: 0; display: grid; grid-template-columns: 54px 1fr; gap: 3px 8px; font-size: 13px; }
+  .agent dt { color: var(--muted); }
+  .agent dd { margin: 0; }
+  .yes { color: var(--red); font-weight: 600; }
+  .no-talk { color: var(--green); font-weight: 600; }
+
+  table { width: 100%; border-collapse: collapse; background: var(--surface); font-size: 13.5px; }
+  .tw { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; }
+  th, td { text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--border); }
+  th { background: var(--surface-2); color: var(--muted); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  .pill { display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+  .p-red { background: var(--red-soft); color: var(--red); }
+  .p-yellow { background: var(--yellow-soft); color: var(--yellow); }
+  .p-green { background: var(--green-soft); color: var(--green); }
+  .p-blue { background: var(--blue-soft); color: var(--blue); }
+  .p-purple { background: var(--purple-soft); color: var(--purple); }
+  .p-gray { background: var(--gray-soft); color: var(--muted); }
+
+  /* 흐름도 */
+  .flow { display: flex; flex-direction: column; align-items: stretch; gap: 0; }
+  .node { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; font-size: 13.5px; }
+  .node.q { border-style: dashed; background: var(--surface-2); font-weight: 600; }
+  .down { text-align: center; color: var(--muted); font-size: 16px; line-height: 20px; }
+  .split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .split .node { height: 100%; }
+  .label { font-size: 11.5px; font-weight: 700; color: var(--muted); margin-bottom: 2px; }
+  .flows { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .panel { background: var(--surface-2); border-radius: 14px; padding: 14px; }
+  .panel > h3 { margin-top: 0; }
+
+  .rules { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  .rule { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 13px 15px; }
+  .rule h4 { margin: 0 0 6px; font-size: 14.5px; }
+  .rule ul { margin: 0; padding-left: 18px; font-size: 13.5px; }
+  .rule li { margin: 2px 0; }
+  .never { background: var(--red-soft); border-radius: 12px; padding: 13px 16px; font-size: 14px; }
+  .never b { color: var(--red); }
+
+  dl.terms { display: grid; grid-template-columns: 150px 1fr; margin: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; font-size: 13.5px; }
+  dl.terms dt, dl.terms dd { margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  dl.terms dt { font-weight: 600; background: var(--surface-2); }
+  dl.terms dt:last-of-type, dl.terms dd:last-of-type { border-bottom: 0; }
+  footer { margin-top: 48px; color: var(--muted); font-size: 12.5px; }
+
+  @media (max-width: 760px) {
+    main { padding: 24px 14px 64px; }
+    h1 { font-size: 23px; }
+    .system { grid-template-columns: 1fr; }
+    .arrow { height: 30px; }
+    .arrow span { display: inline-block; transform: rotate(90deg); }
+    dl.terms { grid-template-columns: 1fr; }
+    dl.terms dt { border-bottom: 0; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">paseo-coordinator · 2026-11-28 기준 · 한 장 요약</div>
+  <h1>Coordinator 시스템 한눈에 보기</h1>
+  <p class="lead">여러 워크스페이스의 에이전트 중 <b>지금 나를 기다리는 일</b>을 인박스 한곳에 카드로 모으고, 내 답을 에이전트가 쉴 때 전합니다. 일은 사람이 시작하고, 플러그인은 지켜보고 모으고 전달만 합니다.</p>
+  <nav class="toc">
+    <a href="#system">1. 전체 구조</a><a href="#agents">2. 에이전트 종류</a><a href="#cards">3. 카드가 생기는 조건</a>
+    <a href="#flows">4. 흐름도</a><a href="#rules">5. 핵심 규칙</a><a href="#terms">6. 용어</a>
+  </nav>
+
+  <section id="system">
+    <h2><span class="no">1</span>전체 구조</h2>
+    <div class="system">
+      <div class="col">
+        <div class="col-title">일하는 쪽</div>
+        <div class="box worker"><b>워커 에이전트</b><small>지켜보는 프로젝트에서 사람이 띄운 에이전트. 도구 3개를 받음</small></div>
+        <div class="box worker"><b>그 밖의 에이전트</b><small>다른 프로젝트. 권한·질문·에러만 수집</small></div>
+      </div>
+      <div class="arrow"><span>→</span></div>
+      <div class="col">
+        <div class="col-title">카드를 만드는 쪽</div>
+        <div class="box code"><b>플러그인 코드</b><small>기계 신호 → 카드 (모델 호출 없음, 항상)</small></div>
+        <div class="box finder"><b>질문 찾기 에이전트</b><small>카드 없이 끝난 턴 → 판정 카드 (항상 켜짐)</small></div>
+        <div class="box coord"><b>코디네이터 세션</b><small>다이제스트를 누를 때만 → 판정·보고 검토·사실 대답</small></div>
+        <div class="box summary"><b>요약 에이전트</b><small>멈춘 결정·실패한 턴 → 카드에 앞뒤 상황</small></div>
+      </div>
+      <div class="arrow"><span>→</span></div>
+      <div class="col">
+        <div class="col-title">사람이 보는 쪽 (인박스)</div>
+        <div class="box react"><b>내 결정 필요</b><small>일이 멈춰 나를 기다림 · 사이드바 숫자에 셈</small></div>
+        <div class="box review"><b>확인 필요</b><small>일은 계속됨 · 나중에 몰아서 확인 · 세지 않음</small></div>
+        <div class="box person"><b>사람의 답</b><small>outbox → 에이전트가 쉴 때 메시지 하나로</small></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="agents">
+    <h2><span class="no">2</span>에이전트 종류</h2>
+    <div class="grid">
+      <div class="agent">
+        <h4><span class="dot" style="background:var(--blue)"></span>워커 에이전트</h4>
+        <dl>
+          <dt>누구</dt><dd>사람이 띄운 에이전트 (지켜보는 프로젝트)</dd>
+          <dt>도구</dt><dd><code>record_decision</code> <code>add_followup</code> <code>report_work</code></dd>
+          <dt>하는 일</dt><dd>정해지지 않은 선택 기록, 범위 밖 일 제안, 마치거나 막히면 보고</dd>
+        </dl>
+      </div>
+      <div class="agent">
+        <h4><span class="dot" style="background:var(--purple)"></span>질문 찾기 에이전트</h4>
+        <dl>
+          <dt>언제</dt><dd>카드 없이 끝난 턴마다 · 항상 켜짐</dd>
+          <dt>모델</dt><dd>코디네이터 모델 · 일회용 · 동시 2개</dd>
+          <dt>하는 일</dt><dd>그 세션 하나를 읽고 question / review / idle 판정 → 카드</dd>
+          <dt>말 걸기</dt><dd class="no-talk">안 함 (카드만)</dd>
+        </dl>
+      </div>
+      <div class="agent">
+        <h4><span class="dot" style="background:var(--green)"></span>코디네이터 세션</h4>
+        <dl>
+          <dt>언제</dt><dd>다이제스트를 누를 때마다 새로 뜸 · 이전 세션 archive</dd>
+          <dt>모델</dt><dd>코디네이터 모델 (기본 sonnet)</dd>
+          <dt>하는 일</dt><dd>보고 검토, 놓친 세션 판정, 사실 질문 대답, 사람의 질문에 답하기</dd>
+          <dt>말 걸기</dt><dd class="yes">사실 대답만 (그 다이제스트 안에서)</dd>
+        </dl>
+      </div>
+      <div class="agent">
+        <h4><span class="dot" style="background:var(--yellow)"></span>요약 에이전트</h4>
+        <dl>
+          <dt>언제</dt><dd>멈춘 결정, 실패한 턴(10분에 1번), 사람이 누를 때</dd>
+          <dt>모델</dt><dd>요약 모델 (기본 haiku) · 일회용 · 동시 2개</dd>
+          <dt>하는 일</dt><dd>여기까지 온 과정, 지금 정할 것, 답에 따라 일어날 일</dd>
+          <dt>말 걸기</dt><dd class="no-talk">안 함</dd>
+        </dl>
+      </div>
+      <div class="agent">
+        <h4><span class="dot" style="background:var(--muted)"></span>플러그인 코드</h4>
+        <dl>
+          <dt>언제</dt><dd>항상 · 모델 호출 없음</dd>
+          <dt>하는 일</dt><dd>도구·지침 붙이기, 멈춤 판정, 카드 모으기, git 으로 변경·겹침 재기, PR 상태 읽기, 답 전달</dd>
+        </dl>
+      </div>
+    </div>
+    <p class="muted" style="margin-top:10px">코디네이터 세션·질문 찾기·요약 에이전트는 모두 <code>~/.paseo/plugin-data/paseo-coordinator/coordinator</code> 워크스페이스 하나(프로젝트 <code>coordinator</code>)에서 돕니다. 질문 찾기·요약은 숨은(background) 에이전트이고 도구 없이 받은 글만 읽습니다. 코디네이터는 자기 도구 4개(<code>read_sessions</code> <code>record_judgment</code> <code>answer_fact</code> <code>review_reports</code>)만 쓸 수 있습니다.</p>
+  </section>
+
+  <section id="cards">
+    <h2><span class="no">3</span>카드가 생기는 조건</h2>
+    <div class="tw">
+    <table>
+      <thead><tr><th>카드</th><th>만드는 쪽</th><th>생기는 조건</th><th>위치</th><th>숫자</th></tr></thead>
+      <tbody>
+        <tr><td><b>권한 요청 · 질문 창</b></td><td><span class="pill p-gray">코드</span></td><td>에이전트가 권한을 묻거나 질문 창(AskUserQuestion)을 띄움. 모든 프로젝트</td><td><span class="pill p-red">내 결정 필요</span></td><td>요청마다 1</td></tr>
+        <tr><td><b>에러</b></td><td><span class="pill p-gray">코드</span></td><td>턴 실패. 모든 프로젝트</td><td><span class="pill p-red">내 결정 필요</span></td><td>에이전트마다 1</td></tr>
+        <tr><td><b>멈춘 결정</b></td><td><span class="pill p-gray">코드</span> + <span class="pill p-yellow">요약</span></td><td><code>record_decision</code> 이 멈춤 규칙에 걸림 (아래 5)</td><td><span class="pill p-red">내 결정 필요</span></td><td>에이전트마다 1</td></tr>
+        <tr><td><b>판정: question</b></td><td><span class="pill p-purple">질문 찾기</span> / <span class="pill p-green">코디네이터</span></td><td>에이전트가 말로 사람에게 묻고 턴을 끝냄 (위 카드가 없을 때)</td><td><span class="pill p-red">내 결정 필요</span></td><td>에이전트마다 1</td></tr>
+        <tr><td><b>작업 보고</b></td><td><span class="pill p-gray">코드</span> → <span class="pill p-green">코디네이터</span> 검토</td><td><code>report_work</code> 를 남김. 코디네이터가 verified 로 확인하면 닫힘</td><td><span class="pill p-yellow">확인 필요</span></td><td>안 셈</td></tr>
+        <tr><td><b>판정: review</b></td><td><span class="pill p-purple">질문 찾기</span> / <span class="pill p-green">코디네이터</span></td><td>에이전트가 끝났다고 하거나 확인할 결과를 냄</td><td><span class="pill p-yellow">확인 필요</span></td><td>안 셈</td></tr>
+        <tr><td><b>진행한 결정</b></td><td><span class="pill p-gray">코드</span></td><td><code>record_decision</code> 이 멈춤 규칙에 안 걸림</td><td><span class="pill p-yellow">확인 필요</span></td><td>안 셈</td></tr>
+        <tr><td><b>판정: idle</b></td><td><span class="pill p-purple">질문 찾기</span> / <span class="pill p-green">코디네이터</span></td><td>사람이 할 일 없음</td><td><span class="pill p-gray">안 보임</span></td><td>—</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="muted" style="margin-top:8px">우선순위: 기계 신호 카드가 있는 세션은 판정하지 않습니다. 판정은 기계 신호가 놓친 틈만 메웁니다.</p>
+  </section>
+
+  <section id="flows">
+    <h2><span class="no">4</span>흐름도</h2>
+    <div class="flows">
+      <div class="panel">
+        <h3>A. 에이전트가 선택을 만났을 때</h3>
+        <div class="flow">
+          <div class="node">워커가 <code>record_decision</code> 호출</div>
+          <div class="down">↓</div>
+          <div class="node q">멈춤 규칙에 걸리나?</div>
+          <div class="down">↓</div>
+          <div class="split">
+            <div class="node"><div class="label">예 · 멈춤</div>구현 안 하고 모아서 한 번에 질문 → 요약 → <span class="pill p-red">멈춘 결정 카드</span> → 사람 답</div>
+            <div class="node"><div class="label">아니오 · 진행</div>기록하고 계속 → <span class="pill p-yellow">진행한 결정</span> → 맞음 / 되돌리기 / 바꿔서 다시</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>B. 턴이 끝났을 때</h3>
+        <div class="flow">
+          <div class="node">지켜보는 워커의 턴 종료</div>
+          <div class="down">↓</div>
+          <div class="node q">실패한 턴?</div>
+          <div class="split"><div class="node"><div class="label">예</div><span class="pill p-red">에러 카드</span> + 요약</div><div class="node"><div class="label">아니오</div>계속 ↓</div></div>
+          <div class="down">↓</div>
+          <div class="node q">이미 카드가 있나? (권한·질문 창·멈춘 결정·열린 보고)</div>
+          <div class="split"><div class="node"><div class="label">예</div>그 카드로 답함 · 판정 안 함</div><div class="node"><div class="label">아니오</div><span class="pill p-purple">질문 찾기</span>가 대화를 읽음 ↓</div></div>
+          <div class="down">↓</div>
+          <div class="node q">판정하는 동안 대화가 그대로인가?</div>
+          <div class="split"><div class="node"><div class="label">아니오</div>결과 버림</div><div class="node"><div class="label">예</div>question · review 카드 (idle 은 숨김)</div></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>C. 다이제스트 요청</h3>
+        <div class="flow">
+          <div class="node">사람이 <code>다이제스트 요청</code></div>
+          <div class="down">↓</div>
+          <div class="node q">코디네이터가 일하는 중?</div>
+          <div class="split"><div class="node"><div class="label">예</div>버튼 막힘 <code>다이제스트 처리 중…</code></div><div class="node"><div class="label">아니오</div>이전 세션 archive, 새 세션 + 주기 id ↓</div></div>
+          <div class="down">↓</div>
+          <div class="node">① 열린 보고 검토 → verified 는 닫음, needsPerson 은 남김</div>
+          <div class="down">↓</div>
+          <div class="node">② 판정이 필요한 세션 읽기 → question / review / idle</div>
+          <div class="down">↓</div>
+          <div class="node">③ 순수 사실 질문은 직접 답함 (60분, 세션마다 1번)</div>
+          <div class="down">↓</div>
+          <div class="node">④ 요약을 세션에 남김 → <code>코디네이터 열기</code>로 읽음</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>D. 사람이 답했을 때</h3>
+        <div class="flow">
+          <div class="node">카드에서 답 / 답장 / 되돌리기 / 추가 요청</div>
+          <div class="down">↓</div>
+          <div class="node">outbox 에 넣음</div>
+          <div class="down">↓</div>
+          <div class="node q">에이전트가 쉬는 중?</div>
+          <div class="split"><div class="node"><div class="label">예</div>바로 보냄</div><div class="node"><div class="label">아니오</div>턴이 끝나면 보냄 (진행 중인 턴을 끊지 않음)</div></div>
+          <div class="down">↓</div>
+          <div class="node">카드 내려감 · 판정은 다음 턴 끝에 다시</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="rules">
+    <h2><span class="no">5</span>핵심 규칙</h2>
+    <div class="rules">
+      <div class="rule">
+        <h4>결정이 멈추는 조건 (하나라도)</h4>
+        <ul>
+          <li>종류가 범위 · 데이터 구조 · 인터페이스 · 사용자에게 보임</li>
+          <li>되돌리기 쉽지 않음 (costly · irreversible)</li>
+          <li>확인하지 않은 가정에 기댐</li>
+        </ul>
+        <p class="muted" style="font-size:13px;margin-top:6px">의존성 · 구현 방식이면서 쉽고 가정 없음 → 진행</p>
+      </div>
+      <div class="rule">
+        <h4>판정을 남길 수 있는 세션</h4>
+        <ul>
+          <li>지켜보는 프로젝트의 사람이 보는 세션</li>
+          <li>쉬는 중 (idle)</li>
+          <li>권한·질문 창·에러·멈춘 결정·열린 보고가 없음</li>
+          <li>읽은 뒤 대화가 안 바뀜 (대화 지문 비교)</li>
+        </ul>
+      </div>
+      <div class="rule">
+        <h4>사실 대답 (코디네이터만)</h4>
+        <ul>
+          <li>사람이 누른 다이제스트의 주기 id · 60분 안</li>
+          <li>그 주기에서 세션마다 한 번</li>
+          <li>어느 브랜치, 어느 파일, PR 상태 같은 사실만</li>
+          <li>"결정이 아니라 정보"라고 표시해서 보냄</li>
+        </ul>
+      </div>
+      <div class="rule">
+        <h4>카드가 내려가는 때</h4>
+        <ul>
+          <li>판정: 그 에이전트의 다음 턴이 끝남 · 답장/내리기/확인함</li>
+          <li>보고: verified 또는 사람이 확인함</li>
+          <li>에이전트·워크스페이스 archive → 관련 카드 정리</li>
+        </ul>
+      </div>
+      <div class="rule">
+        <h4>사이드바 숫자</h4>
+        <ul>
+          <li>내 결정 필요만 셈 (멈춘 결정·에러·question 은 에이전트마다 1, 권한은 요청마다 1)</li>
+          <li>확인 필요는 세지 않음</li>
+        </ul>
+      </div>
+      <div class="rule">
+        <h4>설정</h4>
+        <ul>
+          <li>지켜볼 프로젝트 (비면 아무것도 안 바꿈)</li>
+          <li>요약 켜기/끄기 · 요약 모델 (haiku)</li>
+          <li>코디네이터 모델 (sonnet, 질문 찾기도 씀)</li>
+          <li>언어 · 글자 크기</li>
+        </ul>
+      </div>
+    </div>
+    <div class="never" style="margin-top:14px"><b>하지 않는 것</b> · 일 계획·분할·작업자 배정 · 승인·선택지 고르기·완료 인정 · 질문 찾기가 에이전트에게 말 걸기 · 코디네이터를 자동으로 깨우기 · PR 머지 · 브랜치 삭제 · 사용자 워크스페이스 archive</div>
+    <p class="muted" style="margin-top:10px">판정은 모델이 하므로 틀릴 수 있습니다(안 물었는데 카드, 물었는데 놓침). 확실한 것은 기계 신호 카드입니다.</p>
+  </section>
+
+  <section id="terms">
+    <h2><span class="no">6</span>용어</h2>
+    <dl class="terms">
+      <dt>지켜보는 프로젝트</dt><dd>설정에서 고른 프로젝트. 여기 에이전트에만 도구·지침이 붙고 판정 대상이 됨</dd>
+      <dt>카드</dt><dd>인박스에 뜨는 사람의 할 일 한 장</dd>
+      <dt>기계 신호</dt><dd>권한 요청, 질문 창, 에러, <code>record_decision</code>, <code>report_work</code> 처럼 코드가 확실히 알 수 있는 것</dd>
+      <dt>멈춘 / 진행한 결정</dt><dd>사람이 정해야 해서 기다리는 결정 / 기록하고 계속한 결정</dd>
+      <dt>판정</dt><dd>질문 찾기나 코디네이터가 세션마다 남기는 결론: question(내 답 필요) · review(확인할 결과) · idle(할 일 없음)</dd>
+      <dt>추천 답장</dt><dd>question 카드에 미리 들어 있는 답장 초안. 고쳐서 보내며, 보내는 글은 사람의 말로 그대로 감</dd>
+      <dt>다이제스트</dt><dd>사람이 누르는 한 번의 점검. 보고 검토 + 놓친 세션 판정 + 사실 대답</dd>
+      <dt>주기 (cycleId)</dt><dd>다이제스트마다 새로 만드는 id. 사실 대답은 이 안에서만</dd>
+      <dt>대화 지문</dt><dd>읽은 대화로 만든 짧은 해시. 판정할 때 대화가 바뀌었으면 거절하는 데 씀</dd>
+      <dt>작업 보고</dt><dd>워커가 <code>report_work</code> 로 남기는 완료·막힘 보고</dd>
+      <dt>outbox</dt><dd>에이전트에게 보낼 메시지 대기열. 쉴 때만 내보냄</dd>
+    </dl>
+  </section>
+
+  <footer>자세한 설계는 DESIGN.md, 에이전트 규칙은 RULES.md 를 보세요.</footer>
+</main>
+</body>
+</html>

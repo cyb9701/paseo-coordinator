@@ -223,3 +223,32 @@ test("long texts break into one sentence per line", () => {
   // 이미 있는 줄바꿈과 끝의 마침표는 그대로 둔다.
   assert.equal(breakSentences("첫 줄입니다.\n둘째 줄입니다. "), "첫 줄입니다.\n둘째 줄입니다. ");
 });
+
+test("badge and inbox: coordinator questions count once per agent, reviews and reports do not", () => {
+  const judgment = (agentId: string, kind: "question" | "review" | "idle") => ({
+    agentId,
+    workspaceId: "w1",
+    projectId: "p1",
+    evidenceId: `e-${agentId}`,
+    at: "2026-01-01T00:00:00.000Z",
+    kind,
+    question: kind === "question" ? "Which branch?" : null,
+    recommendation: kind === "question" ? "main" : null,
+    reason: null,
+    needsInput: null,
+    check: kind === "review" ? "Open the PR" : null,
+    options: [],
+  });
+  const report = { id: "w1r", agentId: "a5", workspaceId: "w1", projectId: "p1", at: "t", status: "done" as const, summary: "s", evidence: [], files: [], review: null, closed: false, callId: null };
+  const state = stateWith({
+    decisions: [decision({ agentId: "a1", status: "waiting" })],
+    judgments: [judgment("a1", "question"), judgment("a2", "question"), judgment("a3", "question"), judgment("a4", "review"), judgment("a6", "idle")],
+    reports: [report, { ...report, id: "w2r", closed: true }],
+  });
+  const directory = directoryOf({ a3: { lastError: "boom" } });
+  // a1: 결정 카드 한 장(판정은 겹쳐서 빠짐), a2: 질문 판정 한 장, a3: 에러 카드 한 장(판정은 빠짐).
+  assert.equal(reactionCount(state, ["a3"], directory), 3);
+  const groups = inboxGroups(state);
+  assert.deepEqual(groups.checks.map((item) => item.agentId), ["a4"]);
+  assert.deepEqual(groups.reports.map((item) => item.id), ["w1r"]);
+});

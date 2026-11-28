@@ -1,13 +1,12 @@
 /// <reference types="node" />
 
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { z } from "zod";
 import { describeSentMessage } from "../shared/messages";
 import { type CoordinatorSettings, type Language, outputLanguage } from "../shared/settings";
 import { type CoordinatorState, type Decision, type Summary, summaryResultSchema } from "../shared/model";
 import type { PaseoApi } from "./paseo-api";
-import { type StateStore, dataDirectory, nextId } from "./store";
+import type { CoordinatorHome } from "./coordinator";
+import { type StateStore, nextId } from "./store";
 import { mergeRuns, recentExchanges } from "./timeline";
 import type { WorkspaceStatusReader } from "./workspace-status";
 import type { WorkspaceDirectory } from "./workspaces";
@@ -29,7 +28,7 @@ export function isSummarizer(source: { labels?: Readonly<Record<string, string>>
  * 요약 에이전트는 받은 글만 정리한다. 파일을 읽거나 명령을 돌리거나 다른 에이전트를 움직이면 안 되고, 그럴 필요도 없다.
  * Claude 에서는 도구를 빼고, 그래도 오는 권한 요청은 index.server.ts 의 권한 hook 이 거절한다.
  */
-const SUMMARIZER_BLOCKED_TOOLS = [
+export const SUMMARIZER_BLOCKED_TOOLS = [
   "Bash",
   "Read",
   "Write",
@@ -64,8 +63,8 @@ export class Summarizer {
     private readonly readSettings: () => Promise<CoordinatorSettings>,
     private readonly directory: WorkspaceDirectory,
     private readonly statuses: WorkspaceStatusReader,
-    /** 요약 에이전트의 작업 폴더. 테스트는 임시 폴더를 넘긴다. */
-    private readonly home = join(dataDirectory(), "summarizer"),
+    /** 요약 에이전트를 띄울 코디네이터 워크스페이스. 별도 프로젝트를 만들지 않으려고 코디네이터 세션과 같은 곳을 쓴다. */
+    private readonly home: CoordinatorHome,
   ) {}
 
   request(paseo: PaseoApi, agentId: string, workspaceId: string, trigger: Summary["trigger"], language: Language | null): void {
@@ -147,7 +146,8 @@ export class Summarizer {
     try {
       // 에이전트 생성이 응답하지 않아도 요약이 running 으로 남지 않게 전체에 시간 제한을 둔다.
       const result = await withTimeout(
-        (async () => this.ask(paseo, settings, await this.material(paseo, state, agentId, workspaceId, waiting, trigger, outputLanguage(settings, language))))(),
+        (async () =>
+          this.ask(paseo, settings, await this.material(paseo, state, agentId, workspaceId, waiting, trigger, outputLanguage(settings, language)), language))(),
         TIMEOUT_MS + 60_000,
       );
       await finish({ status: "done", result });
@@ -207,10 +207,7 @@ export class Summarizer {
     return `${SUMMARY_INSTRUCTIONS}\n\n${sections.join("\n\n")}`;
   }
 
-  private async ask(paseo: PaseoApi, settings: CoordinatorSettings, prompt: string) {
-    const home = this.home;
-    await mkdir(home, { recursive: true });
-    await writeFile(join(home, "README.md"), "# Coordinator summaries\n\nWorking folder of the coordinator's summary agents. They only read the text they are given.\n", "utf8");
+  private async ask(paseo: PaseoApi, settings: CoordinatorSettings, prompt: string, language: Language | null) {
     const model = settings.summary.model;
     const provider = model.split("/")[0]!;
     const claude = provider === "claude";
@@ -218,7 +215,10 @@ export class Summarizer {
     // 아래 도구 차단을 빠져나간 호출도 권한 hook 이 거절한다.
     const modes = (await paseo.providers.listModes(provider).catch(() => null))?.modes ?? [];
     const modeId = ["default", "plan", "read-only"].find((id) => modes.some((mode) => mode.id === id));
-    const options = {
+    // 요약 에이전트는 코디네이터 워크스페이스에 background 로 띄운다. 별도 폴더를 쓰면 Paseo 에 프로젝트가 하나 더 생긴다.
+    // 에이전트는 끝나면 archive 하고 워크스페이스는 코디네이터 세션과 함께 남는다.
+    const workspaceId = await this.home.workspace(paseo, language);
+    const agent = await paseo.workspaces.ref(workspaceId).agents.create({
       background: true,
       title: "coordinator summary",
       labels: { [ROLE_LABEL]: SUMMARIZER },
@@ -231,13 +231,7 @@ export class Summarizer {
       },
       outputSchema: z.toJSONSchema(summaryResultSchema, { io: "input" }) as Record<string, unknown>,
       prompt,
-    };
-    // 작업 폴더만 주고 만들면 요약마다 background 워크스페이스가 하나씩 생겨 쌓인다. 처음 한 번만 그렇게 만들고, 그다음부터는 그
-    // 워크스페이스에 에이전트만 더한다. 에이전트는 끝나면 archive 하고 워크스페이스는 남겨 다시 쓴다.
-    const workspace = (await this.directory.list(paseo, true).catch(() => [])).find(
-      (entry) => entry.workspaceDirectory === home && !entry.archivingAt,
-    );
-    const agent = workspace ? await paseo.workspaces.ref(workspace.id).agents.create(options) : await paseo.agents.create({ cwd: home, ...options });
+    });
     try {
       const finished = await agent.waitForFinish(TIMEOUT_MS);
       if (finished.status !== "idle") throw new Error(finished.error ?? `summary agent ended as ${finished.status}`);

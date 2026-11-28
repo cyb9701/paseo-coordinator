@@ -1,13 +1,14 @@
 import type { PluginAgentSnapshot } from "@getpaseo/plugin";
-import { useAgents, useWorkspace } from "@getpaseo/plugin/client";
-import { Text, View } from "react-native";
+import { useAgents } from "@getpaseo/plugin/client";
+import { View } from "react-native";
 import type { Decision } from "../shared/model";
-import { inboxGroups, reactionCount } from "./attention";
-import { toWorkspaceRef } from "./refs";
+import { inboxGroups, questionJudgments, reactionCount } from "./attention";
+import { CoordinatorBar, QuestionJudgmentCard, ReportCard, ReviewJudgmentCard } from "./coordinator-view";
 import { statusOf, useCoordinatorState, useWorkspaceStatuses } from "./coordinator-state";
 import { AgentAttention } from "./permission-cards";
 import { useClassifier, usePending } from "./pending-store";
-import { WorkspaceProjectChip } from "./project-chip";
+import { CardTop } from "./project-chip";
+import { formatAgo } from "./time";
 import { StoppedCard } from "./stopped-card";
 import { WorkspaceReview } from "./workspace-review";
 import { Card, Muted, SectionHeader, type ViewContext } from "./ui";
@@ -20,16 +21,18 @@ function oldestFirst(a: PluginAgentSnapshot, b: PluginAgentSnapshot): number {
 function ReviewCard({ workspaceId, decisions, ctx }: { workspaceId: string; decisions: readonly Decision[]; ctx: ViewContext }) {
   const { state } = useCoordinatorState();
   const statuses = useWorkspaceStatuses(ctx.hostId);
-  const name = useWorkspace(toWorkspaceRef(ctx.hostId, workspaceId), (w) => w.title ?? w.name);
   const all = (state?.decisions ?? []).filter((item) => item.workspaceId === workspaceId);
+  // 결정마다 에이전트가 다를 수 있어 머리에 에이전트 줄은 두지 않는다. 시간은 가장 오래 기다린 결정 기준이다.
+  const oldest = decisions.reduce((min, item) => (item.at < min ? item.at : min), decisions[0]?.at ?? new Date().toISOString());
   return (
     <Card color={ctx.theme.colors.statusWarning} ctx={ctx}>
-      <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
-        <WorkspaceProjectChip workspaceId={workspaceId} ctx={ctx} />
-        <Text style={{ color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600", flexShrink: 1 }}>{name ?? workspaceId}</Text>
-        <View style={{ flex: 1 }} />
-        <Muted text={ctx.t("inbox.reviewCount", { count: decisions.length })} ctx={ctx} />
-      </View>
+      <CardTop
+        kind={ctx.t("inbox.reviewCount", { count: decisions.length })}
+        color={ctx.theme.colors.statusWarning}
+        workspaceId={workspaceId}
+        right={formatAgo(oldest, ctx.now, ctx.t)}
+        ctx={ctx}
+      />
       <WorkspaceReview workspaceId={workspaceId} decisions={all} status={statusOf(statuses.data?.workspaces, workspaceId)} ctx={ctx} />
     </Card>
   );
@@ -44,12 +47,15 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
   const directory = usePending();
   const reacting = useAgents({ hosts: [ctx.hostId], where: (agent) => classify.needsMyDecision(agent), orderBy: oldestFirst });
   const { state } = useCoordinatorState();
-  const { stopped, review } = inboxGroups(state);
+  const { stopped, review, checks, reports } = inboxGroups(state);
   const stoppedAgents = new Set(stopped.map(([agentId]) => agentId));
-  const reactCount = reactionCount(state, reacting.map((ref) => ref.id), directory);
-  const reviewCount = review.reduce((total, [, items]) => total + items.length, 0);
+  const reactingIds = reacting.map((ref) => ref.id);
+  const reactCount = reactionCount(state, reactingIds, directory);
+  const questions = state ? questionJudgments(state, new Set(reactingIds)) : [];
+  const reviewCount = review.reduce((total, [, items]) => total + items.length, 0) + checks.length + reports.length;
   return (
     <View style={{ gap: 20, maxWidth: 880 }}>
+      <CoordinatorBar ctx={ctx} />
       <View style={{ gap: 10 }}>
         <SectionHeader title={ctx.t("inbox.react")} count={reactCount} hint={ctx.t("inbox.reactHint")} color={ctx.theme.colors.statusDanger} ctx={ctx} />
         {reactCount === 0 ? <Muted text={ctx.t("inbox.nothingBlocked")} ctx={ctx} /> : null}
@@ -59,10 +65,19 @@ export function InboxView({ ctx }: { ctx: ViewContext }) {
         {reacting.map((ref) => (
           <AgentAttention key={ref.key} agentRef={ref} folded={stoppedAgents.has(ref.id)} ctx={ctx} />
         ))}
+        {questions.map((judgment) => (
+          <QuestionJudgmentCard key={`${judgment.agentId}:${judgment.evidenceId}`} judgment={judgment} ctx={ctx} />
+        ))}
       </View>
       <View style={{ gap: 10 }}>
         <SectionHeader title={ctx.t("inbox.review")} count={reviewCount} hint={ctx.t("inbox.reviewHint")} color={ctx.theme.colors.statusWarning} ctx={ctx} />
         {reviewCount === 0 ? <Muted text={ctx.t("inbox.nothingToReview")} ctx={ctx} /> : null}
+        {reports.map((report) => (
+          <ReportCard key={report.id} report={report} ctx={ctx} />
+        ))}
+        {checks.map((judgment) => (
+          <ReviewJudgmentCard key={`${judgment.agentId}:${judgment.evidenceId}`} judgment={judgment} ctx={ctx} />
+        ))}
         {review.map(([workspaceId, decisions]) => (
           <ReviewCard key={workspaceId} workspaceId={workspaceId} decisions={decisions} ctx={ctx} />
         ))}
