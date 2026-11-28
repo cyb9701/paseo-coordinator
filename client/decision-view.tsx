@@ -143,31 +143,59 @@ export function DecisionDetails({ decision, ctx }: { decision: Decision; ctx: Vi
 /**
  * 결정 한 줄. 상태, 종류, 제목, 가정 표시, 파일 수, 시간만 보인다. 여러 결정을 훑어보다가 이상한 것만 펼쳐 근거와 diff 를 본다.
  * actions 는 줄 오른쪽 버튼(맞음, 되돌리기, 바꿔서 다시)이다. 줄을 누르면 근거가 펼쳐진다.
+ * 좁은 화면에서는 칩과 시간을 윗줄에, 제목을 그 아래 전체 너비로, 버튼을 다음 줄에 둔다.
+ * 한 행에 두면 버튼 셋이 폭을 다 차지해 제목 칸이 0 으로 줄고, 줄지 않는 칩과 제목이 버튼 밑으로 넘쳐 겹치기 때문이다.
  */
 export function DecisionRow({ decision, ctx, actions, showStatus = true }: { decision: Decision; ctx: ViewContext; actions?: ReactNode; showStatus?: boolean }) {
   const [open, setOpen] = useState(false);
   const assumed = decision.restsOnAssumption || decision.evidence.some((item) => item.basis === "assumption");
+  const title = (
+    <Text numberOfLines={open ? undefined : ctx.compact ? 2 : 1} style={{ flex: ctx.compact ? undefined : 1, minWidth: 0, color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600" }}>
+      {decisionTitle(decision)}
+    </Text>
+  );
+  const chips = (
+    <>
+      <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{open ? "▾" : "▸"}</Text>
+      {showStatus ? <Chip label={ctx.t(`decisionStatus.${decision.status}`)} color={statusColor(decision.status, ctx)} theme={ctx.theme} /> : null}
+      <Chip label={ctx.t(`decisionKinds.${decision.kind}`)} color={kindColor(decision, ctx)} theme={ctx.theme} />
+    </>
+  );
+  const meta = (
+    <>
+      {assumed ? <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>{ctx.t("decision.assumedShort")}</Text> : null}
+      {decision.files.length ? <Muted text={ctx.t("decision.fileCount", { count: decision.files.length })} ctx={ctx} /> : null}
+      <Muted text={formatAgo(decision.at, ctx.now, ctx.t)} ctx={ctx} />
+    </>
+  );
+  const pressProps = {
+    accessibilityRole: "button" as const,
+    accessibilityLabel: `${decisionTitle(decision)} ${open ? ctx.t("card.collapse") : ctx.t("card.expand")}`,
+    onPress: () => setOpen((value) => !value),
+  };
   return (
     <View style={{ borderTopWidth: 1, borderColor: ctx.theme.colors.border, paddingVertical: 8, gap: 8 }}>
-      <View style={{ flexDirection: "row", flexWrap: ctx.compact ? "wrap" : "nowrap", alignItems: "center", gap: 8 }}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`${decisionTitle(decision)} ${open ? ctx.t("card.collapse") : ctx.t("card.expand")}`}
-          onPress={() => setOpen((value) => !value)}
-          style={{ flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 8 }}
-        >
-          <Text style={{ color: ctx.theme.colors.foregroundMuted, fontSize: ctx.fonts.meta }}>{open ? "▾" : "▸"}</Text>
-          {showStatus ? <Chip label={ctx.t(`decisionStatus.${decision.status}`)} color={statusColor(decision.status, ctx)} theme={ctx.theme} /> : null}
-          <Chip label={ctx.t(`decisionKinds.${decision.kind}`)} color={kindColor(decision, ctx)} theme={ctx.theme} />
-          <Text numberOfLines={open ? undefined : 1} style={{ flex: 1, minWidth: 0, color: ctx.theme.colors.foreground, fontSize: ctx.fonts.body, fontWeight: "600" }}>
-            {decisionTitle(decision)}
-          </Text>
-          {assumed ? <Text style={{ color: ctx.theme.colors.statusWarning, fontSize: ctx.fonts.meta }}>{ctx.t("decision.assumedShort")}</Text> : null}
-          {decision.files.length ? <Muted text={ctx.t("decision.fileCount", { count: decision.files.length })} ctx={ctx} /> : null}
-          <Muted text={formatAgo(decision.at, ctx.now, ctx.t)} ctx={ctx} />
-        </Pressable>
-        {actions}
-      </View>
+      {ctx.compact ? (
+        <View style={{ gap: 8 }}>
+          <Pressable {...pressProps} style={{ gap: 4 }}>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+              {chips}
+              {meta}
+            </View>
+            {title}
+          </Pressable>
+          {actions}
+        </View>
+      ) : (
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <Pressable {...pressProps} style={{ flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 8 }}>
+            {chips}
+            {title}
+            {meta}
+          </Pressable>
+          {actions}
+        </View>
+      )}
       {open ? (
         <View style={{ paddingLeft: ctx.compact ? 0 : 20 }}>
           <DecisionDetails decision={decision} ctx={ctx} />

@@ -193,7 +193,7 @@ export function WorkspaceReview({
       {waiting.length ? <Muted text={ctx.t("review.waitingInInbox", { count: waiting.length })} ctx={ctx} /> : null}
       {unreviewed.length ? (
         <View>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingBottom: 6 }}>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8, paddingBottom: 6 }}>
             {sectionTitle(ctx.t("review.unreviewed", { count: unreviewed.length }), ctx.theme.colors.statusWarning)}
             <View style={{ flex: 1 }} />
             {unreviewed.length > 1 ? <ReviewActions decisions={unreviewed} ctx={ctx} /> : null}

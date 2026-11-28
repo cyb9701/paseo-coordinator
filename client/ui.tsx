@@ -88,8 +88,9 @@ export function TabBar<Key extends string>({
   theme: PluginTheme;
 }) {
   const fonts = useFonts();
+  // 탭은 줄지 않는 박스라, 인터페이스 글자를 키우면(약 20 이상) 휴대폰 폭을 넘어 오른쪽 탭이 화면 밖으로 잘린다. 넘치면 다음 줄로 보낸다.
   return (
-    <View accessibilityRole="tablist" style={{ flexDirection: "row", gap: 6 }}>
+    <View accessibilityRole="tablist" style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
       {tabs.map((tab) => {
         const selected = tab.key === active;
         return (
@@ -314,7 +315,8 @@ export function CodeBox({ text, ctx, maxHeight }: { text: string; ctx: ViewConte
   );
   return (
     <View style={{ padding: 10, borderRadius: 6, borderWidth: 1, borderColor: ctx.theme.colors.border, backgroundColor: ctx.theme.colors.surface0 }}>
-      {maxHeight ? <ScrollView style={{ maxHeight }}>{body}</ScrollView> : body}
+      {/* 화면 전체가 ScrollView 라 안쪽 상자는 중첩 스크롤이다. Android 는 nestedScrollEnabled 가 없으면 안쪽이 스크롤되지 않아 maxHeight 아래 diff·계획을 볼 수 없다. */}
+      {maxHeight ? <ScrollView nestedScrollEnabled style={{ maxHeight }}>{body}</ScrollView> : body}
     </View>
   );
 }
